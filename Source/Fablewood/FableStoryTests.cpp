@@ -73,7 +73,7 @@ bool FFableStoryMigrationTest::RunTest(const FString& Parameters)
         TArray<FString> StashBefore; for(const FFableItem& Item:Profile->StashItems) StashBefore.Add(FableRPG::ItemPersistentSignature(Item));
         if(!TestTrue(FString::Printf(TEXT("Historical version %d history %d migrates"),Version,History),Profile->MigrateAndValidate())) continue;
         const int32 ExpectedChapter=History==0?0:History+2;
-        TestEqual(TEXT("Migration reaches version 8"),Profile->Version,8);
+        TestEqual(TEXT("Migration reaches version 9"),Profile->Version,9);
         TestEqual(TEXT("Only existing completed chapters are skipped"),Profile->StoryChapter,ExpectedChapter);
         TestEqual(TEXT("Only prerequisite object bits are filled"),Profile->StoryObjectMask,ExpectedChapter>=4?31:ExpectedChapter>=3?15:0);
         TestEqual(TEXT("Only completed moon history skips seals"),Profile->StorySealMask,ExpectedChapter==5?7:0);
@@ -99,7 +99,7 @@ bool FFableStoryMigrationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Repeated active quests retain completed story history"),Repeat->MigrateAndValidate() && Repeat->StoryChapter==5);
     const auto Reject=[&](const TCHAR* Label,TFunctionRef<void(UFableSaveGame*)> Corrupt)
     { UFableSaveGame* Profile=StoryProfile(); Corrupt(Profile); TestFalse(Label,Profile->MigrateAndValidate()); };
-    Reject(TEXT("Unknown version 9 is preserved and rejected"),[](UFableSaveGame* P){P->Version=9;});
+    Reject(TEXT("Unknown version 10 is preserved and rejected"),[](UFableSaveGame* P){P->Version=10;});
     Reject(TEXT("Negative chapter rejected"),[](UFableSaveGame* P){P->StoryChapter=-1;});
     Reject(TEXT("Chapter beyond the final receipt rejected"),[](UFableSaveGame* P){P->StoryChapter=6;});
     Reject(TEXT("Unknown object bits rejected"),[](UFableSaveGame* P){P->StoryChapter=1;P->StoryObjectMask=32;});

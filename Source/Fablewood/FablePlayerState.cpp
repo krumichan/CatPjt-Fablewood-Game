@@ -65,11 +65,11 @@ void AFablePlayerState::InitializeStarterItems()
     for (int32 I = 0; I < 3; ++I)
     {
         FFableItem Item;
-        Item.Id = I + 1; Item.HeroClass = static_cast<EFableClass>(I);
+        Item.Id = I + 1; Item.InstanceId = FGuid::NewGuid(); Item.HeroClass = static_cast<EFableClass>(I);
         Item.DurabilityVersion=1; Item.MaxDurability=FableRPG::GradeMaxDurability(Item.Rarity); Item.Durability=Item.MaxDurability;
         Inventory.Add(Item);
     }
-    FFableItem Armor; Armor.Id = 4; Armor.Slot = EFableEquipmentSlot::Armor; Armor.Power = 0;
+    FFableItem Armor; Armor.Id = 4; Armor.InstanceId = FGuid::NewGuid(); Armor.Slot = EFableEquipmentSlot::Armor; Armor.Power = 0;
     Armor.DurabilityVersion=1; Armor.MaxDurability=FableRPG::GradeMaxDurability(Armor.Rarity); Armor.Durability=Armor.MaxDurability;
     Inventory.Add(Armor);
     NextItemId = 5;
@@ -540,6 +540,7 @@ void AFablePlayerState::BuyShopItem(EFableShopOffer Offer)
         FRandomStream Random(FMath::Rand());
         if (!FableRPG::RollItem(Item,Item.Slot == EFableEquipmentSlot::Armor ? 6 : 30,EFableDifficulty::Normal,Random))
         { SetNotice(TEXT("장비를 생성할 수 없어 구매를 취소했습니다. 골드는 사용하지 않았습니다.")); return; }
+        Item.InstanceId = FGuid::NewGuid();
         ++NextItemId;
         Inventory.Add(Item);
     }
@@ -620,6 +621,7 @@ FFableItem AFablePlayerState::RollItem(EFableEquipmentSlot Slot, EFableClass Ite
     FFableItem Item; Item.Id=NextItemId; Item.Slot=Slot; Item.HeroClass=ItemClass; Item.Rarity=Rarity; Item.SetId=SetId;
     FRandomStream Random(FMath::Rand());
     if (!FableRPG::RollItem(Item,NominalPower,Difficulty,Random)) Item.Id=0;
+    else Item.InstanceId=FGuid::NewGuid();
     return Item;
 }
 bool AFablePlayerState::AddItem(EFableEquipmentSlot Slot, EFableClass ItemClass, int32 Rarity, int32 NominalPower,
@@ -1083,7 +1085,7 @@ void AFablePlayerState::WearEquipment(EFableEquipmentSlot Slot, int32 Amount)
 UFableSaveGame* AFablePlayerState::MakeProfileSnapshot()
 {
     UFableSaveGame* Data = NewObject<UFableSaveGame>(this);
-    Data->Version = 8;
+    Data->Version = 9;
     Data->StoryChapter = StoryChapter;
     Data->StoryObjectMask = StoryObjectMask;
     Data->StorySealMask = StorySealMask;

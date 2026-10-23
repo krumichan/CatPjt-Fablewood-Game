@@ -97,6 +97,8 @@ struct FFableItem
 {
     GENERATED_BODY()
     UPROPERTY(SaveGame, BlueprintReadOnly) int32 Id = 0;
+    // Global identity is assigned only at creation or validated legacy migration. Id remains the local UI handle.
+    UPROPERTY(SaveGame, BlueprintReadOnly) FGuid InstanceId;
     UPROPERTY(SaveGame, BlueprintReadOnly) EFableEquipmentSlot Slot = EFableEquipmentSlot::Weapon;
     UPROPERTY(SaveGame, BlueprintReadOnly) EFableClass HeroClass = EFableClass::Warrior;
     UPROPERTY(SaveGame, BlueprintReadOnly) int32 Rarity = 0;

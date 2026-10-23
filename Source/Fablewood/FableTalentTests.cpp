@@ -96,7 +96,7 @@ bool FFableTalentMigrationTest::RunTest(const FString& Parameters)
         UFableSaveGame* P=TalentProfile(Version);TArray<FString> Before;
         for(const FFableItem& I:P->Inventory)Before.Add(FableRPG::ItemPersistentSignature(I));
         if(!TestTrue(FString::Printf(TEXT("Historical schema %d migrates"),Version),P->MigrateAndValidate()))continue;
-        TestEqual(TEXT("Migration reaches eight"),P->Version,8);
+        TestEqual(TEXT("Migration reaches nine"),P->Version,9);
         TestTrue(TEXT("Migration grants no currency, XP or equipment"),P->Gold==237 && P->Ore==17 && P->Level==1 && P->Experience==0 && P->Inventory.Num()==4);
         for(const FFableClassProgress& C:P->ClassProgress)
             TestTrue(TEXT("Every migrated class has two unselected talents"),C.SecondTalent==EFableTalentPath::None && C.ThirdTalent==EFableTalentPath::None);
@@ -105,7 +105,7 @@ bool FFableTalentMigrationTest::RunTest(const FString& Parameters)
     }
     const auto Reject=[&](const TCHAR* Label,TFunctionRef<void(UFableSaveGame*)> Change)
     {UFableSaveGame* P=TalentProfile();Change(P);TestFalse(Label,P->MigrateAndValidate());};
-    Reject(TEXT("Unknown schema nine is rejected"),[](UFableSaveGame* P){P->Version=9;});
+    Reject(TEXT("Unknown schema ten is rejected"),[](UFableSaveGame* P){P->Version=10;});
     Reject(TEXT("Invalid second path is rejected"),[](UFableSaveGame* P){P->ClassProgress[0].SecondTalent=EFableTalentPath(3);});
     Reject(TEXT("Invalid third path is rejected"),[](UFableSaveGame* P){P->ClassProgress[2].ThirdTalent=EFableTalentPath(255);});
     Reject(TEXT("Tier one cannot claim a second talent"),[](UFableSaveGame* P){P->ClassProgress[0].SecondTalent=EFableTalentPath::First;});
@@ -213,7 +213,7 @@ bool FFableTalentMemoryTest::RunTest(const FString& Parameters)
     TArray<uint8> Bytes;if(!TestTrue(TEXT("Serialize to memory without disk slots"),UGameplayStatics::SaveGameToMemory(P,Bytes)))return false;
     UFableSaveGame* R=Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
     if(!TestNotNull(TEXT("Restore v8 bytes"),R))return false;
-    TestTrue(TEXT("Restored profile validates without filling choices"),R->MigrateAndValidate());TestEqual(TEXT("Version remains eight"),R->Version,8);
+    TestTrue(TEXT("Restored profile validates without filling choices"),R->MigrateAndValidate());TestEqual(TEXT("Stored v8 migrates to nine"),R->Version,9);
     for(int32 I=0;I<3;++I)TestEqual(TEXT("Independent choices, paid ranks and trials are exact"),ProgressSignature(R->ClassProgress[I]),ProgressSignature(P->ClassProgress[I]));
     TestTrue(TEXT("Persistent progression/resources/receipts survive"),R->Level==P->Level && R->Experience==21 && R->Gold==237 && R->Ore==17 && R->Essence==19 && R->RootCores==2 && R->MoonCrystals==4 && R->DungeonCompletions==3 && R->MoonwellCompletions==2 && R->StoryChapter==5 && R->StoryObjectMask==31 && R->StorySealMask==7);
     for(int32 I=0;I<P->Inventory.Num();++I)TestEqual(TEXT("Inventory including broken durability is exact"),FableRPG::ItemPersistentSignature(R->Inventory[I]),FableRPG::ItemPersistentSignature(P->Inventory[I]));

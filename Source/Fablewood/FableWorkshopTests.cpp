@@ -87,7 +87,7 @@ bool FFableWorkshopMigrationTest::RunTest(const FString& Parameters)
         UFableSaveGame* Profile=WorkshopProfile(Version);TArray<FString> Before;
         for(const FFableItem& Item:Profile->Inventory)Before.Add(FableRPG::GearIdentitySignature(Item));
         if(!TestTrue(FString::Printf(TEXT("Valid schema v%d migrates"),Version),Profile->MigrateAndValidate()))continue;
-        TestEqual(TEXT("Migration reaches v8"),Profile->Version,8);
+        TestEqual(TEXT("Migration reaches v9"),Profile->Version,9);
         TestEqual(TEXT("Migration retains original gold"),Profile->Gold,137);
         TestEqual(TEXT("Migration retains original ore"),Profile->Ore,9);
         TestEqual(TEXT("Migration adds no equipment"),Profile->Inventory.Num(),Before.Num());
@@ -111,7 +111,7 @@ bool FFableWorkshopMigrationTest::RunTest(const FString& Parameters)
     Reject(TEXT("v6 rejects forged grade maximum"),[](UFableSaveGame* P){P->Inventory[4].MaxDurability=99;});
     Reject(TEXT("v6 rejects unknown durability schema"),[](UFableSaveGame* P){P->Inventory[4].DurabilityVersion=2;});
     Reject(TEXT("Legendary equipment cannot claim old roll schema 1"),[](UFableSaveGame* P){P->Inventory[4]=WorkshopRoll(5,4,EFableEquipmentSlot::Weapon);P->Inventory[4].RollVersion=1;});
-    Reject(TEXT("Unsupported schema 9 is not normalized"),[](UFableSaveGame* P){P->Version=9;});
+    Reject(TEXT("Unsupported schema 10 is not normalized"),[](UFableSaveGame* P){P->Version=10;});
     Reject(TEXT("Inventory IDs must be unique"),[](UFableSaveGame* P){P->Inventory[5].Id=5;});
     Reject(TEXT("Inventory and stash share a single ID namespace"),[](UFableSaveGame* P){P->StashItems.Add(P->Inventory[4]);});
     Reject(TEXT("Stash IDs must also be unique"),[](UFableSaveGame* P){const FFableItem I=WorkshopRoll(7,1,EFableEquipmentSlot::Weapon);P->StashItems={I,I};P->NextItemId=8;});
@@ -181,7 +181,7 @@ bool FFableWorkshopLegendSaveTest::RunTest(const FString& Parameters)
     UFableSaveGame* Restored=Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
     if(!TestNotNull(TEXT("Unreal restores the in-memory workshop profile"),Restored))return false;
     TestTrue(TEXT("Restored v6 profile validates without changing its data"),Restored->MigrateAndValidate());
-    TestEqual(TEXT("Supported v6 memory serialization migrates to v8"),Restored->Version,8);
+    TestEqual(TEXT("Supported v6 memory serialization migrates to v9"),Restored->Version,9);
     if(!TestEqual(TEXT("Inventory length survives"),Restored->Inventory.Num(),Profile->Inventory.Num())
         || !TestEqual(TEXT("Stash length survives"),Restored->StashItems.Num(),Profile->StashItems.Num()))return false;
     for(int32 Index=0;Index<Profile->Inventory.Num();++Index)

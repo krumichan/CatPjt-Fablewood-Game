@@ -1,6 +1,7 @@
 #include "FablePlayerState.h"
 #include "FableBackend.h"
 #include "FableSaveGame.h"
+#include "FableInventorySnapshot.h"
 #include "FableGameMode.h"
 #include "FableCharacter.h"
 #include "Kismet/GameplayStatics.h"
@@ -22,7 +23,6 @@ TSharedRef<FJsonObject> Wallet(const UFableSaveGame* D)
     W->SetNumberField(TEXT("essence"),D->Essence);W->SetNumberField(TEXT("rootCores"),D->RootCores);W->SetNumberField(TEXT("moonCrystals"),D->MoonCrystals);
     W->SetNumberField(TEXT("healthPotions"),D->HealthPotions);W->SetNumberField(TEXT("manaPotions"),D->ManaPotions);return W;
 }
-FString Json(const TSharedRef<FJsonObject>& J){FString T;FJsonSerializer::Serialize(J,TJsonWriterFactory<>::Create(&T));return T;}
 FString HashBytes(const TArray<uint8>& Bytes)
 {
     uint8 Digest[SHA256_DIGEST_LENGTH];
@@ -36,14 +36,15 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     TWeakObjectPtr<AFablePlayerState> Player;TWeakObjectPtr<UWorld> World;
     FString PlayerId,LeaseId;int64 Revision=0;
     FString LatestPayload,LatestHash,SentHash,SentPayload,OperationId,AcknowledgedHash;
-    TSharedPtr<FJsonObject> LatestWallet,SentWallet;
+    TSharedPtr<FJsonObject> LatestWallet,SentWallet,LatestInventory,SentInventory,SentBody;
+    bool InventoryAcknowledged=false;
     bool Pending=false,Closing=false,Failed=false,LoginComplete=false;
     FTimerHandle Retry,HeartbeatTimer;double LeaseDeadline=0;
     TSharedRef<FJsonObject> Identity() const {auto J=MakeShared<FJsonObject>();J->SetStringField(TEXT("playerId"),PlayerId);J->SetStringField(TEXT("leaseId"),LeaseId);return J;}
     void Mirror()
     {
         if(auto P=Player.Get()){P->BackendRevision=Revision+(Pending?1:0);P->BackendAcknowledgedRevision=Revision;
-            P->bBackendSavePending=Pending;P->bLastSaveSucceeded=!Pending&&!Failed;P->ForceNetUpdate();}
+            P->bBackendSavePending=Pending;P->bLastSaveSucceeded=InventoryAcknowledged&&!Pending&&!Failed;P->ForceNetUpdate();}
     }
     void Failure(const FString& Message)
     {
@@ -70,31 +71,37 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         World->GetTimerManager().ClearTimer(HeartbeatTimer);World->GetTimerManager().ClearTimer(Retry);
         FFableBackend::Post(World.Get(),TEXT("/v1/server/release"),Identity(),[](bool,int32,TSharedPtr<FJsonObject>){});
     }
-    void Queue(const FString& Payload,const FString& Hash,const TSharedRef<FJsonObject>& W)
+    void Queue(const FString& Payload,const FString& Hash,const TSharedRef<FJsonObject>& W,const TSharedRef<FJsonObject>& Inventory)
     {
         if(Failed)return;
-        LatestPayload=Payload;LatestHash=Hash;LatestWallet=W;
-        if(!Pending&&Hash==AcknowledgedHash){Mirror();return;}
+        LatestPayload=Payload;LatestHash=Hash;LatestWallet=W;LatestInventory=Inventory;
+        if(InventoryAcknowledged&&!Pending&&Hash==AcknowledgedHash){Mirror();return;}
         if(!Pending)Start();
     }
     void Start()
     {
-        if(Failed||!World.IsValid()||!LatestWallet.IsValid())return;
-        Pending=true;SentPayload=LatestPayload;SentHash=LatestHash;SentWallet=LatestWallet;OperationId=FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);Mirror();Send();
+        if(Failed||!World.IsValid()||!LatestWallet.IsValid()||!LatestInventory.IsValid())return;
+        Pending=true;SentPayload=LatestPayload;SentHash=LatestHash;SentWallet=LatestWallet;SentInventory=LatestInventory;
+        OperationId=FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+        // Freeze all three mirrors in a single operation. An ambiguous response retries this exact body.
+        SentBody=Identity();SentBody->SetStringField(TEXT("operationId"),OperationId);
+        SentBody->SetNumberField(TEXT("expectedRevision"),Revision);SentBody->SetStringField(TEXT("profile"),SentPayload);
+        SentBody->SetObjectField(TEXT("wallet"),SentWallet);SentBody->SetObjectField(TEXT("inventory"),SentInventory);
+        Mirror();Send();
     }
     void Send()
     {
         if(Failed||!World.IsValid())return;
         if(FPlatformTime::Seconds()>LeaseDeadline){Failure(TEXT("저장 권한이 만료되어 진행을 중단했습니다."));return;}
-        auto Body=Identity();Body->SetStringField(TEXT("operationId"),OperationId);Body->SetNumberField(TEXT("expectedRevision"),Revision);
-        Body->SetStringField(TEXT("profile"),SentPayload);Body->SetObjectField(TEXT("wallet"),SentWallet);
-        auto Self=AsShared();FFableBackend::Post(World.Get(),TEXT("/v1/server/commit"),Body,[Self](bool Ok,int32 Code,TSharedPtr<FJsonObject> J){
+        if(!SentBody.IsValid()){Failure(TEXT("중앙 저장 작업이 올바르지 않습니다."));return;}
+        auto Self=AsShared();FFableBackend::Post(World.Get(),TEXT("/v1/server/commit-inventory"),SentBody.ToSharedRef(),[Self](bool Ok,int32 Code,TSharedPtr<FJsonObject> J){
             if(Self->Failed||!Self->World.IsValid())return;
-            double Next=-1;FString Hash;
-            if(Ok&&J->TryGetNumberField(TEXT("revision"),Next)&&int64(Next)==Self->Revision+1
+            double Next=-1,InventoryVersion=-1;FString Hash;
+            if(Ok&&J.IsValid()&&J->TryGetNumberField(TEXT("revision"),Next)&&Next==double(Self->Revision+1)
+                &&J->TryGetNumberField(TEXT("inventoryVersion"),InventoryVersion)&&InventoryVersion==1
                 &&J->TryGetStringField(TEXT("profileHash"),Hash)&&Hash.Equals(Self->SentHash,ESearchCase::IgnoreCase))
             {
-                Self->Revision=int64(Next);Self->Pending=false;Self->AcknowledgedHash=Self->SentHash;
+                Self->Revision=int64(Next);Self->Pending=false;Self->AcknowledgedHash=Self->SentHash;Self->InventoryAcknowledged=true;
                 if(auto P=Self->Player.Get())P->BackendAcknowledgedProfileHash=Self->SentHash;
                 if(Self->LatestHash!=Self->SentHash){Self->Start();return;}
                 Self->Mirror();
@@ -136,32 +143,70 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
         auto P=Weak.Get();if(!P||!P->GetWorld()||P->bBackendClosing||!IsValid(P->GetOwner())){if(Ok)ReleaseClaim();return;}
         auto Fail=[P,ReleaseClaim](){ReleaseClaim();P->bStorageBlocked=true;P->bBackendReady=false;P->bLastSaveSucceeded=false;
             if(auto M=P->GetWorld()->GetAuthGameMode<AFableGameMode>())M->CompleteBackendLogin(Cast<APlayerController>(P->GetOwner()),false,TEXT("계정 인증 또는 중앙 프로필을 확인할 수 없습니다."));};
-        FString Id,Lease,Payload,ExpectedHash;double Rev=-1,InitialClass=0;
+        FString Id,Lease,Payload,ExpectedHash;double Rev=-1,InitialClass=-1,InventoryVersion=-1;
+        FGuid PlayerGuid,LeaseGuid;
         if(!Ok||!J.IsValid()||!J->TryGetStringField(TEXT("playerId"),Id)||!J->TryGetStringField(TEXT("leaseId"),Lease)
-            ||!J->TryGetNumberField(TEXT("revision"),Rev)||Rev<0||!J->TryGetNumberField(TEXT("initialClass"),InitialClass)) {Fail();return;}
-        P->BackendPlayerId=Id;P->InitializeProfile(true,TEXT(""),EFableClass(FMath::Clamp(int32(InitialClass),0,2)));
-        P->ProfileSlot=TEXT("backend:")+Id;
-        if(J->TryGetStringField(TEXT("profile"),Payload)&&!Payload.IsEmpty())
+            ||!FGuid::ParseExact(Id,EGuidFormats::DigitsWithHyphens,PlayerGuid)||!PlayerGuid.IsValid()
+            ||!FGuid::ParseExact(Lease,EGuidFormats::DigitsWithHyphens,LeaseGuid)||!LeaseGuid.IsValid()
+            ||Id!=PlayerGuid.ToString(EGuidFormats::DigitsWithHyphensLower)
+            ||Lease!=LeaseGuid.ToString(EGuidFormats::DigitsWithHyphensLower)
+            ||!J->TryGetNumberField(TEXT("revision"),Rev)||!FMath::IsFinite(Rev)||Rev<0||Rev>9007199254740990.0||Rev!=double(int64(Rev))
+            ||!J->TryGetNumberField(TEXT("initialClass"),InitialClass)||!FMath::IsFinite(InitialClass)
+            ||InitialClass<0||InitialClass>2||InitialClass!=double(int32(InitialClass))
+            ||!J->TryGetNumberField(TEXT("inventoryVersion"),InventoryVersion)||(InventoryVersion!=0&&InventoryVersion!=1)) {Fail();return;}
+        if(!P->BackendPlayerId.IsEmpty()&&P->BackendPlayerId!=Id){Fail();return;}
+        const auto* ProfileField=J->Values.Find(TEXT("profile"));
+        const auto* InventoryField=J->Values.Find(TEXT("inventory"));
+        if(!ProfileField||!ProfileField->IsValid()||!InventoryField||!InventoryField->IsValid()){Fail();return;}
+        const bool bHasStoredProfile=(*ProfileField)->Type==EJson::String;
+        if((!bHasStoredProfile&&(*ProfileField)->Type!=EJson::Null)
+            ||(bHasStoredProfile&&(!(*ProfileField)->TryGetString(Payload)||Payload.IsEmpty()))){Fail();return;}
+        if(InventoryVersion==0&&(*InventoryField)->Type!=EJson::Null){Fail();return;}
+        if(InventoryVersion==1&&(!bHasStoredProfile||(*InventoryField)->Type!=EJson::Object)){Fail();return;}
+        if(!bHasStoredProfile&&Rev!=0){Fail();return;}
+
+        // The temporary decoded profile must agree with every typed item and wallet field
+        // before applying it. Missing typed rows are accepted only for an explicit legacy claim.
+        UFableSaveGame* D=nullptr;
+        if(bHasStoredProfile)
         {
             TArray<uint8> Bytes;
-            if(!FBase64::Decode(Payload,Bytes)||Bytes.Num()>262144||!J->TryGetStringField(TEXT("profileHash"),ExpectedHash)||HashBytes(Bytes)!=ExpectedHash.ToLower()){Fail();return;}
-            auto D=Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
-            if(!D||!D->MigrateAndValidate()){Fail();return;}
-            P->ApplyProfileSnapshot(D);
+            if(!FBase64::Decode(Payload,Bytes)||Bytes.Num()>262144||!J->TryGetStringField(TEXT("profileHash"),ExpectedHash)
+                ||HashBytes(Bytes)!=ExpectedHash.ToLower()){Fail();return;}
+            D=Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
+            if(!D||(InventoryVersion==1?D->Version!=9:D->Version>=9)||!D->MigrateAndValidate()){Fail();return;}
+            if(InventoryVersion==1&&!FableInventorySnapshot::Matches(D,(*InventoryField)->AsObject())){Fail();return;}
         }
-        auto D=P->MakeProfileSnapshot();const TSharedPtr<FJsonObject>* W=nullptr;
-        if(!J->TryGetObjectField(TEXT("wallet"),W)||!W||!W->IsValid()||Json(W->ToSharedRef())!=Json(Wallet(D)))
+        else
         {
-            // JSON object order is not significant; compare each canonical number.
-            bool Match=W&&W->IsValid();auto Expected=Wallet(D);
-            if(Match)for(const auto& E:Expected->Values){double A=-1,B=-2;Match&=(*W)->TryGetNumberField(E.Key,A)&&E.Value->TryGetNumber(B)&&A==B;}
-            if(!Match){Fail();return;}
+            const auto* HashField=J->Values.Find(TEXT("profileHash"));
+            if(!HashField||!HashField->IsValid()||(*HashField)->Type!=EJson::Null){Fail();return;}
         }
+        P->BackendPlayerId=Id;
+        P->InitializeProfile(true,TEXT(""),EFableClass(int32(InitialClass)));
+        P->ProfileSlot=TEXT("backend:")+Id;
+        if(!D)D=P->MakeProfileSnapshot();
+        const TSharedPtr<FJsonObject>* W=nullptr;
+        bool WalletMatches=J->TryGetObjectField(TEXT("wallet"),W)&&W&&W->IsValid();
+        const auto Expected=Wallet(D);
+        if(WalletMatches)
+        {
+            WalletMatches=(*W)->Values.Num()==Expected->Values.Num();
+            for(const auto& E:Expected->Values)
+            {
+                const auto* Actual=(*W)->Values.Find(E.Key);
+                WalletMatches&=Actual&&Actual->IsValid()&&(*Actual)->Type==EJson::Number
+                    &&(*Actual)->AsNumber()==E.Value->AsNumber();
+            }
+        }
+        if(!WalletMatches||P->BackendPlayerId!=Id){Fail();return;}
+        P->ApplyProfileSnapshot(D);
         P->bBackendLoading=false;P->bProfileLoaded=true;P->bLastSaveSucceeded=false;
         P->BackendSession=MakeShared<FFableBackendSession>();auto Session=P->BackendSession;
         Session->Player=P;Session->World=P->GetWorld();Session->PlayerId=Id;Session->LeaseId=Lease;Session->Revision=int64(Rev);Session->LeaseDeadline=FPlatformTime::Seconds()+50;
         P->GetWorld()->GetTimerManager().SetTimer(Session->HeartbeatTimer,[Session](){Session->Renew();},15.0f,true);
-        Session->AcknowledgedHash=ExpectedHash.ToLower();P->BackendAcknowledgedProfileHash=Session->AcknowledgedHash;
+        Session->AcknowledgedHash=ExpectedHash.ToLower();Session->InventoryAcknowledged=InventoryVersion==1;
+        P->BackendAcknowledgedProfileHash=Session->AcknowledgedHash;
         if(!P->QueueBackendSnapshot(D))Session->Failure(TEXT("중앙 프로필을 직렬화할 수 없습니다."));
         else if(!Session->Pending)
         {
@@ -176,7 +221,8 @@ bool AFablePlayerState::QueueBackendSnapshot(UFableSaveGame* Data)
     if(!BackendSession.IsValid()||!Data||!Data->IsValidProfile())return false;
     TArray<uint8> Bytes;if(!UGameplayStatics::SaveGameToMemory(Data,Bytes)||Bytes.Num()>262144)return false;
     const FString Hash=HashBytes(Bytes);if(Hash.IsEmpty())return false;
-    BackendSession->Queue(FBase64::Encode(Bytes),Hash,Wallet(Data));return !BackendSession->Failed;
+    const auto InventorySnapshot=FableInventorySnapshot::Make(Data);if(!InventorySnapshot.IsValid())return false;
+    BackendSession->Queue(FBase64::Encode(Bytes),Hash,Wallet(Data),InventorySnapshot.ToSharedRef());return !BackendSession->Failed;
 }
 void AFablePlayerState::ReleaseBackendProfile()
 {

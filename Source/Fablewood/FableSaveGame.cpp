@@ -11,7 +11,7 @@ void UFableSaveGame::NormalizeLoadedVersion()
 
 bool UFableSaveGame::IsValidProfile() const
 {
-    if (Version < 1 || Version > 8 || Level < 1 || Level > 20
+    if (Version < 1 || Version > 9 || Level < 1 || Level > 20
         || Experience < 0 || (Level < 20 ? Experience >= Level * 100 : Experience != 0)
         || Gold < 0 || Gold > 1000000 || Ore < 0 || Ore > 100000
         || Inventory.Num() < 4 || Inventory.Num() > 32
@@ -44,12 +44,20 @@ bool UFableSaveGame::IsValidProfile() const
         return true;
     };
     TSet<int32> Ids;
+    TSet<FGuid> InstanceIds;
+    const auto AcceptInstance = [this, &InstanceIds](const FFableItem& Item)
+    {
+        if (!Item.InstanceId.IsValid()) return Version < 9;
+        if (InstanceIds.Contains(Item.InstanceId)) return false;
+        InstanceIds.Add(Item.InstanceId);
+        return true;
+    };
     int32 MaxId = 0;
     bool bWeapon = false, bArmor = false;
     bool StarterItems[4] = {false, false, false, false};
     for (const FFableItem& Item : Inventory)
     {
-        if (!IsValidItem(Item) || Ids.Contains(Item.Id)) return false;
+        if (!IsValidItem(Item) || Ids.Contains(Item.Id) || !AcceptInstance(Item)) return false;
         Ids.Add(Item.Id); MaxId = FMath::Max(MaxId, Item.Id);
         bWeapon |= Item.Id == EquippedWeaponId && Item.Slot == EFableEquipmentSlot::Weapon && Item.HeroClass == HeroClass;
         bArmor |= Item.Id == EquippedArmorId && Item.Slot == EFableEquipmentSlot::Armor;
@@ -61,7 +69,7 @@ bool UFableSaveGame::IsValidProfile() const
     {
         for (const FFableItem& Item : StashItems)
         {
-            if (!IsValidItem(Item) || Item.Id <= 4 || Ids.Contains(Item.Id)) return false;
+            if (!IsValidItem(Item) || Item.Id <= 4 || Ids.Contains(Item.Id) || !AcceptInstance(Item)) return false;
             Ids.Add(Item.Id); MaxId=FMath::Max(MaxId,Item.Id);
         }
     }
@@ -174,6 +182,26 @@ bool UFableSaveGame::MigrateAndValidate()
         for (FFableClassProgress& Entry : ClassProgress)
             Entry.SecondTalent = Entry.ThirdTalent = EFableTalentPath::None;
         Version = 8;
+    }
+    if (Version < 9)
+    {
+        // Validate all historical item fields before minting missing identities. Never
+        // repair an invalid local ID, duplicate GUID, or a corrupt current schema.
+        if (!IsValidProfile()) return false;
+        TSet<FGuid> Used;
+        for (const FFableItem& Item : Inventory) if (Item.InstanceId.IsValid()) Used.Add(Item.InstanceId);
+        for (const FFableItem& Item : StashItems) if (Item.InstanceId.IsValid()) Used.Add(Item.InstanceId);
+        const auto AssignMissing = [&Used](TArray<FFableItem>& Items)
+        {
+            for (FFableItem& Item : Items)
+            {
+                if (Item.InstanceId.IsValid()) continue;
+                do { Item.InstanceId = FGuid::NewGuid(); } while (!Item.InstanceId.IsValid() || Used.Contains(Item.InstanceId));
+                Used.Add(Item.InstanceId);
+            }
+        };
+        AssignMissing(Inventory); AssignMissing(StashItems);
+        Version = 9;
     }
     return IsValidProfile();
 }

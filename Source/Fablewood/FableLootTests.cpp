@@ -80,14 +80,14 @@ bool FFableLootMigrationTest::RunTest(const FString& Parameters)
         FFableItem OldRare;OldRare.Id=5;OldRare.Rarity=2;OldRare.Power=48;OldRare.Upgrade=3;P->Inventory.Add(OldRare);P->NextItemId=6;
         if(Version==4){FFableItem OldMoon;OldMoon.Id=6;OldMoon.Rarity=3;OldMoon.Slot=EFableEquipmentSlot::Armor;OldMoon.Power=16;OldMoon.Upgrade=2;P->Inventory.Add(OldMoon);P->NextItemId=7;}
         for(const FFableItem& Item:P->Inventory)Before.Add(FableRPG::ItemPersistentSignature(Item));
-        TestTrue(TEXT("Supported legacy schema migrates"),P->MigrateAndValidate());TestEqual(TEXT("Migration reaches v8"),P->Version,8);
+        TestTrue(TEXT("Supported legacy schema migrates"),P->MigrateAndValidate());TestEqual(TEXT("Migration reaches v9"),P->Version,9);
         TestEqual(TEXT("Legacy gold is preserved"),P->Gold,17);TestEqual(TEXT("Legacy ore is preserved"),P->Ore,3);
         TestEqual(TEXT("Migration does not grant extra items"),P->Inventory.Num(),Before.Num());
         for(int32 I=0;I<Before.Num();++I)TestEqual(TEXT("Legacy basic performance, upgrade, IDs and no-roll state are preserved"),FableRPG::ItemPersistentSignature(P->Inventory[I]),Before[I]);
         TestEqual(TEXT("Potion quantities follow their original schema"),P->HealthPotions,Version==1?3:2);
         TestEqual(TEXT("Mana potions follow their original schema"),P->ManaPotions,Version==1?2:1);
     }
-    UFableSaveGame* Future=MakeLootProfile(9);TestFalse(TEXT("Future schema stays unsupported"),Future->MigrateAndValidate());
+    UFableSaveGame* Future=MakeLootProfile(10);TestFalse(TEXT("Future schema stays unsupported"),Future->MigrateAndValidate());
     UFableSaveGame* Duplicate=MakeLootProfile(6);Duplicate->Inventory[1].Id=1;TestFalse(TEXT("Duplicate item IDs are rejected"),Duplicate->MigrateAndValidate());
     FRandomStream Random(42);UFableSaveGame* Corrupt=MakeLootProfile(6);Corrupt->Inventory.Add(RollFixture(5,EFableEquipmentSlot::Weapon,EFableEquipmentSet::RootGuardian,EFableDifficulty::Normal,Random));Corrupt->NextItemId=6;
     Corrupt->Inventory.Last().Power+=1;TestFalse(TEXT("Forged base performance is rejected"),Corrupt->MigrateAndValidate());

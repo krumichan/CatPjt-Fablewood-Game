@@ -2,11 +2,13 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "InputCoreTypes.h"
+#include "FableRPGTypes.h"
 #include "FableDedicatedValidationDriver.generated.h"
 class AFablePlayerController;
 class AFablePlayerState;
 class AFableEnemy;
 class FJsonObject;
+class FJsonValue;
 
 /** Opt-in observation/input harness. It never changes health, rewards or profiles directly. */
 UCLASS()
@@ -20,6 +22,11 @@ public:
 private:
     void TickServer();
     void TickClient();
+    void TickInventory(AFablePlayerState* Profile, double Now, float Side);
+    void BeginInventoryEvent(const FString& Action, const AFablePlayerState* Profile, const FFableItem& Item,
+        int32 Location, int32 Position, int32 GoldDelta, int32 OreDelta);
+    bool CompleteInventoryEvent(const AFablePlayerState* Profile, const FFableItem* Item, int32 Location, int32 Position);
+    void RecordInventoryAttempt(const AFablePlayerState* Profile);
     void Key(const FKey& Value);
     void Hold(const FKey& Value, bool bHeld);
     bool WalkTo(const FVector& Position, float Radius = 90.0f);
@@ -39,6 +46,18 @@ private:
     int32 Projectiles() const;
     TWeakObjectPtr<AFablePlayerController> PC;
     FString Role, RunId, Directory, Phase;
+    bool bInventoryValidation = false, bInventoryFlowComplete = false;
+    FString InventoryAction, InventoryProfileBefore, InventoryProfileHashBefore;
+    bool bForgeWaypointReached = false;
+    double ForgeStableAt = -1, InventoryLastAttemptAt = -1;
+    int32 InventoryRequestAttempts = 0;
+    TArray<TSharedPtr<FJsonValue>> InventoryRequestObservations;
+    FFableItem InventoryItemBefore;
+    int32 InventoryLocationBefore = 0, InventoryPositionBefore = -1;
+    int32 InventoryGoldDelta = 0, InventoryOreDelta = 0;
+    int64 InventoryRevisionBefore = 0;
+    TSharedPtr<FJsonObject> InventoryWalletBefore;
+    TArray<TSharedPtr<FJsonValue>> InventoryEvents;
     bool bServer = false, bDone = false, bPending = false, bTerminalSuccess = false;
     FString TerminalBytes, TerminalReason;
     double StartedAt = 0, StepAt = 0, LastAction = -10, LastSkill = -10, LastReportAt = -10;
