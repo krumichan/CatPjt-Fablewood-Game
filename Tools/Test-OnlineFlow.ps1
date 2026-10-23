@@ -4,6 +4,7 @@ param(
     [string]$EngineRoot,
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
+    [string]$PackagedClientExecutable,
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -182,21 +183,29 @@ function Quote-Online([string]$Value){Assert-Online (-not $Value.Contains('"') -
 function Start-OnlineValidationProcess([string]$Role,[string]$Phase,[string]$Context=''){
     $folder=Join-Path $runFolder $Phase;[void][IO.Directory]::CreateDirectory($folder)
     $exe=if($Role -ceq 'server'){$serverExecutable}else{$clientExecutable}
-    $arguments=[Collections.Generic.List[string]]::new();$arguments.Add((Quote-Online $script:FableProjectFile))
+    $arguments=[Collections.Generic.List[string]]::new();if($Role -ceq 'server' -or -not $PackagedClientExecutable){$arguments.Add((Quote-Online $script:FableProjectFile))}
     if($Role -ceq 'server'){
         $arguments.Add('/Game/Maps/ForestClearing?FableDedicated=1?FablePlay=1')
         foreach($arg in @('-server','-NullRHI','-nosound','-unattended',('-port='+$Port),'-MULTIHOME=127.0.0.1')){$arguments.Add($arg)}
         $arguments.Add('-FableBackendConfig='+(Quote-Online $backendLink.serverConfig))
     }else{
-        foreach($arg in @('-game','-d3d11','-windowed','-nosplash','-nosound','-unattended','-ResX=900','-ResY=600','-ForceRes','-WinY=40','-ini:Engine:[ConsoleVariables]:r.WarnOfBadDrivers=0')){$arguments.Add($arg)}
+        if(-not $PackagedClientExecutable){$arguments.Add('-game')}
+        foreach($arg in @('-d3d11','-windowed','-nosplash','-nosound','-unattended','-ResX=900','-ResY=600','-ForceRes','-WinY=40','-ini:Engine:[ConsoleVariables]:r.WarnOfBadDrivers=0')){$arguments.Add($arg)}
         $windowX=if($Role -ceq 'client1'){20}else{940};$arguments.Add('-WinX='+$windowX)
         $arguments.Add('-FableOnlineValidationContext='+(Quote-Online $Context));$arguments.Add('-FableOnlineBackendUrl='+(Quote-Online $BackendUrl))
+        if($PackagedClientExecutable){
+            # Isolate every packaged process from real user saves/config and the archive itself.
+            $userDirectory=Join-Path $script:FableProjectRoot ('Saved\PackagedClientUsers\'+$runId+'\'+$Phase+'\'+$Role)
+            Assert-Online (-not(Test-Path -LiteralPath $userDirectory)) 'packaged_user_directory_must_be_new'
+            [void][IO.Directory]::CreateDirectory($userDirectory)
+            $arguments.Add('-UserDir='+(Quote-Online ($userDirectory.Replace('\','/')+'/')))
+        }
     }
     $log=Join-Path $folder ($Role+'.log')
     $arguments.Add('-FableOnlineValidationRole='+$Role);$arguments.Add('-FableOnlineValidationDirectory='+(Quote-Online $folder))
     $arguments.Add('-FableOnlineValidationRun='+$runId);$arguments.Add('-abslog='+(Quote-Online $log))
     $arguments.Add('-LogCmds="LogInit off,LogNet off,LogLoad off"');$arguments.Add('-ExecCmds="t.MaxFPS 30,t.IdleWhenNotForeground 0"')
-    try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $script:FableProjectRoot -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
+    try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $(if($Role -cne 'server' -and $PackagedClientExecutable){Split-Path -Parent $exe}else{$script:FableProjectRoot}) -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
     $record=[pscustomobject]@{role=$Role;phase=$Phase;pid=$process.Id;executable=$exe;startedUtc=$process.StartTime.ToUniversalTime().ToString('o');log=$log;forcedForScenario=$false;cleanupForced=$false;exitCode=$null}
     $ownedProcesses.Add($record);$processHandles[$process.Id]=$process;return $record
 }
@@ -435,7 +444,7 @@ $backendDll=Join-Path $backendLink.root 'Fablewood.Backend\bin\Release\net10.0\F
 $credentialsPath=Join-Path $backendLink.root 'Saved\Backend\backend-credentials.json'
 $serverKeyPath=Join-Path $backendLink.root 'Saved\Backend\server-key.txt'
 $summary=[ordered]@{
-    runId=$runId;status='running';mode='editor-dedicated-two-ui-clients';startedUtc=[DateTime]::UtcNow.ToString('o')
+    runId=$runId;status='running';mode=$(if($PackagedClientExecutable){'editor-dedicated-two-packaged-ui-clients'}else{'editor-dedicated-two-ui-clients'});startedUtc=[DateTime]::UtcNow.ToString('o')
     backendUrl=$BackendUrl;gamePort=$Port;databaseName='fablewood';phases=[ordered]@{}
     scope=@('One PC, loopback only','Normal in-game registration, authentication, movement, potion and leave UI','Existing saves are not uploaded or injected','API reader sessions only inspect the two new accounts','API restart reuses the same database; PostgreSQL is not restarted here')
     visualReviewPerformed=$false;privateContextFolder=$privateFolder;initialBackendStartupPerformed=$false
@@ -448,6 +457,18 @@ try{
     Assert-FableReady
     $serverExecutable=Join-Path $resolvedEngine 'Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
     $clientExecutable=Join-Path $resolvedEngine 'Engine\Binaries\Win64\UnrealEditor.exe'
+    if($PackagedClientExecutable){
+        Assert-Online ([IO.Path]::IsPathRooted($PackagedClientExecutable)) 'packaged_client_path_must_be_absolute'
+        $clientExecutable=[IO.Path]::GetFullPath($PackagedClientExecutable)
+        Assert-Online ([IO.Path]::GetFileName($clientExecutable) -ceq 'Fablewood.exe' -and (Test-Path -LiteralPath $clientExecutable -PathType Leaf)) 'packaged_client_executable_missing'
+        $cursor=Get-Item -LiteralPath $clientExecutable -Force
+        while($null -ne $cursor){
+            Assert-Online (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'packaged_client_reparse_rejected'
+            if($cursor -is [IO.FileInfo]){$cursor=$cursor.Directory}else{$cursor=$cursor.Parent}
+        }
+        Assert-Online ($clientExecutable -match '[\\/]Fablewood[\\/]Binaries[\\/]Win64[\\/]Fablewood\.exe$') 'packaged_client_must_use_inner_executable'
+        $summary.packagedClient=[ordered]@{executable=$clientExecutable;sha256=(Hash-Online $clientExecutable);isolatedUserDirectories=$true;usesEditorClient=$false}
+    }
     foreach($path in @($serverExecutable,$clientExecutable)){Assert-Online (Test-Path -LiteralPath $path -PathType Leaf) 'editor_executable_missing'}
     $backendBefore=Read-OnlineBackendIdentity
     $summary.backendIdentity=[ordered]@{root=$backendLink.root;serverId=$backendBefore.serverId;databasePort=$backendBefore.databasePort;schema=$backendBefore.schema;containerName=$backendBefore.containerName;volume=$backendBefore.volume;composeProject=$backendBefore.composeProject;initialPid=$backendBefore.backendPid}
