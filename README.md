@@ -1,3 +1,29 @@
+## 최신 안내 · 2026-10-24 / 最新案内 · 2026-10-24
+
+**최신 Foundation 사용·계약 설명은 [아래 Foundation 개발 기록](#foundation-development-record-20261023)에 있다.** 그 앞의 기존 한일 공개 본문과 아래 Foundation 원문의 상태 문장은 각 단계의 이력으로 보존했다. 23일 원문의 ‘패키지 플레이 미검증’은 당시 상태이며, 아래 1단계 결과가 그 한 항목을 갱신한다. 기존 단계의 사실이나 실패 기록은 삭제하지 않았다.
+
+**最新の Foundation の使い方・契約は[下の Foundation 開発記録](#foundation-development-record-20261023)にあります。** その前の既存韓日公開本文と Foundation 原文の状態記述は、各段階の履歴として保存しています。23 日の「package play 未検証」は当時の状態で、以下の第 1 段階結果がその項目を更新します。旧段階の事実・失敗記録は削除していません。
+
+- 기능·소스 변경일은 **2026-10-23 KST**, 이 일본어 번역·공개 문서 병합과 최종 안내 작성일은 **2026-10-24 KST**다. 1단계 실제 검증은 23일 23:56경 시작해 **24일 00:00:15 KST**에 끝났고, 최종 정적 감사·화면 검토는 24일에 수행됐다. 날짜를 파일 수정 시각으로 추정하지 않았다.
+- 실제 작업 **`20261023T145628442Z-97b1128f` · Exit 0**에서 Windows 패키지 클라이언트 두 개와 **Editor 전용 서버**의 가입·로그인, 같은 DB를 유지한 API 재시작 뒤 캐릭터 지갑·전체 아이템·옵션·장착·요약의 영속 복원을 확인했다. 초기·복원 실행의 실제 패키지 클라이언트 프로세스는 합계 4개이며, 동시 클라이언트 4명 검증이라는 뜻이 아니다.
+- 이 작업은 한 Windows PC의 loopback 검증이다. **2~4단계의 구현·검증, 전체 던전·장비 성장·던전 중단 복구, Linux, 서로 다른 물리 PC 두 대, 외부망, 독립 Server Target 실행 파일은 완료로 표시하지 않는다.** 서버는 `UnrealEditor-Cmd.exe -server -NullRHI`였으며 `FablewoodServer.exe`를 빌드·시험한 결과가 아니다.
+- Foundation의 HTTP/PostgreSQL **556개**, 실제 DB 재시작 지속성 **42개**, native **22개**, Editor 빌드·Windows Game 패키징은 각각 앞선 별도 작업의 결과다. 이번 패키지 클라이언트 1단계에서 전부 재실행했다고 하거나 통과 수를 합산하지 않는다.
+
+- 機能・source の変更日は **2026-10-23 KST**、今回の日本語翻訳・公開文書の統合・最新案内の作成日は **2026-10-24 KST** です。第 1 段階の実検証は 23 日 23:56 頃に始まり、**24 日 00:00:15 KST** に終了しました。最終静的監査・画面レビューは 24 日です。file 更新時刻から日付を推測していません。
+- 実 job **`20261023T145628442Z-97b1128f`・Exit 0** で Windows package client 2 個と **Editor 専用 server** による登録・login、同じ DB を保つ API 再起動後の character wallet・全 item・affix・equipment・summary の永続復元を確認しました。初回/復元実行の実 package client process は合計 4 個であり、4 人同時 client 検証ではありません。
+- 1 台の Windows PC の loopback 検証です。**第 2～4 段階の実装・検証、全 dungeon・装備成長・dungeon 中断復旧、Linux、別の物理 PC 2 台、外部 network、独立 Server Target 実行ファイルを完了扱いしません。** server は `UnrealEditor-Cmd.exe -server -NullRHI` であり、`FablewoodServer.exe` を build・test した結果ではありません。
+- Foundation の HTTP/PostgreSQL **556 件**、実 DB 再起動永続性 **42 件**、native **22 件**、Editor build・Windows Game packaging は、それぞれ先行する別 job の結果です。今回の package client 第 1 段階ですべて再実行したとは記録せず、件数も合算しません。
+
+소스 대조의 한계도 보존한다. 원시 보고서의 `reusedBuild.compiledAndCookedInputsMatched=0`은 역슬래시/경로 선택 버그이며 성공 근거로 사용하지 않았다. 별도 정규화 보완 대조는 고정 입력 324개 중 320개 동일·승인 차이 4개와 컴파일/cook 입력 260개 일치를 확인했다. 실제 runtime은 재사용 Editor 바이너리 3개와 패키지 사본 2개를 별도로 확인했다. 보완 정적 대조는 옛 데스크톱 소스 파일을 다시 읽거나 게임 플레이를 재실행한 검사가 아니다. 원시 보고서를 덮어쓰지 않았다.
+
+source 照合の限界も保存します。原 report の `reusedBuild.compiledAndCookedInputsMatched=0` は backslash/path selector の bug で、成功根拠には使っていません。別の正規化補足照合で固定入力 324 件中 320 件一致・承認差分 4 件、compiled/cooked 入力 260 件の一致を確認しました。実 runtime は再利用 Editor binary 3 個と package copy 2 個を別途確認しました。補足静的照合は旧 desktop source file の再読や gameplay 再実行ではなく、原 report は上書きしていません。
+
+근거는 비공개 로컬 검증 기록 `stage1-git-handoff.json`, `packaged-two-client-validation.json`, `stage1-source-provenance.json`, `stage1-visual-review.json`, `reused-source-supplement-static.json`이다. 이 문서 반영은 새 게임 실행·DB 변경·서비스 배포를 수행하거나 증빙·로그·캡처를 공개 저장소에 추가한 작업이 아니다.
+
+根拠は非公開のローカル検証記録 `stage1-git-handoff.json`、`packaged-two-client-validation.json`、`stage1-source-provenance.json`、`stage1-visual-review.json`、`reused-source-supplement-static.json` です。この文書反映で新たな game 実行・DB 変更・service deploy は行わず、根拠・log・capture を公開 repository に追加していません。
+
+---
+
 # CatPjt-Fablewood-Game
 
 동화풍 협동 액션 RPG Fablewood의 Unreal Engine 공통 게임 프로젝트입니다. 플레이어 클라이언트와 전투를 판정하는 Unreal 서버가 같은 `Source`, `Config`, `Content`를 사용합니다. 계정·접속 권한·중앙 저장을 처리하는 .NET API와 PostgreSQL 구성은 형제 디렉터리 `CatPjt-Fablewood-Backend`에 있습니다.
@@ -140,13 +166,23 @@ pwsh -NoProfile -File .\Tools\Get-SourceManifest.ps1
 
 <a id="foundation-development-record-20261023"></a>
 
-## Foundation 개발 원문 · 2026-10-23
+## Foundation 개발 원문 · 2026-10-23 / Foundation 開発原文 · 2026-10-23
+
+이 구역은 23일 Foundation 문서를 원문 단위로 보존한 한일 대응이다. 당시 ‘현재’와 미검증 상태는 이력이며, 위 24일 안내가 최신 1단계 결과를 구분한다.
+
+本節は 23 日の Foundation 文書を原文単位で保存した韓日対応です。当時の「現在」・未検証状態は履歴で、上の 24 日案内が最新の第 1 段階結果を区別します。
+
+# CatPjt-Fablewood-Game
 
 # CatPjt-Fablewood-Game
 
 동화풍 협동 액션 RPG Fablewood의 Unreal 공통 프로젝트입니다. 클라이언트는 화면·입력을, Unreal 전용 서버는 이동·전투·보상·아이템 사용을 담당합니다. 형제 `CatPjt-Fablewood-Backend`의 .NET API와 PostgreSQL이 계정·접속 권한·영구 저장을 담당합니다.
 
+おとぎ話風の協力アクション RPG Fablewood の Unreal 共通プロジェクトです。client は画面・入力、Unreal 専用 server は移動・戦闘・報酬・item 使用を担当します。兄弟 `CatPjt-Fablewood-Backend` の .NET API と PostgreSQL が account・接続権限・永続保存を担当します。
+
 현재 작업본은 `D:\GameProjects\Fablewood-OnlineFlow-20261023` 아래에 있습니다. 기존 원본, Git 등록 중인 분리 저장소와 완료된 Inventory 작업본은 보존합니다. 내부 프로젝트·모듈·Target·에셋 이름은 `Fablewood`, 진입 파일은 `Fablewood.uproject`입니다.
+
+当時の作業コピーは `D:\GameProjects\Fablewood-OnlineFlow-20261023` 以下です。既存原本、Git 登録中の分離 repository、完了済み Inventory 作業コピーは保存します。内部 project・module・Target・asset 名は `Fablewood`、入口は `Fablewood.uproject` です。
 
 ```text
 Fablewood-OnlineFlow-20261023/
@@ -156,15 +192,27 @@ Fablewood-OnlineFlow-20261023/
 
 ## 이번 변경과 검증 상태
 
+## 今回の変更と検証状態
+
 게임 안에서 가입·로그인, 계정별 단일 캐릭터 확인, 서버 선택·입장, 연결 실패 재시도, 저장 확인 후 퇴장과 로그아웃을 구현했습니다. 캐릭터 요약은 서버가 SaveGame·장비·재화와 같은 트랜잭션으로 저장합니다. 아직 요약이 없는 기존 캐릭터는 접속 전 레벨을 추측해서 표시하지 않습니다. 서버 목록은 설정된 접속 주소이며 서버의 실시간 가동 상태는 아닙니다.
+
+ゲーム内での登録・login、account ごとの単一 character 確認、server 選択・入場、接続失敗 retry、保存確認後の退場・logout を実装しました。character summary は server が SaveGame・装備・通貨等と同じ transaction で保存します。summary のない既存 character の接続前 level を推測表示しません。server list は設定済み接続先であり、リアルタイムの稼働状態ではありません。
 
 2026-10-23 공용 데스크톱에서 Editor C++ 빌드·맵 준비, native 22개(실패·경고 0), Windows Development Game 패키징이 통과했습니다. 최종 온라인 작업 `20261023T131703552Z-fa59464f`는 서버 1개와 렌더링 클라이언트 2개로 가입·로그인·이동·스킬·물약·저장·정상 퇴장·의도한 강제 종료를 확인하고, 같은 DB를 유지한 API 재시작 뒤 두 캐릭터의 ID·재화·전체 아이템·장비·요약이 보존된 재로그인까지 통과했습니다. 한 PC의 loopback 검증이며 패키지 실행 파일 플레이는 아직 검증하지 않았습니다. 빌드·native·패키지는 이전 성공 작업 `20261023T115009777Z-aee36c0b`의 동일한 C++·에셋·설정과 검증한 바이너리를 사용했습니다. 두 Tools 파일의 진단·ACL 수정은 별도 실제 검사와 최종 온라인 작업으로 검증했습니다.
 
-이전 Inventory 작업본에서 통과한 native 18개, HTTP/DB 316개, 재시작 지속성 23개와 fresh/reconnect/resume 2인 검사는 이전 소스의 결과입니다. 이번 작업본의 검증 결과로 재사용하지 않습니다. 초기 개발 이력은 [DevelopmentHistory.md](Docs/DevelopmentHistory.md)에 보존합니다.
+2026-10-23 に共用 desktop で Editor C++ build・map 準備、native 22 件（失敗・警告 0）、Windows Development Game packaging が通過しました。当時の最終 online job `20261023T131703552Z-fa59464f` は server 1 個と描画 client 2 個で登録・login・移動・skill・potion・保存・正常退場・意図した強制終了を確認し、同じ DB を維持した API 再起動後に 2 character の ID・通貨等・全 item・装備・summary が保存された再 login まで通過しました。1 PC の loopback 検証であり、この記録時点で package 実行ファイルの play は未検証です。build・native・package は先行成功 job `20261023T115009777Z-aee36c0b` と同じ C++・asset・設定および検証済み binary を使用しました。Tools 2 file の診断・ACL 修正は別の実検査と当該最終 online job で検証しました。
+
+이전 Inventory 작업본에서 통과한 native 18개, HTTP/DB 316개, 재시작 지속성 23개와 fresh/reconnect/resume 2인 검사는 이전 소스의 결과입니다. 이번 작업본의 검증 결과로 재사용하지 않습니다. 초기 개발 이력은 [DevelopmentHistory.md](https://github.com/krumichan/CatPjt-Fablewood-Game/blob/main/Docs/DevelopmentHistory.md)에 보존합니다.
+
+以前の Inventory 作業コピーで通過した native 18 件、HTTP/DB 316 件、再起動永続性 23 件、fresh/reconnect/resume の 2 人検査は以前の source の結果です。今回コピーの検証結果として再利用しません。初期開発履歴は [DevelopmentHistory.md](https://github.com/krumichan/CatPjt-Fablewood-Game/blob/main/Docs/DevelopmentHistory.md) に保存します。
 
 ## 빌드와 계정 화면
 
+## Build と account 画面
+
 Windows, Unreal Engine **5.8.4**, MSVC **14.50**, Windows SDK **10.0.26100.0**, PowerShell **7.4 이상**이 필요합니다. 실행·빌드·테스트는 공용 데스크톱 실행 절차를 우선 사용합니다. 소스 배포에는 호환 바이너리가 없으므로 준비된 환경에서 먼저 Editor를 빌드해야 합니다.
+
+Windows、Unreal Engine **5.8.4**、MSVC **14.50**、Windows SDK **10.0.26100.0**、PowerShell **7.4 以上**が必要です。実行・build・test は共用 desktop 手順を優先します。source 配布には対応 binary がないため、準備済み環境で最初に Editor を build します。
 
 ```powershell
 .\Setup-Project.cmd -EngineRoot 'C:\Program Files\Epic Games\UE_5.8'
@@ -173,9 +221,15 @@ Windows, Unreal Engine **5.8.4**, MSVC **14.50**, Windows SDK **10.0.26100.0**, 
 
 `Play-Account.cmd`는 로컬 모험을 생성하지 않고 게임 내 계정 화면을 엽니다. 계정 이름·비밀번호는 화면에 입력합니다. 비밀번호와 재사용 가능한 세션 토큰은 명령줄·상태 파일에 기록하지 않습니다. 시작 직업은 가입 시 전사·마법사·궁수 중 선택하며, 현재는 계정당 캐릭터 하나입니다. 기존 로컬 플레이는 계정 화면의 버튼으로 들어갑니다. `Open-Editor.cmd`, 기존 `Play.cmd -Editor`, 협동·검증 실행기도 유지합니다.
 
+`Play-Account.cmd` は local adventure を作らず、ゲーム内 account 画面を開きます。account 名・password は画面に入力します。password と再利用可能 session token を command line・state file に記録しません。開始 class は登録時に戦士・魔法使い・弓使いから選び、現在は account ごとに character 1 人です。既存 local play は account 画面のボタンから入ります。`Open-Editor.cmd`、既存 `Play.cmd -Editor`、協力・検証 launcher も維持します。
+
 ## 격리된 온라인 실행
 
-형제 [백엔드 README](../CatPjt-Fablewood-Backend/README.md)의 Release 빌드와 **이번 별도 인스턴스 명령**을 먼저 수행합니다. 이번 작업에 예약한 주소는 API `127.0.0.1:5292`, DB `127.0.0.1:55440`, Unreal `127.0.0.1:7821`입니다. 검증에서는 작업별 고유 컨테이너·volume·schema와 새 테스트 계정으로 이 주소를 사용했고, 완료 후 소유 API·게임·컨테이너를 종료했습니다. 기존 `5281/55438`, Inventory `5291/55439`와 저장 데이터를 재사용하지 않습니다.
+## 隔離した online 実行
+
+형제 [백엔드 README](https://github.com/krumichan/CatPjt-Fablewood-Backend/blob/main/README.md)의 Release 빌드와 **이번 별도 인스턴스 명령**을 먼저 수행합니다. 이번 작업에 예약한 주소는 API `127.0.0.1:5292`, DB `127.0.0.1:55440`, Unreal `127.0.0.1:7821`입니다. 검증에서는 작업별 고유 컨테이너·volume·schema와 새 테스트 계정으로 이 주소를 사용했고, 완료 후 소유 API·게임·컨테이너를 종료했습니다. 기존 `5281/55438`, Inventory `5291/55439`와 저장 데이터를 재사용하지 않습니다.
+
+兄弟の [backend README](https://github.com/krumichan/CatPjt-Fablewood-Backend/blob/main/README.md) の Release build と、**今回の別 instance コマンド**を先に行います。今回予約した接続先は API `127.0.0.1:5292`、DB `127.0.0.1:55440`、Unreal `127.0.0.1:7821` です。検証では job 固有 container・volume・schema と新 test account で使い、完了後に所有 API・game・container を終了しました。既存 `5281/55438`、Inventory `5291/55439` と保存データは再利用しません。
 
 ```powershell
 .\Start-OnlineServer.cmd -BackendRoot ..\CatPjt-Fablewood-Backend -Port 7821
@@ -185,9 +239,15 @@ Windows, Unreal Engine **5.8.4**, MSVC **14.50**, Windows SDK **10.0.26100.0**, 
 
 게임 서버 목록의 기본 주소도 `127.0.0.1:7821`입니다. 다른 포트를 쓰면 API의 `FABLE_GAME_ADDRESS`를 일치시켜야 합니다. 위 두 창은 서로 다른 계정으로 로그인합니다. 플레이 중 Esc로 온라인 메뉴를 열고 안전 퇴장을 선택하면 마지막 저장과 writer 리스 반환 응답을 받은 뒤 캐릭터 화면으로 돌아갑니다. 실패·시간 초과를 성공으로 처리하지 않습니다. 강제 종료 뒤에는 서버의 연결 종료 저장과 리스 만료/반환을 기다린 뒤 새 일회용 접속권으로 재시도합니다.
 
+game server list の既定接続先も `127.0.0.1:7821` です。別 port を使う場合は API の `FABLE_GAME_ADDRESS` を合わせます。上記 2 window は異なる account で login します。play 中に Esc で online menu を開いて安全退場を選ぶと、最終保存と writer lease 返却の応答を受けてから character 画面に戻ります。失敗・timeout を成功扱いしません。強制終了後は server の切断保存と lease 失効/返却を待ち、新しい一回限りの接続 ticket で retry します。
+
 기본 백엔드 위치는 형제 디렉터리이며 `-BackendRoot` 또는 프로세스의 `FABLE_BACKEND_ROOT`로 바꿉니다. `Start-OnlineServer.ps1`은 해당 백엔드의 소유 상태와 `Saved/Backend/server.json`을 사용하고 API를 자동 빌드하지 않습니다. 비공개 설정을 게임 소스에 복사하지 않습니다.
 
+backend の既定位置は兄弟 directory で、`-BackendRoot` または process の `FABLE_BACKEND_ROOT` で変更できます。`Start-OnlineServer.ps1` は対象 backend の所有状態と `Saved/Backend/server.json` を使い、API を自動 build しません。非公開設定を game source にコピーしません。
+
 기존 `Play-Online.cmd`는 직접 접속 검증용으로 유지합니다. 새 가입·로그인 UI 검증은 아래 명령입니다. 이미 준비된 별도 API를 검사한 후 자체 소유의 Unreal 서버와 클라이언트만 시작·종료합니다.
+
+既存 `Play-Online.cmd` は直接接続検証用として維持します。新しい登録/login UI の検証は次のコマンドです。準備済みの別 API を確認し、自ら所有する Unreal server/client だけを開始・終了します。
 
 ```powershell
 pwsh -NoProfile -File .\Tools\Test-OnlineFlow.ps1 -BackendRoot ..\CatPjt-Fablewood-Backend -BackendUrl http://127.0.0.1:5292 -Port 7821
@@ -195,20 +255,36 @@ pwsh -NoProfile -File .\Tools\Test-OnlineFlow.ps1 -BackendRoot ..\CatPjt-Fablewo
 
 검증기는 서버 부재 오류→새 접속권 재시도, 두 계정의 이동·스킬·물약, 한 명의 안전 퇴장과 다른 한 명의 강제 종료, API/서버 재시작 후 기존 계정 재접속·보존값 비교를 검사하도록 작성했습니다. 실행 전 준비 조건과 실제 결과를 확인해야 합니다. 임시 테스트 계정·비밀번호·보고서·캡처는 `Saved/OnlineValidation`에만 두며 Git에서 제외합니다.
 
+検証器は server 不在 error→新 ticket による retry、2 account の移動・skill・potion、1 人の安全退場と他方の強制終了、API/server 再起動後の既存 account 再接続・保存値比較を検査するよう作成しました。実行前の前提と実結果を確認してください。一時 test account・password・report・capture は `Saved/OnlineValidation` だけに置き、Git から除外します。
+
 ## 저장 계약과 서버 범위
+
+## 保存契約と server 範囲
 
 UE SaveGame은 v9, DB 스키마는 **3**, 정형 장비와 캐릭터 요약은 각각 버전 1입니다. 아이템 UUID·소유자·가방/창고 순서·장착·옵션·품질·등급·강화·내구도, 재화 7종과 프로필 blob을 원자 저장합니다. API는 소유권·형식·접속 리스·리비전을 검증하고 전투나 가격을 재계산하지 않습니다. 기존 중앙 저장은 값과 장비를 유지하며 필요한 정보를 첫 접속 때 백필하고 ACK 전 플레이를 차단합니다. 로컬 `.sav` 자동 업로드는 없습니다.
 
+UE SaveGame は v9、DB schema は **3**、構造化装備と character summary は各 version 1 です。item UUID・owner・bag/storage 順序・装備・affix・quality・rarity・upgrade・durability、通貨等 7 種と profile blob を原子保存します。API は ownership・形式・接続 lease・revision を検証し、戦闘や価格を再計算しません。既存中央保存の値・装備を維持し、初回接続時に必要情報を backfill して ACK 前の play を止めます。local `.sav` の自動 upload はありません。
+
 현재 지원하는 전용 서버 실행 경로는 **`UnrealEditor-Cmd.exe -server -NullRHI`**입니다. `FablewoodServer.Target.cs`와 Client Target 정의는 있지만 독립 `FablewoodServer.exe`에는 Server Target 지원 소스 엔진이 필요합니다. Windows Development Game 패키징은 통과했지만 패키지 자체 플레이·독립 Server Target·Linux·외부망은 검증하지 않았습니다. Game Target 실행 파일에 `-server`만 붙여 전용 서버라고 취급하지 않습니다.
+
+対応する専用 server の実行経路は **`UnrealEditor-Cmd.exe -server -NullRHI`** です。`FablewoodServer.Target.cs` と Client Target 定義はありますが、独立した `FablewoodServer.exe` には Server Target 対応 source engine が必要です。Windows Development Game packaging は通過しましたが、この記録時点の package 自体の play・独立 Server Target・Linux・外部 network は未検証です。Game Target 実行ファイルに `-server` を付けるだけで専用 server と扱いません。
 
 ## 소스와 산출물
 
+## Source と生成物
+
 포함 대상은 `Source`, `Config`, `Tools`, 루트 실행기·문서, `Content`의 필수 `.uasset`·`.umap`, `ArtSource` 원본과 라이선스, 직접 작성한 `Build/Windows` 리소스입니다. 원본 메시 OBJ 68개는 필수 소스입니다.
 
+含めるのは `Source`、`Config`、`Tools`、root launcher・文書、`Content` の必須 `.uasset`・`.umap`、`ArtSource` 原本・license、自作 `Build/Windows` resource です。原本 mesh OBJ 68 個は必須 source です。
+
 `Binaries`, `Intermediate`, `DerivedDataCache`, `Saved`, `Builds`, `bin/obj`, `.vs`, 생성 솔루션·검증 캡처·실제 비밀 설정·DB 데이터는 제외합니다. `.gitignore`와 소스 매니페스트는 기존 파일을 삭제하지 않습니다.
+
+`Binaries`、`Intermediate`、`DerivedDataCache`、`Saved`、`Builds`、`bin/obj`、`.vs`、生成 solution・検証 capture・実秘密設定・DB data は除外します。`.gitignore` と source manifest は既存 file を削除しません。
 
 ```powershell
 pwsh -NoProfile -File .\Tools\Get-SourceManifest.ps1
 ```
 
 매니페스트는 허용 목록·필수 소스·자산 쌍·파일 SHA-256과 알려진 비밀 설정 패턴을 확인합니다. 이는 빌드·플레이 통과나 모든 비밀의 부재를 보증하지 않습니다. 형제 백엔드는 별도 매니페스트를 사용합니다. 과거 이력 문서의 원본 경로·산출물 참조는 역사 기록이며 새 소스 배포에 과거 실행 결과가 포함된다는 의미가 아닙니다.
+
+manifest は allowlist・必須 source・asset pair・file SHA-256・既知の秘密設定 pattern を確認します。build/play 通過やあらゆる秘密情報の不在を保証しません。兄弟 backend は別 manifest を使います。過去履歴文書の原本 path・成果物参照は歴史記録で、新 source 配布に過去実行結果を含む意味ではありません。
