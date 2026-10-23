@@ -84,7 +84,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
     const auto Party=[&](EFableQuestId Quest,EFableQuestStage Stage)
     {
         if(GS->PlayerArray.Num()!=2)return false;
-        for(auto* Entry:GS->PlayerArray){const auto* Other=Cast<AFablePlayerState>(Entry);if(!Other||Other->GetQuestStage(Quest)!=Stage)return false;}return true;
+        for(APlayerState* Entry:GS->PlayerArray){const auto* Other=Cast<AFablePlayerState>(Entry);if(!Other||Other->GetQuestStage(Quest)!=Stage)return false;}return true;
     };
     if(Now-DungeonStepAt>180){Finish(false,FString::Printf(TEXT("Online dungeon step %d timed out."),DungeonStep));return false;}
     if(GS->bPartyRecoveryPending||Hero->IsDefeated())
@@ -139,7 +139,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
     case 8:
     {
         AFableCharacter* Fallen=nullptr;
-        for(auto* Entry:GS->PlayerArray){auto* Other=Cast<AFablePlayerState>(Entry);if(Other&&Other->HeroClass==EFableClass::Archer)Fallen=Cast<AFableCharacter>(Other->GetPawn());}
+        for(APlayerState* Entry:GS->PlayerArray){auto* Other=Cast<AFablePlayerState>(Entry);if(Other&&Other->HeroClass==EFableClass::Archer)Fallen=Cast<AFableCharacter>(Other->GetPawn());}
         if(!Fallen)break;
         if(Fallen->IsDowned()){Checks.Add(TEXT("ally_downed"),true);Capture(TEXT("ally-downed"));Advance(9);break;}
         if(PC->IsAnyPanelOpen())PC->UIClosePanels();
@@ -154,7 +154,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
     case 10:
     {
         AFableCharacter* Fallen=nullptr;
-        for(auto* Entry:GS->PlayerArray){auto* Other=Cast<AFablePlayerState>(Entry);if(Other&&Other->HeroClass==EFableClass::Archer)Fallen=Cast<AFableCharacter>(Other->GetPawn());}
+        for(APlayerState* Entry:GS->PlayerArray){auto* Other=Cast<AFablePlayerState>(Entry);if(Other&&Other->HeroClass==EFableClass::Archer)Fallen=Cast<AFableCharacter>(Other->GetPawn());}
         if(!Fallen)break;
         if(Fallen->IsAlive()&&Fallen->GetTimesRevivedCount()>0)
         {Checks.Add(TEXT("ally_revived"),true);Capture(TEXT("ally-revived"));Advance(11);break;}
