@@ -67,6 +67,9 @@ if (Test-Path -LiteralPath $backendStatePath -PathType Leaf) {
     $backendUri=[Uri]$backendState.baseUrl
     if (-not $backendUri.IsLoopback -or $backendUri.Scheme -ne 'http') { throw 'Stored backend endpoint is not a local HTTP service.' }
     $backendArgs=@{DatabasePort=[int]$backendState.databasePort;ApiPort=$backendUri.Port;Schema=[string]$backendState.schema;ServerId=[string]$backendState.serverId}
+    $backendArgs.ContainerName=[string]$backendState.containerName
+    $backendArgs.VolumeName=[string]$backendState.volume
+    if ($null -ne $backendState.PSObject.Properties['composeProject']) { $backendArgs.ComposeProject=[string]$backendState.composeProject }
 }
 $backend=& (Join-Path $PSScriptRoot 'Start-Backend.ps1') -BackendRoot $backendLink.root @backendArgs
 if ($backend.status -notin @('ready','already-running') -or -not (Test-Path -LiteralPath $serverConfig -PathType Leaf)) { throw 'The local backend is not ready.' }

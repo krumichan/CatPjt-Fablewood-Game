@@ -1,6 +1,9 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
+    [ValidatePattern('^[a-z0-9][a-z0-9_.-]{0,62}$')][string]$ContainerName='fablewood-postgres',
+    [ValidatePattern('^[a-z0-9][a-z0-9_.-]{0,62}$')][string]$VolumeName='fablewood-postgres-data',
+    [ValidatePattern('^[a-z0-9][a-z0-9_-]{0,62}$')][string]$ComposeProject='fablewood-backend',
     [string]$BackendRoot,
     [ValidateRange(1024,65535)][int]$DatabasePort=55438,
     [ValidateRange(1024,65535)][int]$ApiPort=5281,

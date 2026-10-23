@@ -45,6 +45,7 @@ $selected=@($files | Sort-Object FullName -Unique)
 $paths=@($selected | ForEach-Object { Get-RelativeSourcePath $_.FullName })
 $required=@('Fablewood.uproject','.gitignore','README.md','Config/DefaultEngine.ini','Config/DefaultGame.ini','Config/DefaultInput.ini',
     'Source/FablewoodServer.Target.cs','Source/FablewoodClient.Target.cs','Content/Maps/ForestClearing.umap',
+    'Source/Fablewood/FableInventorySnapshot.cpp','Source/Fablewood/FableInventorySnapshot.h','Source/Fablewood/FableInventoryTests.cpp',
     'Content/UI/Fonts/F_Korean.uasset','Content/UI/Fonts/F_KoreanFace.uasset','ArtSource/Fonts/NanumGothic.ttf','ArtSource/Fonts/LICENSE.txt',
     'ArtSource/Textures/T_StorybookMeadow.png','Content/Art/Textures/T_StorybookMeadow.uasset',
     'Content/Art/Materials/M_FablePaint.uasset','Content/Art/Materials/M_FableGround.uasset','Content/Art/Materials/M_FableWater.uasset',
@@ -110,7 +111,13 @@ if (-not $OutputPath) {
 }
 $OutputPath=[IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $OutputPath) { throw 'Manifest output already exists and was preserved.' }
+foreach ($record in $records) {
+    $file=Join-Path $projectRoot $record.path
+    if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $record.sha256) { throw 'Source changed while collecting the manifest; no manifest was written.' }
+}
 [IO.Directory]::CreateDirectory((Split-Path -Parent $OutputPath)) | Out-Null
 $manifest=[ordered]@{status='ready';kind='source-and-runtime-assets';projectKind='unreal-game';createdUtc=[DateTime]::UtcNow.ToString('o');projectRoot=$projectRoot;fileCount=$records.Count;totalBytes=($selected | Measure-Object Length -Sum).Sum;sourceFileCount=$allSource.Count;meshSourceCount=$meshSources.Count;files=$records;excluded=$excluded;excludedRoots=@('Binaries','Intermediate','Saved','Builds','DerivedDataCache','.vs','ArtDirection/Previews','Backend');assertions=[ordered]@{allSourceFilesIncluded=$true;runtimeAssetsIncluded=$true;allMeshOriginalsIncluded=$true;liveSecretsAbsent=$true;knownPrivateSecretCount=$knownSecrets.Count};limitations=@('This is an inventory and secret check, not a build or gameplay test.','Binary source assets are retained; generated executables, reports, saves and DB volumes are excluded.','Historical regression fixtures remain separate from this source manifest.','The sibling .NET backend has its own source manifest and SDK pin.','Known-secret matching only inspects optional private files under this game root; zero known secrets is not a general proof that no secrets exist.')}
-[IO.File]::WriteAllText($OutputPath,($manifest | ConvertTo-Json -Depth 8)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+$bytes=[Text.UTF8Encoding]::new($false).GetBytes(($manifest | ConvertTo-Json -Depth 8)+[Environment]::NewLine)
+$stream=[IO.File]::Open($OutputPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
 Write-Output ([pscustomobject]@{status='ready';manifest=$OutputPath;fileCount=$records.Count;sourceFileCount=$allSource.Count;meshSourceCount=$meshSources.Count})
