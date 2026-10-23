@@ -98,6 +98,8 @@ public:
     void UIFocusJoinAddress();
     void UISetInitialClass(EFableClass HeroClass);
     void UIReturnToFrontEnd();
+    void UIRequestOnlineLeave();
+    bool IsOnlineLeavePending() const { return bOnlineLeavePending; }
     bool IsFrontEndOpen() const { return bFrontEndOpen; }
     bool IsJoinAddressFocused() const { return bJoinAddressFocused; }
     const FString& GetJoinAddress() const { return JoinAddress; }
@@ -123,6 +125,15 @@ protected:
     virtual void SetupInputComponent() override;
     virtual void PlayerTick(float DeltaTime) override;
 private:
+    FGuid OnlineLeaveRequestId;
+    FGuid ServerOnlineLeaveRequestId;
+    bool bOnlineLeavePending = false;
+    bool bServerOnlineLeavePending = false;
+    bool bOnlineLeaveInputBlocked = false;
+    double LastOnlineLeaveRequestTime = -100.0;
+    void BlockOnlineLeaveInput();
+    UFUNCTION(Server, Reliable) void ServerRequestOnlineLeave(FGuid RequestId);
+    UFUNCTION(Client, Reliable) void ClientOnlineLeaveResult(FGuid RequestId, bool bSuccess, const FString& Reason);
     bool bFrontEndOpen = false;
     bool bInventoryOpen = false;
     bool bWorkshopOpen = false;

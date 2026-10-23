@@ -1,6 +1,7 @@
-﻿#include "FableGameInstance.h"
+#include "FableGameInstance.h"
 
 #include "FableSaveGame.h"
+#include "FableOnlineFlowSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -316,6 +317,21 @@ bool UFableGameInstance::JoinGame(const FString& Address)
     return true;
 }
 
+bool UFableGameInstance::JoinOnlineServer(const FString& Address,const FString& OneUseTicket)
+{
+    if(!CanStartTravel())return false;
+    FString Target;
+    if(!ValidateJoinAddress(Address,Target)||OneUseTicket.Len()<16||OneUseTicket.Len()>512)return false;
+    for(TCHAR C:OneUseTicket)
+        if(!IsASCIIAlnum(C)&&C!=TEXT('-')&&C!=TEXT('_')&&C!=TEXT('.'))return false;
+    APlayerController* Controller=GetFirstLocalPlayerController();if(!Controller)return false;
+    ActiveProfilePrefix.Reset();PendingProfilePrefix.Reset();FrontEndError.Reset();
+    bTravelInProgress=true;bRecoveringToFrontEnd=false;
+    // Only the short-lived one-use ticket travels; the account token/password stay in RAM.
+    Controller->ClientTravel(Target+TEXT("?FableTicket=")+OneUseTicket,TRAVEL_Absolute);
+    return true;
+}
+
 bool UFableGameInstance::CommitPendingProfile()
 {
     if (PendingProfilePrefix.IsEmpty()) return true;
@@ -369,6 +385,7 @@ void UFableGameInstance::OnWorldLoaded(UWorld* LoadedWorld)
         ActiveProfilePrefix = IsValidProfilePrefix(Prefix) ? Prefix : LegacyPrefix;
     }
     CommitPendingProfile();
+    if(auto* Online=GetSubsystem<UFableOnlineFlowSubsystem>())Online->OnWorldLoaded(LoadedWorld);
 }
 
 void UFableGameInstance::QueueFrontEndReturn(const FString& ErrorMessage)
@@ -418,6 +435,12 @@ void UFableGameInstance::HandleNetworkFailure(UWorld* FailedWorld, UNetDriver* D
         && (FailureType == ENetworkFailure::ConnectionLost || FailureType == ENetworkFailure::ConnectionTimeout))
         return;
     if (bRecoveringToFrontEnd) return;
+    if(auto* Online=GetSubsystem<UFableOnlineFlowSubsystem>();Online&&Online->IsEnabled()&&Online->IsManagingConnection())
+    {
+        Online->HandleConnectionFailure(false);
+        QueueFrontEndReturn(TEXT("서버 연결이 끊어졌습니다. 온라인 화면에서 다시 접속할 수 있습니다."));
+        return;
+    }
     UE_LOG(LogTemp, Warning, TEXT("FABLE_FRONTEND_NETWORK_FAILURE type=%d detail=%s"), int32(FailureType), *ErrorString);
     CommitPendingProfile();
     QueueFrontEndReturn(TEXT("접속하지 못했거나 연결이 끊어졌습니다. 주소와 방 실행 상태를 확인해 주세요. 저장은 그대로 보존됩니다."));
@@ -427,6 +450,12 @@ void UFableGameInstance::HandleTravelFailure(UWorld* FailedWorld,
     ETravelFailure::Type FailureType, const FString& ErrorString)
 {
     if (FailedWorld && FailedWorld->GetGameInstance() != this) return;
+    if(auto* Online=GetSubsystem<UFableOnlineFlowSubsystem>();Online&&Online->IsEnabled()&&Online->IsManagingConnection()&&!bRecoveringToFrontEnd)
+    {
+        Online->HandleConnectionFailure(true);
+        QueueFrontEndReturn(TEXT("게임 화면으로 이동하지 못했습니다. 온라인 화면에서 다시 시도해 주세요."));
+        return;
+    }
     UE_LOG(LogTemp, Warning, TEXT("FABLE_FRONTEND_TRAVEL_FAILURE type=%d detail=%s"), int32(FailureType), *ErrorString);
     if (bRecoveringToFrontEnd)
     {

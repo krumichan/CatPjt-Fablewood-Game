@@ -3,6 +3,8 @@
 #include "FableEnemy.h"
 #include "FableGameState.h"
 #include "FableGameInstance.h"
+#include "FableOnlineFlowSubsystem.h"
+#include "Engine/GameInstance.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
 #include "Engine/Canvas.h"
@@ -390,6 +392,8 @@ void AFableHUD::DrawHUD()
     if (!Canvas || !PlayerOwner || !GEngine) return;
     AFablePlayerController* PC=Cast<AFablePlayerController>(PlayerOwner);
     if (!PC) return;
+    UFableOnlineFlowSubsystem* Online=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr;
+    if (Online && Online->IsEnabled() && Online->IsOverlayBlocking()) return;
     const float W=Canvas->ClipX,H=Canvas->ClipY,S=FMath::Clamp(FMath::Min(W/900.0f,H/600.0f),.6f,1.7f);
     if (PC->IsFrontEndOpen()) { if (PC->IsHelpOpen()) DrawHelp(PC,S); else DrawFrontEnd(PC,S); return; }
     const AFablePlayerState* State=PC->GetPlayerState<AFablePlayerState>();
@@ -453,6 +457,8 @@ void AFableHUD::DrawHUD()
         DrawRect(Warning,X+12*S,200*S,416*S*FMath::Clamp(GS->BossHealth/GS->BossMaxHealth,0.f,1.f),9*S);
     }
     DrawRecoveryStatus(PC,GS,S);
+    if (Online && Online->IsEnabled() && !PC->IsAnyPanelOpen())
+        DrawButton(TEXT("Esc · 온라인 메뉴"),TEXT("OnlineMenu"),(W-176*S)*.5f,(GS && GS->AdventureStage==EFableAdventureStage::Boss?225.f:153.f)*S,176*S,30*S,S);
     if (!PC->IsAnyPanelOpen())
     {
         DrawRect(Ink,14*S,H-164*S,W-28*S,150*S);
@@ -1070,6 +1076,7 @@ void AFableHUD::NotifyHitBoxClick(FName BoxName)
     if (Name.StartsWith(TEXT("Item_"))) { PC->UISelectItem(FCString::Atoi(*Name.Mid(5)));return; }
     if (Name.StartsWith(TEXT("Skill_"))) { PC->UISelectSkill(FCString::Atoi(*Name.Mid(6)));return; }
     if (Name.StartsWith(TEXT("Buy_"))) { const int32 Offer=FCString::Atoi(*Name.Mid(4));if(Offer>=0 && Offer<6)PC->UIShopBuy(static_cast<EFableShopOffer>(Offer));return; }
+    if (BoxName==TEXT("OnlineMenu")) { if(auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr) Flow->ToggleInGameMenu(); return; }
     if (BoxName==TEXT("ClosePanel"))PC->UIClosePanels();
     else if(BoxName==TEXT("SortInventory"))PC->UICycleInventorySort();
     else if(BoxName==TEXT("DifficultyNormal"))PC->UISelectDifficulty(EFableDifficulty::Normal);

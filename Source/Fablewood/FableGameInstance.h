@@ -29,6 +29,7 @@ public:
     UFUNCTION(BlueprintCallable) bool StartNewGame(EFableClass HeroClass, bool bHost = true);
     UFUNCTION(BlueprintCallable) bool ContinueGame(bool bHost = true);
     UFUNCTION(BlueprintCallable) bool JoinGame(const FString& Address);
+    bool JoinOnlineServer(const FString& Address, const FString& OneUseTicket);
     UFUNCTION(BlueprintCallable) void ReturnToFrontEnd();
     UFUNCTION(BlueprintPure) bool HasContinueGame() const;
     UFUNCTION(BlueprintPure) FString GetContinueSummary() const;

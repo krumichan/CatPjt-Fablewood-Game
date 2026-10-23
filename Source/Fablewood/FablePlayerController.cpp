@@ -1,6 +1,8 @@
 #include "FablePlayerController.h"
 #include "FableGameMode.h"
 #include "FableGameInstance.h"
+#include "FableOnlineFlowSubsystem.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "FableGameState.h"
@@ -196,6 +198,15 @@ void AFablePlayerController::SetupInputComponent()
 
 bool AFablePlayerController::InputKey(const FInputKeyEventArgs& Params)
 {
+    if (auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr; Flow && Flow->IsEnabled())
+    {
+        // Slate owns focused text fields and menu keys. Never send them to gameplay bindings.
+        if (Flow->IsOverlayBlocking()) return false;
+        if (Params.Key==EKeys::Escape && Params.Event==IE_Pressed && !IsAnyPanelOpen())
+        { UIStopRevive(); UIClosePanels(); Flow->ToggleInGameMenu(); return true; }
+    }
+    if (bOnlineLeaveInputBlocked) return true;
+
     if (bReviveInputHeld)
     {
         const FKey Input = Params.Key;
@@ -296,6 +307,17 @@ bool AFablePlayerController::InputKey(const FInputKeyEventArgs& Params)
 
 void AFablePlayerController::ApplyUIMode()
 {
+    if (auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr; Flow && Flow->IsEnabled())
+    {
+        if (Flow->IsOverlayBlocking())
+        {
+            UIStopRevive();
+            // Remove only our old Canvas panel layer; the subsystem owns Slate focus and cursor.
+            if (bUIInputBlocked) { SetIgnoreLookInput(false); SetIgnoreMoveInput(false); bUIInputBlocked=false; }
+            return;
+        }
+    }
+
     const bool bWantsCursor = IsAnyPanelOpen() || bFreeCursor;
     if (bWantsCursor) UIStopRevive();
     // Ignore flags are counted. Release only the layer this controller added.
@@ -331,6 +353,7 @@ void AFablePlayerController::UIClosePanels()
 void AFablePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
+    if (const auto Profile=GetPlayerState<AFablePlayerState>(); Profile && Profile->IsBackendClosing()) BlockOnlineLeaveInput();
     if (const AFablePlayerState* State=GetPlayerState<AFablePlayerState>())
         if (ObservedNoticeSerial!=State->NoticeSerial || ObservedNoticeText!=State->LastNotice)
         {
@@ -613,9 +636,85 @@ void AFablePlayerController::UIJoinGame()
 }
 void AFablePlayerController::UIReturnToFrontEnd()
 {
+    const auto Profile=GetPlayerState<AFablePlayerState>();
+    if (Profile && Profile->IsBackendEnabled())
+    {
+        if (auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr; Flow && Flow->IsEnabled()) Flow->RequestLeave();
+        else UIRequestOnlineLeave();
+        return;
+    }
     UIStopRevive();
-    if (UFableGameInstance* GI = Cast<UFableGameInstance>(GetGameInstance())) GI->ReturnToFrontEnd();
+    if (auto GI=Cast<UFableGameInstance>(GetGameInstance())) GI->ReturnToFrontEnd();
 }
+void AFablePlayerController::BlockOnlineLeaveInput()
+{
+    if (!bOnlineLeaveInputBlocked)
+    {
+        bOnlineLeaveInputBlocked=true;
+        SetIgnoreMoveInput(true);SetIgnoreLookInput(true);
+        UIStopRevive();
+    }
+    if (auto Hero=Cast<AFableCharacter>(GetPawn()))
+    {
+        Hero->GetCharacterMovement()->StopMovementImmediately();
+        Hero->GetCharacterMovement()->DisableMovement();
+    }
+}
+void AFablePlayerController::UIRequestOnlineLeave()
+{
+    if (!IsLocalController() || bOnlineLeavePending) return;
+    const auto Profile=GetPlayerState<AFablePlayerState>();
+    if (!Profile || !Profile->IsBackendEnabled())
+    {
+        if (auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr)
+            Flow->OnOnlineLeaveResult(false,TEXT("중앙 서버의 캐릭터 접속을 확인한 뒤 다시 시도해 주세요."));
+        return;
+    }
+    UIClosePanels();BlockOnlineLeaveInput();
+    bOnlineLeavePending=true;OnlineLeaveRequestId=FGuid::NewGuid();
+    ServerRequestOnlineLeave(OnlineLeaveRequestId);
+}
+void AFablePlayerController::ServerRequestOnlineLeave_Implementation(FGuid RequestId)
+{
+    if (!HasAuthority() || !RequestId.IsValid() || !GetWorld()) return;
+    if (bServerOnlineLeavePending)
+    {
+        if (RequestId!=ServerOnlineLeaveRequestId)
+            ClientOnlineLeaveResult(RequestId,false,TEXT("기존 퇴장 요청을 확인하고 있습니다."));
+        return;
+    }
+    const double Now=FPlatformTime::Seconds();
+    if (Now-LastOnlineLeaveRequestTime<0.5)
+    {ClientOnlineLeaveResult(RequestId,false,TEXT("잠시 뒤 퇴장 확인을 다시 요청해 주세요."));return;}
+    LastOnlineLeaveRequestTime=Now;
+    auto Profile=GetPlayerState<AFablePlayerState>();
+    if (!Profile || !Profile->IsBackendEnabled() || !Profile->bProfileLoaded)
+    {ClientOnlineLeaveResult(RequestId,false,TEXT("중앙 프로필 접속이 완료되지 않았습니다."));return;}
+    bServerOnlineLeavePending=true;ServerOnlineLeaveRequestId=RequestId;
+    if (auto Hero=Cast<AFableCharacter>(GetPawn())) Hero->CancelRevive();
+    BlockOnlineLeaveInput();
+    TWeakObjectPtr<AFablePlayerController> Weak(this);
+    Profile->RequestBackendLeave([Weak,RequestId](bool bSuccess,const FString& Reason)
+    {
+        if (auto PC=Weak.Get(); PC && PC->ServerOnlineLeaveRequestId==RequestId)
+        {
+            PC->bServerOnlineLeavePending=false;
+            PC->ServerOnlineLeaveRequestId.Invalidate();
+            PC->ClientOnlineLeaveResult(RequestId,bSuccess,Reason);
+        }
+    });
+}
+void AFablePlayerController::ClientOnlineLeaveResult_Implementation(FGuid RequestId,bool bSuccess,const FString& Reason)
+{
+    if (!bOnlineLeavePending || RequestId!=OnlineLeaveRequestId) return;
+    bOnlineLeavePending=false;OnlineLeaveRequestId.Invalidate();
+    // Both success and failure keep gameplay frozen; only the flow subsystem may travel on a confirmed success.
+    if (auto Flow=GetGameInstance()?GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>():nullptr; Flow && Flow->IsEnabled())
+        Flow->OnOnlineLeaveResult(bSuccess,Reason);
+    else if (bSuccess)
+        if (auto GI=Cast<UFableGameInstance>(GetGameInstance())) GI->ReturnToFrontEnd();
+}
+
 
 TArray<int32> AFablePlayerController::GetInventoryDisplayIds() const
 {
@@ -1082,6 +1181,7 @@ bool AFablePlayerController::AcceptRPGRequest()
 void AFablePlayerController::ServerStartRevive_Implementation(AFableCharacter* Target)
 {
     if (!HasAuthority() || !GetWorld()) return;
+    if (const auto Profile=GetPlayerState<AFablePlayerState>(); Profile && Profile->IsBackendEnabled() && !Profile->IsBackendReady()) return;
     const AFableGameMode* Mode=GetWorld()->GetAuthGameMode<AFableGameMode>();
     const AFableGameState* Adventure=GetWorld()->GetGameState<AFableGameState>();
     if (!Mode || Mode->IsFrontEnd() || (Adventure && Adventure->bPartyRecoveryPending)) return;
