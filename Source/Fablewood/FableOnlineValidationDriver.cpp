@@ -4,6 +4,7 @@
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
+#include "FableGameState.h"
 #include "FableInventorySnapshot.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -46,6 +47,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
     FParse::Value(FCommandLine::Get(),TEXT("FableOnlineValidationRole="),Role);
     if(!FParse::Value(FCommandLine::Get(),TEXT("FableOnlineValidationDirectory="),Directory)||FPaths::IsRelative(Directory))return;
     IFileManager::Get().MakeDirectory(*Directory,true);
+    FParse::Value(FCommandLine::Get(),TEXT("FableOnlineValidationScenario="),Scenario);
     Ticker=FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this,&UFableOnlineValidationDriver::Tick),.1f);
     if(Role!=TEXT("server"))
     {
@@ -55,6 +57,8 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
         if(!J->TryGetStringField(TEXT("mode"),Mode)||!J->TryGetObjectField(TEXT("accounts"),Accounts)||!(*Accounts)->TryGetObjectField(Role,Account)
             ||!(*Account)->TryGetStringField(TEXT("name"),AccountName)||!(*Account)->TryGetStringField(TEXT("password"),Password))
         {Finish(false,TEXT("Invalid private validation context; values suppressed."));return;}
+        J->TryGetStringField(TEXT("scenario"),Scenario);
+        if(Scenario!=TEXT("connectivity")&&Scenario!=TEXT("dungeon")){Finish(false,TEXT("Unknown gameplay validation scenario."));return;}
         InitialClass=(*Account)->GetIntegerField(TEXT("initialClass"));
         const TSharedPtr<FJsonObject>* E=nullptr;if((*Account)->TryGetObjectField(TEXT("expected"),E))Expected=*E;
         J->TryGetBoolField(TEXT("offlineFailure"),bOfflineFailure);FString Crash;J->TryGetStringField(TEXT("crashRole"),Crash);bCrashRole=Role==Crash;
@@ -63,7 +67,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 }
 void UFableOnlineValidationDriver::Deinitialize()
 {
-    FTSTicker::RemoveTicker(Ticker);ReleaseSkillInput();Password.Reset();Super::Deinitialize();
+    FTSTicker::RemoveTicker(Ticker);ReleaseSkillInput();DungeonReleaseInput();Password.Reset();Super::Deinitialize();
 }
 TSharedRef<FJsonObject> UFableOnlineValidationDriver::Profile(const AFablePlayerState* P) const
 {
@@ -80,6 +84,16 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::Profile(const AFablePlayer
     J->SetArrayField(TEXT("items"),Items);J->SetNumberField(TEXT("bagCount"),P->Inventory.Num());J->SetNumberField(TEXT("stashCount"),P->StashItems.Num());
     if(const auto* Item=P->FindItem(P->EquippedWeaponId))J->SetStringField(TEXT("equippedWeaponInstanceId"),Item->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
     if(const auto* Item=P->FindItem(P->EquippedArmorId))J->SetStringField(TEXT("equippedArmorInstanceId"),Item->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
+    J->SetNumberField(TEXT("forestQuest"),int32(P->ForestQuest));
+    J->SetNumberField(TEXT("dungeonQuest"),int32(P->DungeonQuest));
+    J->SetNumberField(TEXT("dungeonCompletions"),P->DungeonCompletions);
+    if(const auto* Hero=Cast<AFableCharacter>(P->GetPawn()))
+    {
+        J->SetNumberField(TEXT("downedCount"),Hero->GetDownedCount());
+        J->SetNumberField(TEXT("timesRevived"),Hero->GetTimesRevivedCount());
+        J->SetNumberField(TEXT("revivesPerformed"),Hero->GetRevivesPerformedCount());
+        J->SetNumberField(TEXT("health"),Hero->GetHealth());
+    }
     return J;
 }
 void UFableOnlineValidationDriver::Capture(const FString& Name)
@@ -91,7 +105,7 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status,cons
 {
     if(Directory.IsEmpty())return FString();
     auto J=MakeShared<FJsonObject>();J->SetStringField(TEXT("role"),Role);J->SetStringField(TEXT("mode"),Mode);J->SetStringField(TEXT("status"),Status);J->SetStringField(TEXT("reason"),Reason);
-    J->SetNumberField(TEXT("step"),Step);J->SetNumberField(TEXT("processId"),FPlatformProcess::GetCurrentProcessId());J->SetNumberField(TEXT("movementCm"),Movement);
+    J->SetNumberField(TEXT("step"),Step);J->SetStringField(TEXT("scenario"),Scenario);J->SetNumberField(TEXT("dungeonStep"),DungeonStep);J->SetNumberField(TEXT("processId"),FPlatformProcess::GetCurrentProcessId());J->SetNumberField(TEXT("movementCm"),Movement);
     auto C=MakeShared<FJsonObject>();for(const auto& Pair:Checks)C->SetBoolField(Pair.Key,Pair.Value);J->SetObjectField(TEXT("checks"),C);
     TArray<TSharedPtr<FJsonValue>> Shots;for(const auto& Path:Screenshots)Shots.Add(MakeShared<FJsonValueString>(Path));J->SetArrayField(TEXT("screenshots"),Shots);
     UWorld* World=GetGameInstance()?GetGameInstance()->GetWorld():nullptr;
@@ -104,6 +118,7 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status,cons
         TArray<TSharedPtr<FJsonValue>> ObservedIds;
         for(const FString& Id:ServerObservedPlayerIds)ObservedIds.Add(MakeShared<FJsonValueString>(Id));
         J->SetArrayField(TEXT("serverObservedPlayerIds"),ObservedIds);
+        if(ServerDungeonObservation)J->SetObjectField(TEXT("serverDungeonObservation"),ServerDungeonObservation);
     }
     if(Checkpoint)J->SetObjectField(TEXT("checkpoint"),Checkpoint);
     J->SetBoolField(TEXT("report_snapshot_frozen"),Status==TEXT("passed")||Status==TEXT("failed"));
@@ -169,10 +184,35 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     const double Now=FPlatformTime::Seconds();
     if(bDone){if(Now-FinishedAt>2)FPlatformMisc::RequestExitWithStatus(false,bPublicationFailed?1:0);return true;}
     if(bTerminalPending){PublishTerminal();return true;}
-    ReleaseSkillInput();
+    ReleaseSkillInput();DungeonReleaseInput();
     auto* GI=GetGameInstance();UWorld* World=GI?GI->GetWorld():nullptr;if(!World)return true;
     if(Role==TEXT("server"))
     {
+        if(!ServerDungeonObservation)
+        {
+            const auto* GS=World->GetGameState<AFableGameState>();
+            if(GS&&GS->ActiveRegion==EFableRegion::RootRuins&&GS->AdventureStage==EFableAdventureStage::Cleared)
+            {
+                TArray<TSharedPtr<FJsonValue>> Members;bool Reviver=false,Revived=false;
+                for(FConstPlayerControllerIterator It=World->GetPlayerControllerIterator();It;++It)
+                {
+                    const auto* Controller=It->Get();const auto* State=Controller?Controller->GetPlayerState<AFablePlayerState>():nullptr;
+                    const auto* Hero=Controller?Cast<AFableCharacter>(Controller->GetPawn()):nullptr;
+                    if(!State||!Hero||!Hero->IsAlive()||!State->IsBackendReady()||State->IsBackendSavePending()
+                        ||State->DungeonQuest!=EFableQuestStage::Ready||!FableRPG::IsInRegion(EFableRegion::RootRuins,Hero->GetActorLocation()))continue;
+                    Reviver|=Hero->GetRevivesPerformedCount()>0;Revived|=Hero->GetTimesRevivedCount()>0;
+                    Members.Add(MakeShared<FJsonValueObject>(Profile(State)));
+                }
+                if(Members.Num()==2&&Reviver&&Revived)
+                {
+                    ServerDungeonObservation=MakeShared<FJsonObject>();ServerDungeonObservation->SetArrayField(TEXT("members"),Members);
+                    ServerDungeonObservation->SetNumberField(TEXT("encounterSerial"),GS->EncounterSerial);
+                    ServerDungeonObservation->SetNumberField(TEXT("dungeonWave"),GS->DungeonWave);
+                    ServerDungeonObservation->SetBoolField(TEXT("bossDefeated"),GS->bObjectiveComplete&&GS->BossHealth==0);
+                    Checks.Add(TEXT("server_observed_dungeon_completion"),true);
+                }
+            }
+        }
         // Retain one simultaneous server observation, even after both clients leave.
         // Client PlayerArray counts alone cannot prove two distinct authenticated owners.
         if(ServerObservedPlayerIds.IsEmpty()&&World->GetNetMode()==NM_DedicatedServer)
@@ -202,7 +242,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         return true;
     }
     auto* Flow=GI->GetSubsystem<UFableOnlineFlowSubsystem>();if(!Flow||!Flow->IsEnabled())return true;
-    if(Now-Started>420){Finish(false,TEXT("Online workflow timed out; private context suppressed."));return true;}
+    if(Now-Started>(Scenario==TEXT("connectivity")?420:900)){Finish(false,TEXT("Online workflow timed out; private context suppressed."));return true;}
     if(Now-LastReport>.5){Publish(bCrashRole&&Step==30?TEXT("crash-ready"):TEXT("running"));LastReport=Now;}
     auto Advance=[this,Now](int32 Next){Step=Next;StepAt=Now;LastAction=-1;};
     auto* PC=Cast<AFablePlayerController>(GI->GetFirstLocalPlayerController());auto* P=PC?PC->GetPlayerState<AFablePlayerState>():nullptr;auto* Hero=PC?Cast<AFableCharacter>(PC->GetPawn()):nullptr;
@@ -262,11 +302,15 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         if(!Hero||!P||!Ready)return true;
         if(LastAction>=0)
         {
-            if(P->ManaPotions==BeforeManaPotions-1&&Ready){Checks.Add(TEXT("normal_potion_saved_once"),true);Checkpoint=Profile(P);Capture(TEXT("playing"));Advance(30);}
+            if(P->ManaPotions==BeforeManaPotions-1&&Ready){Checks.Add(TEXT("normal_potion_saved_once"),true);Checkpoint=Profile(P);Capture(TEXT("playing"));Advance(Scenario==TEXT("connectivity")?30:100);}
             return true;
         }
         if(Hero->GetMana()>=Hero->GetMaxMana()-1)return true;
         PC->UIUseManaPotion();LastAction=Now;break;
+    case 100:
+        if(!P||!Hero||!PC)return true;
+        if(TickDungeon(PC,P,Hero,Now)){Checkpoint=Profile(P);Capture(TEXT("dungeon-cleared"));Advance(30);}
+        break;
     case 30:
         if(bCrashRole)return true;
         if(Now-StepAt<2)return true;

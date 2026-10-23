@@ -1,11 +1,16 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
+#include "InputCoreTypes.h"
+#include "FableRPGTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "FableOnlineValidationDriver.generated.h"
 class FJsonObject;
 class FJsonValue;
 class AFablePlayerState;
+class AFablePlayerController;
+class AFableCharacter;
+class AFableEnemy;
 /** Opt-in UI workflow observer. Uses real account APIs and normal gameplay inputs. */
 UCLASS()
 class FABLEWOOD_API UFableOnlineValidationDriver : public UGameInstanceSubsystem
@@ -25,6 +30,19 @@ private:
     void PublishTerminal();
     void ReleaseSkillInput();
     TSharedRef<FJsonObject> Profile(const AFablePlayerState* P) const;
+    FString Scenario=TEXT("connectivity");
+    int32 DungeonStep=0,DungeonWeaponId=0;
+    double DungeonStepAt=0,DungeonActionAt=-10,DungeonAttackAt=-10,DungeonSkillAt=-10;
+    TArray<FKey> DungeonReleaseKeys;
+    TSharedPtr<FJsonObject> DungeonInitial,ServerDungeonObservation;
+    bool TickDungeon(AFablePlayerController* PC,AFablePlayerState* Profile,AFableCharacter* Hero,double Now);
+    void DungeonHold(AFablePlayerController* PC,const FKey& Key,bool Held);
+    void DungeonKey(AFablePlayerController* PC,const FKey& Key);
+    void DungeonReleaseInput();
+    bool DungeonWalk(AFablePlayerController* PC,const FVector& Location,float Radius=100);
+    void DungeonQuest(AFablePlayerController* PC,EFableQuestId Quest,double Now);
+    void DungeonFight(AFablePlayerController* PC,double Now);
+    AFableEnemy* DungeonTarget(AFableCharacter* Hero) const;
     FString Role,Directory,Mode,AccountName,Password;
     int32 InitialClass=0,Step=0,BeforeManaPotions=0;
     bool bOfflineFailure=false,bCrashRole=false,bDone=false,bSkillSent=false,bReleaseSkill=false;

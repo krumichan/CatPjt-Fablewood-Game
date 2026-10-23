@@ -5,6 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
+    [ValidateSet('connectivity','dungeon')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -202,7 +203,7 @@ function Start-OnlineValidationProcess([string]$Role,[string]$Phase,[string]$Con
         }
     }
     $log=Join-Path $folder ($Role+'.log')
-    $arguments.Add('-FableOnlineValidationRole='+$Role);$arguments.Add('-FableOnlineValidationDirectory='+(Quote-Online $folder))
+    $arguments.Add('-FableOnlineValidationRole='+$Role);$arguments.Add('-FableOnlineValidationScenario='+$Scenario);$arguments.Add('-FableOnlineValidationDirectory='+(Quote-Online $folder))
     $arguments.Add('-FableOnlineValidationRun='+$runId);$arguments.Add('-abslog='+(Quote-Online $log))
     $arguments.Add('-LogCmds="LogInit off,LogNet off,LogLoad off"');$arguments.Add('-ExecCmds="t.MaxFPS 30,t.IdleWhenNotForeground 0"')
     try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $(if($Role -cne 'server' -and $PackagedClientExecutable){Split-Path -Parent $exe}else{$script:FableProjectRoot}) -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
@@ -261,11 +262,22 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
     Require-OnlineFields $Checkpoint @('playerId','heroClass','level','experience','classTier','revision','acknowledgedRevision','profileHash','ready','savePending','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId') 'checkpoint_incomplete'
     Assert-Online ($Checkpoint.ready -eq $true -and $Checkpoint.savePending -eq $false -and $Checkpoint.revision -ge 1 -and $Checkpoint.revision -eq $Checkpoint.acknowledgedRevision) 'checkpoint_not_acknowledged'
     Assert-Online ([string]$Checkpoint.playerId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and [string]$Checkpoint.profileHash -cmatch '^[a-f0-9]{64}$') 'checkpoint_identity_format'
-    Assert-Online ($Checkpoint.heroClass -eq $accounts[$Role].initialClass -and $Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0 -and $Checkpoint.classTier -eq 1) 'unexpected_character_progression'
+    Assert-Online ($Checkpoint.heroClass -eq $accounts[$Role].initialClass -and $Checkpoint.classTier -eq 1) 'unexpected_character_class'
+    if($Scenario -ceq 'connectivity'){
+        Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
+    }else{
+        Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
+        Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
+    }
     Require-OnlineFields $Checkpoint.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'checkpoint_wallet_incomplete'
     Assert-Online (@($Checkpoint.wallet.PSObject.Properties).Count -eq 7) 'checkpoint_wallet_shape'
-    Assert-Online ($Checkpoint.wallet.healthPotions -eq 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'normal_potion_durable_quantity_mismatch'
-    foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
+    if($Scenario -ceq 'connectivity'){
+        Assert-Online ($Checkpoint.wallet.healthPotions -eq 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'normal_potion_durable_quantity_mismatch'
+        foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
+    }else{
+        Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
+        Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
+    }
     Assert-Online (@($Checkpoint.items).Count -eq $Checkpoint.bagCount+$Checkpoint.stashCount) 'checkpoint_item_counts'
 }
 function Assert-OnlineShots($Report,[string]$Phase,[int]$Minimum){
@@ -286,6 +298,11 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
     if($Phase -ceq 'register'){
         Assert-Online (Test-OnlineCheck $Report 'connection_failure_visible') 'offline_failure_missing'
         Assert-Online (Test-OnlineCheck $Report 'normal_potion_saved_once') 'potion_ack_missing'
+        if($Scenario -ceq 'dungeon'){
+            foreach($name in @('both_forest_quests_active','forest_reward_equipped','entered_root_ruins','second_wave','boss_seen','ally_downed','boss_defeated','ally_revived','server_reward_totals')){
+                Assert-Online (Test-OnlineCheck $Report $name) 'dungeon_normal_gameplay_check_missing'
+            }
+        }
         Assert-Online ($Report.joinAttempts -ge 2) 'fresh_ticket_retry_missing'
     }
     Assert-OnlineCheckpoint $Report.checkpoint $Role
@@ -303,6 +320,15 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'dungeon' -and $ClientReports.client1.mode -ceq 'register'){
+        Require-OnlineFields $ServerReport @('serverDungeonObservation') 'server_dungeon_observation_missing'
+        Assert-Online (Test-OnlineCheck $ServerReport 'server_observed_dungeon_completion') 'server_dungeon_completion_not_observed'
+        $observation=$ServerReport.serverDungeonObservation
+        Assert-Online ($observation.bossDefeated -eq $true -and $observation.dungeonWave -eq 3 -and $observation.encounterSerial -gt 0 -and @($observation.members).Count -eq 2) 'server_dungeon_observation_invalid'
+        $members=@($observation.members|ForEach-Object playerId|Sort-Object -CaseSensitive)
+        Assert-Online (Equal-Online $members $expected) 'server_dungeon_identities_mismatch'
+        foreach($member in $observation.members){Assert-Online ($member.wallet.gold -eq 383 -and $member.wallet.ore -eq 21 -and $member.wallet.rootCores -eq 1 -and $member.dungeonQuest -eq 2) 'server_dungeon_reward_totals_mismatch'}
+    }
     return ,$observed
 }
 function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
@@ -444,7 +470,7 @@ $backendDll=Join-Path $backendLink.root 'Fablewood.Backend\bin\Release\net10.0\F
 $credentialsPath=Join-Path $backendLink.root 'Saved\Backend\backend-credentials.json'
 $serverKeyPath=Join-Path $backendLink.root 'Saved\Backend\server-key.txt'
 $summary=[ordered]@{
-    runId=$runId;status='running';mode=$(if($PackagedClientExecutable){'editor-dedicated-two-packaged-ui-clients'}else{'editor-dedicated-two-ui-clients'});startedUtc=[DateTime]::UtcNow.ToString('o')
+    runId=$runId;status='running';scenario=$Scenario;mode=$(if($PackagedClientExecutable){'editor-dedicated-two-packaged-ui-clients'}else{'editor-dedicated-two-ui-clients'});startedUtc=[DateTime]::UtcNow.ToString('o')
     backendUrl=$BackendUrl;gamePort=$Port;databaseName='fablewood';phases=[ordered]@{}
     scope=@('One PC, loopback only','Normal in-game registration, authentication, movement, potion and leave UI','Existing saves are not uploaded or injected','API reader sessions only inspect the two new accounts','API restart reuses the same database; PostgreSQL is not restarted here')
     visualReviewPerformed=$false;privateContextFolder=$privateFolder;initialBackendStartupPerformed=$false
@@ -492,7 +518,7 @@ try{
         $accounts[$role]=[ordered]@{name=('o'+[Guid]::NewGuid().ToString('N').Substring(0,24));password=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(30));initialClass=$(if($role -ceq 'client1'){1}else{2})}
     }
     $contextPath=Join-Path $privateFolder 'register-context.private.json'
-    Write-OnlineJson $contextPath @{mode='register';offlineFailure=$true;crashRole='client2';accounts=$accounts}
+    Write-OnlineJson $contextPath @{mode='register';scenario=$Scenario;offlineFailure=$true;crashRole='client2';accounts=$accounts}
     $stage='register-offline-failure';$clients=@{}
     foreach($role in @('client1','client2')){$clients[$role]=Start-OnlineValidationProcess $role 'register' $contextPath}
     $offlineReports=Wait-OnlineOfflineFailures $clients
@@ -539,7 +565,7 @@ try{
     $stage='login-resume';$resumeAccounts=@{}
     foreach($role in @('client1','client2')){$resumeAccounts[$role]=@{name=$accounts[$role].name;password=$accounts[$role].password;initialClass=$accounts[$role].initialClass;expected=@{playerId=$freshCanonical[$role].me.playerId;profileHash=$freshCanonical[$role].me.profileHash}}}
     $contextPath=Join-Path $privateFolder 'login-context.private.json'
-    Write-OnlineJson $contextPath @{mode='login';offlineFailure=$false;accounts=$resumeAccounts}
+    Write-OnlineJson $contextPath @{mode='login';scenario=$Scenario;offlineFailure=$false;accounts=$resumeAccounts}
     $server=Start-OnlineValidationProcess 'server' 'login';$serverInitial=Wait-OnlineServer $server
     $clients=@{};foreach($role in @('client1','client2')){$clients[$role]=Start-OnlineValidationProcess $role 'login' $contextPath}
     $reports=Wait-OnlinePhase 'login' $server $clients $false
