@@ -126,8 +126,8 @@ void AFableGameMode::Logout(AController* Exiting)
     {
         if (AFablePlayerState* Profile = Exiting->GetPlayerState<AFablePlayerState>())
         {
-            Profile->SaveProfile();
             if (bDedicatedMode) Profile->ReleaseBackendProfile();
+            else Profile->SaveProfile();
         }
     }
     if (APlayerController* PC = Cast<APlayerController>(Exiting))

@@ -45,6 +45,7 @@ bool AFablePlayerState::CanUseStoryObject(int32 Index) const
 bool AFablePlayerState::CanRecordStoryAt(EFableRegion Region,const FVector& Location) const
 {
     if(!HasAuthority() || !bProfileLoaded || bStorageBlocked || !GetWorld()) return false;
+    if(IsBackendEnabled() && !IsBackendReady()) return false;
     const AFableCharacter* Hero=StoryHero(this);
     const AFableGameState* Adventure=GetWorld()->GetGameState<AFableGameState>();
     if(!Hero || !Hero->IsAlive() || (Adventure && Adventure->bPartyRecoveryPending)) return false;

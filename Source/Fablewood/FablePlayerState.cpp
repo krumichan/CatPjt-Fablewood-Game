@@ -24,6 +24,7 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendPlayerId, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendReady, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendClosing, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendSavePending, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendRevision, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendAcknowledgedRevision, COND_OwnerOnly);
@@ -158,7 +159,7 @@ void AFablePlayerState::InitializeProfile(bool bHost, const FString& ProfilePref
 }
 bool AFablePlayerState::SaveProfile()
 {
-    if (!HasAuthority() || !bProfileLoaded || bStorageBlocked) return false;
+    if (!HasAuthority() || !bProfileLoaded || bStorageBlocked || bBackendClosing) return false;
     if (bBackendLoading) return true;
     if (bBackendEnabled) return QueueBackendSnapshot(MakeProfileSnapshot());
     if (!bPersistenceEnabled) return true;
@@ -385,7 +386,7 @@ void AFablePlayerState::InvalidateTrialCasts()
 FFableTrialCastContext AFablePlayerState::CreateTrialCastContext(int32 Slot)
 {
     FFableTrialCastContext Context;
-    if (!HasAuthority() || !bProfileLoaded || Slot != GetAdvancementTier()-1) return Context;
+    if (!HasAuthority() || !bProfileLoaded || (bBackendEnabled && !IsBackendReady()) || Slot != GetAdvancementTier()-1) return Context;
     const FFableAdvancementTrial* Trial = FindTrial(Slot+2);
     if (!Trial || Trial->Stage != EFableQuestStage::Active || Trial->ValidSkillCasts >= 3) return Context;
     Context.HeroClass = HeroClass;
@@ -396,7 +397,7 @@ FFableTrialCastContext AFablePlayerState::CreateTrialCastContext(int32 Slot)
 }
 void AFablePlayerState::RecordTrialSkillHit(const FFableTrialCastContext& Context, bool bAppliedSlow)
 {
-    if (!HasAuthority() || !bProfileLoaded || Context.CastId == 0 || Context.CastId > NextTrialCastId
+    if (!HasAuthority() || !bProfileLoaded || (bBackendEnabled && !IsBackendReady()) || Context.CastId == 0 || Context.CastId > NextTrialCastId
         || Context.Generation != TrialGeneration || Context.HeroClass != HeroClass
         || Context.SkillSlot != GetAdvancementTier()-1 || CreditedTrialCasts.Contains(Context.CastId)) return;
     FFableAdvancementTrial* Trial = FindMutableTrial(Context.SkillSlot+2);
@@ -611,6 +612,7 @@ void AFablePlayerState::UsePotion(bool bMana)
 
 void AFablePlayerState::AddExperience(int32 Amount)
 {
+    if (bBackendEnabled && !IsBackendReady()) return;
     Experience += FMath::Max(0,Amount);
     while(Level<20 && Experience>=Level*100) { Experience-=Level*100; ++Level; }
     if(Level==20) Experience=0;
@@ -627,7 +629,7 @@ FFableItem AFablePlayerState::RollItem(EFableEquipmentSlot Slot, EFableClass Ite
 bool AFablePlayerState::AddItem(EFableEquipmentSlot Slot, EFableClass ItemClass, int32 Rarity, int32 NominalPower,
     EFableEquipmentSet SetId, EFableDifficulty Difficulty)
 {
-    if (!HasAuthority()) return false;
+    if (!HasAuthority() || (bBackendEnabled && !IsBackendReady())) return false;
     if (Inventory.Num() >= 32 || NextItemId >= 999999) { Ore=FMath::Min(100000,Ore+6); return false; }
     FFableItem Item=RollItem(Slot,ItemClass,Rarity,NominalPower,SetId,Difficulty);
     if (Item.Id == 0)
@@ -790,6 +792,7 @@ void AFablePlayerState::InteractQuest(EFableQuestId Quest)
 }
 void AFablePlayerState::RecordRegionKill(EFableRegion Region, bool bBoss, EFableDifficulty Difficulty)
 {
+    if (bBackendEnabled && !IsBackendReady()) return;
     if (Region == EFableRegion::Village)
     {
         if (!bBoss) RecordKill(false);
@@ -829,6 +832,7 @@ void AFablePlayerState::RecordRegionKill(EFableRegion Region, bool bBoss, EFable
 }
 void AFablePlayerState::RecordKill(bool bBoss)
 {
+    if (bBackendEnabled && !IsBackendReady()) return;
     if (!HasAuthority() || !bProfileLoaded || !GetWorld()) return;
     const AFableGameState* State=GetWorld()->GetGameState<AFableGameState>();
     if (!State) return;
@@ -1063,7 +1067,7 @@ void AFablePlayerState::WithdrawItem(int32 ItemId)
 }
 void AFablePlayerState::WearEquipment(EFableEquipmentSlot Slot, int32 Amount)
 {
-    if (!HasAuthority() || !bProfileLoaded || bStorageBlocked || !GetWorld() || Amount != 1
+    if (!HasAuthority() || !bProfileLoaded || bStorageBlocked || (bBackendEnabled && !IsBackendReady()) || !GetWorld() || Amount != 1
         || uint8(Slot) > uint8(EFableEquipmentSlot::Armor)) return;
     double& NextWear=Slot == EFableEquipmentSlot::Weapon ? NextWeaponWearTime : NextArmorWearTime;
     const double Now=GetWorld()->GetTimeSeconds();

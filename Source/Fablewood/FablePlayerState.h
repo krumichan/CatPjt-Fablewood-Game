@@ -47,9 +47,11 @@ public:
     bool SaveProfile();
     void InitializeBackendProfile(const FString& Ticket);
     void ReleaseBackendProfile();
+    void RequestBackendLeave(TFunction<void(bool,const FString&)> Completion);
     FString GetBackendPlayerId() const { return BackendPlayerId; }
     bool IsBackendEnabled() const { return bBackendEnabled; }
-    bool IsBackendReady() const { return bBackendReady && bProfileLoaded && !bStorageBlocked; }
+    bool IsBackendReady() const { return bBackendReady && bProfileLoaded && !bStorageBlocked && !bBackendClosing; }
+    bool IsBackendClosing() const { return bBackendClosing; }
     bool IsBackendSavePending() const { return bBackendSavePending; }
     int64 GetBackendRevision() const { return BackendRevision; }
     int64 GetBackendAcknowledgedRevision() const { return BackendAcknowledgedRevision; }
@@ -146,11 +148,11 @@ private:
     UPROPERTY(Replicated) int64 BackendAcknowledgedRevision = 0;
     UPROPERTY(Replicated) FString BackendAcknowledgedProfileHash;
     bool bBackendLoading = false;
-    bool bBackendClosing = false;
+    UPROPERTY(Replicated) bool bBackendClosing = false;
     TSharedPtr<FFableBackendSession> BackendSession;
     UFableSaveGame* MakeProfileSnapshot();
     void ApplyProfileSnapshot(const UFableSaveGame* Data);
-    bool QueueBackendSnapshot(UFableSaveGame* Data);
+    bool QueueBackendSnapshot(UFableSaveGame* Data, bool bFinalSnapshot = false);
 
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FFableWorkshopTestAccess;
