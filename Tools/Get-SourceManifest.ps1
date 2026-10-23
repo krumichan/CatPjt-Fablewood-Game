@@ -49,7 +49,12 @@ $required=@('Fablewood.uproject','.gitignore','README.md','Config/DefaultEngine.
     'Content/UI/Fonts/F_Korean.uasset','Content/UI/Fonts/F_KoreanFace.uasset','ArtSource/Fonts/NanumGothic.ttf','ArtSource/Fonts/LICENSE.txt',
     'ArtSource/Textures/T_StorybookMeadow.png','Content/Art/Textures/T_StorybookMeadow.uasset',
     'Content/Art/Materials/M_FablePaint.uasset','Content/Art/Materials/M_FableGround.uasset','Content/Art/Materials/M_FableWater.uasset',
-    'Tools/Backend-Link.ps1','Tools/Get-SourceManifest.ps1','Docs/DevelopmentHistory.md')
+    'Tools/Backend-Link.ps1','Tools/Get-SourceManifest.ps1','Docs/DevelopmentHistory.md',
+    'Source/Fablewood/FableOnlineFlowSubsystem.h','Source/Fablewood/FableOnlineFlowSubsystem.cpp',
+    'Source/Fablewood/FableOnlineWidget.h','Source/Fablewood/FableOnlineWidget.cpp',
+    'Source/Fablewood/FableCharacterSummary.h','Source/Fablewood/FableCharacterSummary.cpp','Source/Fablewood/FableCharacterSummaryTests.cpp',
+    'Source/Fablewood/FableOnlineValidationDriver.h','Source/Fablewood/FableOnlineValidationDriver.cpp',
+    'Tools/Play-Account.ps1','Play-Account.cmd','Tools/Test-OnlineFlow.ps1')
 foreach ($name in @('SW_FableHit','SW_FableSkill','SW_FableShield','SW_FableAdvance')) {
     $required+='ArtSource/Audio/'+$name+'.wav';$required+='Content/Art/Audio/'+$name+'.uasset'
 }

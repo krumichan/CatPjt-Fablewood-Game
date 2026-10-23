@@ -136,3 +136,79 @@ pwsh -NoProfile -File .\Tools\Get-SourceManifest.ps1
 분리 기준은 원본의 `Saved/SourceManifest/20261023-005200-source-only.json`입니다. 원본 폴더의 코드·저장·패키지·검증 자료는 별도로 보존합니다. 과거 마이그레이션 회귀에는 summary와 역할별 `.sav` fixture가 필요하므로 새 소스 작업본만으로 모든 과거 회귀를 실행할 수는 없습니다. 필요한 경우 별도 보존 자료를 명시적으로 지정하고 원본 SHA를 대조합니다.
 
 分離の基準は原本の `Saved/SourceManifest/20261023-005200-source-only.json` です。原本フォルダーのコード・保存データ・パッケージ・検証資料は別途保全します。過去の移行回帰には summary と役割別の `.sav` fixture が必要なため、新しいソース作業コピーだけで過去の全回帰を実行することはできません。必要に応じて別途保全した資料を明示的に指定し、原本 SHA を照合します。
+
+
+<a id="foundation-development-record-20261023"></a>
+
+## Foundation 개발 원문 · 2026-10-23
+
+# CatPjt-Fablewood-Game
+
+동화풍 협동 액션 RPG Fablewood의 Unreal 공통 프로젝트입니다. 클라이언트는 화면·입력을, Unreal 전용 서버는 이동·전투·보상·아이템 사용을 담당합니다. 형제 `CatPjt-Fablewood-Backend`의 .NET API와 PostgreSQL이 계정·접속 권한·영구 저장을 담당합니다.
+
+현재 작업본은 `D:\GameProjects\Fablewood-OnlineFlow-20261023` 아래에 있습니다. 기존 원본, Git 등록 중인 분리 저장소와 완료된 Inventory 작업본은 보존합니다. 내부 프로젝트·모듈·Target·에셋 이름은 `Fablewood`, 진입 파일은 `Fablewood.uproject`입니다.
+
+```text
+Fablewood-OnlineFlow-20261023/
+├─ CatPjt-Fablewood-Game/
+└─ CatPjt-Fablewood-Backend/
+```
+
+## 이번 변경과 검증 상태
+
+게임 안에서 가입·로그인, 계정별 단일 캐릭터 확인, 서버 선택·입장, 연결 실패 재시도, 저장 확인 후 퇴장과 로그아웃을 구현했습니다. 캐릭터 요약은 서버가 SaveGame·장비·재화와 같은 트랜잭션으로 저장합니다. 아직 요약이 없는 기존 캐릭터는 접속 전 레벨을 추측해서 표시하지 않습니다. 서버 목록은 설정된 접속 주소이며 서버의 실시간 가동 상태는 아닙니다.
+
+2026-10-23 공용 데스크톱에서 Editor C++ 빌드·맵 준비, native 22개(실패·경고 0), Windows Development Game 패키징이 통과했습니다. 최종 온라인 작업 `20261023T131703552Z-fa59464f`는 서버 1개와 렌더링 클라이언트 2개로 가입·로그인·이동·스킬·물약·저장·정상 퇴장·의도한 강제 종료를 확인하고, 같은 DB를 유지한 API 재시작 뒤 두 캐릭터의 ID·재화·전체 아이템·장비·요약이 보존된 재로그인까지 통과했습니다. 한 PC의 loopback 검증이며 패키지 실행 파일 플레이는 아직 검증하지 않았습니다. 빌드·native·패키지는 이전 성공 작업 `20261023T115009777Z-aee36c0b`의 동일한 C++·에셋·설정과 검증한 바이너리를 사용했습니다. 두 Tools 파일의 진단·ACL 수정은 별도 실제 검사와 최종 온라인 작업으로 검증했습니다.
+
+이전 Inventory 작업본에서 통과한 native 18개, HTTP/DB 316개, 재시작 지속성 23개와 fresh/reconnect/resume 2인 검사는 이전 소스의 결과입니다. 이번 작업본의 검증 결과로 재사용하지 않습니다. 초기 개발 이력은 [DevelopmentHistory.md](Docs/DevelopmentHistory.md)에 보존합니다.
+
+## 빌드와 계정 화면
+
+Windows, Unreal Engine **5.8.4**, MSVC **14.50**, Windows SDK **10.0.26100.0**, PowerShell **7.4 이상**이 필요합니다. 실행·빌드·테스트는 공용 데스크톱 실행 절차를 우선 사용합니다. 소스 배포에는 호환 바이너리가 없으므로 준비된 환경에서 먼저 Editor를 빌드해야 합니다.
+
+```powershell
+.\Setup-Project.cmd -EngineRoot 'C:\Program Files\Epic Games\UE_5.8'
+.\Play-Account.cmd -BackendUrl http://127.0.0.1:5292
+```
+
+`Play-Account.cmd`는 로컬 모험을 생성하지 않고 게임 내 계정 화면을 엽니다. 계정 이름·비밀번호는 화면에 입력합니다. 비밀번호와 재사용 가능한 세션 토큰은 명령줄·상태 파일에 기록하지 않습니다. 시작 직업은 가입 시 전사·마법사·궁수 중 선택하며, 현재는 계정당 캐릭터 하나입니다. 기존 로컬 플레이는 계정 화면의 버튼으로 들어갑니다. `Open-Editor.cmd`, 기존 `Play.cmd -Editor`, 협동·검증 실행기도 유지합니다.
+
+## 격리된 온라인 실행
+
+형제 [백엔드 README](../CatPjt-Fablewood-Backend/README.md)의 Release 빌드와 **이번 별도 인스턴스 명령**을 먼저 수행합니다. 이번 작업에 예약한 주소는 API `127.0.0.1:5292`, DB `127.0.0.1:55440`, Unreal `127.0.0.1:7821`입니다. 검증에서는 작업별 고유 컨테이너·volume·schema와 새 테스트 계정으로 이 주소를 사용했고, 완료 후 소유 API·게임·컨테이너를 종료했습니다. 기존 `5281/55438`, Inventory `5291/55439`와 저장 데이터를 재사용하지 않습니다.
+
+```powershell
+.\Start-OnlineServer.cmd -BackendRoot ..\CatPjt-Fablewood-Backend -Port 7821
+.\Play-Account.cmd -BackendUrl http://127.0.0.1:5292
+.\Play-Account.cmd -BackendUrl http://127.0.0.1:5292 -WindowX 1040
+```
+
+게임 서버 목록의 기본 주소도 `127.0.0.1:7821`입니다. 다른 포트를 쓰면 API의 `FABLE_GAME_ADDRESS`를 일치시켜야 합니다. 위 두 창은 서로 다른 계정으로 로그인합니다. 플레이 중 Esc로 온라인 메뉴를 열고 안전 퇴장을 선택하면 마지막 저장과 writer 리스 반환 응답을 받은 뒤 캐릭터 화면으로 돌아갑니다. 실패·시간 초과를 성공으로 처리하지 않습니다. 강제 종료 뒤에는 서버의 연결 종료 저장과 리스 만료/반환을 기다린 뒤 새 일회용 접속권으로 재시도합니다.
+
+기본 백엔드 위치는 형제 디렉터리이며 `-BackendRoot` 또는 프로세스의 `FABLE_BACKEND_ROOT`로 바꿉니다. `Start-OnlineServer.ps1`은 해당 백엔드의 소유 상태와 `Saved/Backend/server.json`을 사용하고 API를 자동 빌드하지 않습니다. 비공개 설정을 게임 소스에 복사하지 않습니다.
+
+기존 `Play-Online.cmd`는 직접 접속 검증용으로 유지합니다. 새 가입·로그인 UI 검증은 아래 명령입니다. 이미 준비된 별도 API를 검사한 후 자체 소유의 Unreal 서버와 클라이언트만 시작·종료합니다.
+
+```powershell
+pwsh -NoProfile -File .\Tools\Test-OnlineFlow.ps1 -BackendRoot ..\CatPjt-Fablewood-Backend -BackendUrl http://127.0.0.1:5292 -Port 7821
+```
+
+검증기는 서버 부재 오류→새 접속권 재시도, 두 계정의 이동·스킬·물약, 한 명의 안전 퇴장과 다른 한 명의 강제 종료, API/서버 재시작 후 기존 계정 재접속·보존값 비교를 검사하도록 작성했습니다. 실행 전 준비 조건과 실제 결과를 확인해야 합니다. 임시 테스트 계정·비밀번호·보고서·캡처는 `Saved/OnlineValidation`에만 두며 Git에서 제외합니다.
+
+## 저장 계약과 서버 범위
+
+UE SaveGame은 v9, DB 스키마는 **3**, 정형 장비와 캐릭터 요약은 각각 버전 1입니다. 아이템 UUID·소유자·가방/창고 순서·장착·옵션·품질·등급·강화·내구도, 재화 7종과 프로필 blob을 원자 저장합니다. API는 소유권·형식·접속 리스·리비전을 검증하고 전투나 가격을 재계산하지 않습니다. 기존 중앙 저장은 값과 장비를 유지하며 필요한 정보를 첫 접속 때 백필하고 ACK 전 플레이를 차단합니다. 로컬 `.sav` 자동 업로드는 없습니다.
+
+현재 지원하는 전용 서버 실행 경로는 **`UnrealEditor-Cmd.exe -server -NullRHI`**입니다. `FablewoodServer.Target.cs`와 Client Target 정의는 있지만 독립 `FablewoodServer.exe`에는 Server Target 지원 소스 엔진이 필요합니다. Windows Development Game 패키징은 통과했지만 패키지 자체 플레이·독립 Server Target·Linux·외부망은 검증하지 않았습니다. Game Target 실행 파일에 `-server`만 붙여 전용 서버라고 취급하지 않습니다.
+
+## 소스와 산출물
+
+포함 대상은 `Source`, `Config`, `Tools`, 루트 실행기·문서, `Content`의 필수 `.uasset`·`.umap`, `ArtSource` 원본과 라이선스, 직접 작성한 `Build/Windows` 리소스입니다. 원본 메시 OBJ 68개는 필수 소스입니다.
+
+`Binaries`, `Intermediate`, `DerivedDataCache`, `Saved`, `Builds`, `bin/obj`, `.vs`, 생성 솔루션·검증 캡처·실제 비밀 설정·DB 데이터는 제외합니다. `.gitignore`와 소스 매니페스트는 기존 파일을 삭제하지 않습니다.
+
+```powershell
+pwsh -NoProfile -File .\Tools\Get-SourceManifest.ps1
+```
+
+매니페스트는 허용 목록·필수 소스·자산 쌍·파일 SHA-256과 알려진 비밀 설정 패턴을 확인합니다. 이는 빌드·플레이 통과나 모든 비밀의 부재를 보증하지 않습니다. 형제 백엔드는 별도 매니페스트를 사용합니다. 과거 이력 문서의 원본 경로·산출물 참조는 역사 기록이며 새 소스 배포에 과거 실행 결과가 포함된다는 의미가 아닙니다.
