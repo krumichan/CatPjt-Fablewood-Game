@@ -58,9 +58,10 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
             ||!(*Account)->TryGetStringField(TEXT("name"),AccountName)||!(*Account)->TryGetStringField(TEXT("password"),Password))
         {Finish(false,TEXT("Invalid private validation context; values suppressed."));return;}
         J->TryGetStringField(TEXT("scenario"),Scenario);
-        if(Scenario!=TEXT("connectivity")&&Scenario!=TEXT("dungeon")&&Scenario!=TEXT("growth")){Finish(false,TEXT("Unknown gameplay validation scenario."));return;}
+        if(Scenario!=TEXT("connectivity")&&Scenario!=TEXT("dungeon")&&Scenario!=TEXT("growth")&&Scenario!=TEXT("reconnect")){Finish(false,TEXT("Unknown gameplay validation scenario."));return;}
         InitialClass=(*Account)->GetIntegerField(TEXT("initialClass"));
         const TSharedPtr<FJsonObject>* E=nullptr;if((*Account)->TryGetObjectField(TEXT("expected"),E))Expected=*E;
+        J->TryGetBoolField(TEXT("resumeExpedition"),bResumeExpedition);
         J->TryGetBoolField(TEXT("offlineFailure"),bOfflineFailure);FString Crash;J->TryGetStringField(TEXT("crashRole"),Crash);bCrashRole=Role==Crash;
         if((Mode!=TEXT("register")&&Mode!=TEXT("login"))||InitialClass<0||InitialClass>2){Finish(false,TEXT("Invalid validation mode/class."));return;}
     }
@@ -119,9 +120,14 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status,cons
         for(const FString& Id:ServerObservedPlayerIds)ObservedIds.Add(MakeShared<FJsonValueString>(Id));
         J->SetArrayField(TEXT("serverObservedPlayerIds"),ObservedIds);
         if(ServerDungeonObservation)J->SetObjectField(TEXT("serverDungeonObservation"),ServerDungeonObservation);
+        if(ServerMidBefore)J->SetObjectField(TEXT("serverMidBefore"),ServerMidBefore);
+        if(ServerMidSolo)J->SetObjectField(TEXT("serverMidSolo"),ServerMidSolo);
+        if(ServerMidRejoined)J->SetObjectField(TEXT("serverMidRejoined"),ServerMidRejoined);
     }
     if(Checkpoint)J->SetObjectField(TEXT("checkpoint"),Checkpoint);
     if(GrowthReport)J->SetObjectField(TEXT("growth"),GrowthReport);
+    if(MidRunReport)J->SetObjectField(TEXT("midrun"),MidRunReport);
+    if(ReconnectProgress)J->SetObjectField(TEXT("reconnectProgress"),ReconnectProgress);
     J->SetBoolField(TEXT("report_snapshot_frozen"),Status==TEXT("passed")||Status==TEXT("failed"));
     if(!MenuProfileHash.IsEmpty()){J->SetStringField(TEXT("menuProfileHash"),MenuProfileHash);J->SetNumberField(TEXT("menuRevision"),double(MenuRevision));}
     if(auto* Flow=GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>())
@@ -189,6 +195,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     auto* GI=GetGameInstance();UWorld* World=GI?GI->GetWorld():nullptr;if(!World)return true;
     if(Role==TEXT("server"))
     {
+        if(Scenario==TEXT("reconnect"))ObserveReconnectServer(World);
         if(!ServerDungeonObservation)
         {
             const auto* GS=World->GetGameState<AFableGameState>();
@@ -296,7 +303,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         Movement=FMath::Max(Movement,FVector::Dist2D(MovementStart,Hero->GetActorLocation()));
         if(Movement<65){Hero->AddMovementInput(FVector(0,-1,0),1);return true;}
         Hero->GetCharacterMovement()->StopMovementImmediately();Checks.Add(TEXT("normal_movement"),true);
-        if(Mode==TEXT("login")){Checkpoint=Profile(P);Advance(30);break;}
+        if(Mode==TEXT("login")){if(Scenario==TEXT("reconnect")&&bResumeExpedition)Advance(100);else{Checkpoint=Profile(P);Advance(30);}break;}
         PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::K,IE_Pressed,1.f,0,FInputDeviceId::CreateFromInternalId(0)));
         bReleaseSkill=true;bSkillSent=true;Advance(8);break;
     case 8:
@@ -310,7 +317,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         PC->UIUseManaPotion();LastAction=Now;break;
     case 100:
         if(!P||!Hero||!PC)return true;
-        if(TickDungeon(PC,P,Hero,Now)){Checkpoint=Profile(P);Capture(Scenario==TEXT("growth")?TEXT("growth-finished"):TEXT("dungeon-cleared"));Advance(30);}
+        if(TickDungeon(PC,P,Hero,Now)){Checkpoint=Profile(P);Capture(Scenario==TEXT("growth")?TEXT("growth-finished"):Scenario==TEXT("reconnect")?TEXT("reconnected-dungeon"):TEXT("dungeon-cleared"));Advance(30);}
         break;
     case 30:
         if(bCrashRole)return true;

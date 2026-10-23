@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -207,7 +207,7 @@ function Start-OnlineValidationProcess([string]$Role,[string]$Phase,[string]$Con
     $arguments.Add('-FableOnlineValidationRun='+$runId);$arguments.Add('-abslog='+(Quote-Online $log))
     $arguments.Add('-LogCmds="LogInit off,LogNet off,LogLoad off"');$arguments.Add('-ExecCmds="t.MaxFPS 30,t.IdleWhenNotForeground 0"')
     try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $(if($Role -cne 'server' -and $PackagedClientExecutable){Split-Path -Parent $exe}else{$script:FableProjectRoot}) -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
-    $record=[pscustomobject]@{role=$Role;phase=$Phase;pid=$process.Id;executable=$exe;startedUtc=$process.StartTime.ToUniversalTime().ToString('o');log=$log;forcedForScenario=$false;cleanupForced=$false;exitCode=$null}
+    $record=[pscustomobject]@{role=$Role;phase=$Phase;validationMode=$(if($Phase -ceq 'register-resume'){'login'}else{$Phase});pid=$process.Id;executable=$exe;startedUtc=$process.StartTime.ToUniversalTime().ToString('o');log=$log;forcedForScenario=$false;cleanupForced=$false;exitCode=$null}
     $ownedProcesses.Add($record);$processHandles[$process.Id]=$process;return $record
 }
 function Get-OnlineOwnedProcess($Record){
@@ -229,7 +229,7 @@ function Read-OnlineReport($Record,[switch]$AllowMissing){
     try{$report=Read-OnlineJson $path}catch{if($AllowMissing){return $null};Assert-Online $false 'report_unreadable'}
     Require-OnlineFields $report @('role','mode','status','step','processId','checks','screenshots','networkMode','localControllerCount','profiles') 'report_incomplete'
     Assert-Online ($report.role -ceq $Record.role -and [int]$report.processId -eq $Record.pid) 'report_owner_mismatch'
-    if($Record.role -cne 'server'){Assert-Online ($report.mode -ceq $Record.phase) 'report_phase_mismatch'}
+    if($Record.role -cne 'server'){Assert-Online ($report.mode -ceq $Record.validationMode) 'report_phase_mismatch'}
     Assert-Online ($report.status -cne 'failed') 'driver_reported_failure';return $report
 }
 function Test-OnlineCheck($Report,[string]$Name){return $null -ne $Report -and $null -ne $Report.checks.PSObject.Properties[$Name] -and $Report.checks.$Name -eq $true}
@@ -270,7 +270,11 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         if($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
         }else{
-            Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 265 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 3 -and $Checkpoint.dungeonCompletions -eq 1) 'growth_progression_totals_mismatch'
+            if($Scenario -ceq 'growth'){
+                Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 265 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 3 -and $Checkpoint.dungeonCompletions -eq 1) 'growth_progression_totals_mismatch'
+            }else{
+                Assert-Online ($Checkpoint.level -eq 2 -and $Checkpoint.experience -eq 140 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 1 -and $Checkpoint.dungeonCompletions -eq 0) 'midrun_progression_totals_mismatch'
+            }
         }
     }
     Require-OnlineFields $Checkpoint.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'checkpoint_wallet_incomplete'
@@ -283,10 +287,14 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         if($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
         }else{
-            Assert-Online ($growthExpectations.ContainsKey($Role)) 'growth_expectation_missing'
-            $expected=$growthExpectations[$Role]
-            Assert-Online ($Checkpoint.wallet.gold -eq $expected.gold -and $Checkpoint.wallet.ore -eq $expected.ore -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 7 -and $Checkpoint.stashCount -eq 0) 'growth_reward_and_cost_totals_mismatch'
-            Assert-Online ($Checkpoint.equippedWeaponInstanceId -ceq $expected.weapon -and $Checkpoint.equippedArmorInstanceId -ceq $expected.armor) 'growth_equipped_reward_identity_mismatch'
+            if($Scenario -ceq 'growth'){
+                Assert-Online ($growthExpectations.ContainsKey($Role)) 'growth_expectation_missing'
+                $expected=$growthExpectations[$Role]
+                Assert-Online ($Checkpoint.wallet.gold -eq $expected.gold -and $Checkpoint.wallet.ore -eq $expected.ore -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 7 -and $Checkpoint.stashCount -eq 0) 'growth_reward_and_cost_totals_mismatch'
+                Assert-Online ($Checkpoint.equippedWeaponInstanceId -ceq $expected.weapon -and $Checkpoint.equippedArmorInstanceId -ceq $expected.armor) 'growth_equipped_reward_identity_mismatch'
+            }else{
+                Assert-Online ($Checkpoint.wallet.gold -eq 153 -and $Checkpoint.wallet.ore -eq 8 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 0 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 5 -and $Checkpoint.stashCount -eq 0) 'midrun_reward_totals_mismatch'
+            }
         }
     }
     Assert-Online (@($Checkpoint.items).Count -eq $Checkpoint.bagCount+$Checkpoint.stashCount) 'checkpoint_item_counts'
@@ -324,6 +332,37 @@ function Assert-OnlineGrowth($Report,[string]$Role){
     Assert-Online ($armor.Count -eq 1 -and $armor[0].rarity -eq 2 -and $armor[0].slot -eq 1 -and $armor[0].setId -eq 1) 'boss_armor_not_equipped'
     $growthExpectations[$Role]=@{gold=[int]$g.finalGold;ore=[int]$g.finalOre;weapon=$cp.equippedWeaponInstanceId;armor=$cp.equippedArmorInstanceId}
 }
+function Assert-OnlineMidrun($Report,[string]$Role,[bool]$Interrupted){
+    Require-OnlineFields $Report @('midrun','checkpoint','movementCm') 'midrun_report_missing'
+    $m=$Report.midrun
+    Assert-Online ($m.encounterSerial -gt 0 -and $m.wave -eq 1 -and $m.defeated -eq 1 -and $m.liveEnemies -eq 2) 'midrun_scene_mismatch'
+    Assert-Online (Test-OnlineCheck $Report 'midrun_reward_saved_once') 'midrun_reward_not_acknowledged'
+    Assert-OnlineCheckpoint $Report.checkpoint $Role
+    if($Interrupted){
+        foreach($name in @('wrong_password_rejected','character_preview','connection_failure_visible','two_distinct_remote_players','normal_movement','normal_potion_saved_once','both_forest_quests_active','forest_reward_equipped','entered_root_ruins')){Assert-Online (Test-OnlineCheck $Report $name) 'interrupted_normal_flow_missing'}
+        Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true -and $Report.movementCm -ge 65) 'interrupted_checkpoint_invalid'
+    }else{Assert-Online (Test-OnlineCheck $Report 'midrun_same_encounter_rejoined') 'midrun_rejoin_not_observed'}
+}
+function Resume-OnlineInterruptedClient($Server,$ClientOne,$Interrupted){
+    $deadline=[DateTime]::UtcNow.AddSeconds(180);$ready=$false;$latest=$null
+    do{
+        Assert-Online ($null -ne (Get-OnlineOwnedProcess $Server) -and $null -ne (Get-OnlineOwnedProcess $ClientOne)) 'survivors_exited_during_midrun_drain'
+        $latest=Read-OnlineReport $Server -AllowMissing
+        $me=Api-Online GET '/v1/me' $null $readerTokens.client2
+        if($latest -and @($latest.profiles).Count -eq 1 -and $me.leaseActive -eq $false -and $null -ne $latest.PSObject.Properties['serverMidSolo']){$ready=$true;break}
+        Start-Sleep -Milliseconds 350
+    }while([DateTime]::UtcNow -lt $deadline)
+    Assert-Online $ready 'midrun_disconnect_or_lease_release_timeout'
+    Require-OnlineFields $latest @('serverMidBefore','serverMidSolo') 'server_midrun_before_or_solo_missing'
+    $canonical=Read-OnlineCanonical 'client2';$comparison=Assert-OnlineCanonical $canonical $Interrupted 'client2' $true
+    $midPath=Join-Path (Join-Path $runFolder 'register') 'client2-midrun-canonical.json';Write-OnlineJson $midPath $canonical
+    $entry=$accounts.client2
+    $context=Join-Path $privateFolder 'register-resume-context.private.json'
+    Write-OnlineJson $context @{mode='login';scenario='reconnect';offlineFailure=$false;resumeExpedition=$true;accounts=@{client2=@{name=$entry.name;password=$entry.password;initialClass=$entry.initialClass;expected=@{playerId=$canonical.me.playerId;profileHash=$canonical.me.profileHash;encounterSerial=$Interrupted.midrun.encounterSerial}}}}
+    $resumed=Start-OnlineValidationProcess 'client2' 'register-resume' $context
+    $summary['interruption']=[ordered]@{status='reconnecting';originalCheckpoint=$Interrupted.checkpoint;originalMidrun=$Interrupted.midrun;canonicalAfterDisconnect=$comparison;serverSurvived=$true;clientOneSurvived=$true;serverControllersAfterDisconnect=1;clientTwoLeaseReleased=$true;resumeProcessId=$resumed.pid;resumeReportDirectory='register-resume'}
+    return $resumed
+}
 function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$Crash){
     Require-OnlineFields $Report @('movementCm','checkpoint','joinAttempts','hasSession','flowState') 'client_report_incomplete'
     Assert-Online ($Report.movementCm -ge 65) 'normal_movement_missing'
@@ -339,6 +378,7 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
         Assert-Online ($Report.joinAttempts -ge 2) 'fresh_ticket_retry_missing'
     }
     if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
+    if($Scenario -ceq 'reconnect' -and $Phase -in @('register','resume')){Assert-OnlineMidrun $Report $Role $false}
     Assert-OnlineCheckpoint $Report.checkpoint $Role
     if($Crash){Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true) 'crash_checkpoint_not_ready'}
     else{
@@ -363,24 +403,47 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
         Assert-Online (Equal-Online $members $expected) 'server_dungeon_identities_mismatch'
         foreach($member in $observation.members){Assert-Online ($member.wallet.gold -eq 383 -and $member.wallet.ore -eq 21 -and $member.wallet.rootCores -eq 1 -and $member.dungeonQuest -eq 2) 'server_dungeon_reward_totals_mismatch'}
     }
+    if($Scenario -ceq 'reconnect' -and $ClientReports.client1.mode -ceq 'register'){
+        Require-OnlineFields $ServerReport @('serverMidBefore','serverMidSolo','serverMidRejoined') 'server_midrun_snapshots_missing'
+        foreach($name in @('server_midrun_before','server_midrun_solo','server_midrun_same_id_rejoin')){Assert-Online (Test-OnlineCheck $ServerReport $name) 'server_midrun_observation_missing'}
+        $before=$ServerReport.serverMidBefore;$solo=$ServerReport.serverMidSolo;$after=$ServerReport.serverMidRejoined
+        foreach($view in @($before,$solo,$after)){
+            Assert-Online ($view.encounterSerial -eq $before.encounterSerial -and $view.encounterSerial -gt 0 -and $view.wave -eq 1 -and $view.defeated -eq 1 -and $view.required -eq 3 -and @($view.enemies).Count -eq 2 -and $view.allSavedReady -eq $true -and $view.allSafe -eq $true) 'same_live_dungeon_not_preserved'
+            Assert-Online (Equal-Online @($view.enemies) @($before.enemies)) 'surviving_enemy_identity_or_health_changed'
+            foreach($member in $view.members){Assert-Online ($member.wallet.gold -eq 153 -and $member.wallet.ore -eq 8 -and $member.level -eq 2 -and $member.experience -eq 140 -and $member.bagCount -eq 5) 'server_midrun_reward_changed'}
+        }
+        $beforeIds=@($before.members|ForEach-Object playerId|Sort-Object -CaseSensitive);$afterIds=@($after.members|ForEach-Object playerId|Sort-Object -CaseSensitive)
+        Assert-Online (@($before.members).Count -eq 2 -and @($solo.members).Count -eq 1 -and @($after.members).Count -eq 2 -and (Equal-Online $beforeIds $expected) -and (Equal-Online $afterIds $expected) -and $solo.members[0].playerId -ceq $ClientReports.client1.checkpoint.playerId) 'server_midrun_authenticated_roster_mismatch'
+        $mid=$summary.interruption.originalCheckpoint;$final=$ClientReports.client2.checkpoint
+        foreach($field in @('playerId','heroClass','level','experience','classTier','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId')){Assert-Online (Equal-Online $mid.$field $final.$field) 'rejoined_midrun_character_data_changed'}
+        $summary.interruption.status='passed';$summary.interruption.sameEncounterSerial=$before.encounterSerial;$summary.interruption.liveEnemyCount=2;$summary.interruption.completeMidrunWalletItemsAndEquipmentExact=$true
+    }
     return ,$observed
 }
 function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
-    $deadline=[DateTime]::UtcNow.AddSeconds($TimeoutSeconds);$results=@{};$crashObservedAt=$null
+    $deadline=[DateTime]::UtcNow.AddSeconds($TimeoutSeconds);$results=@{};$crashObservedAt=$null;$reconnectResumed=$false
     do{
         Assert-Online ($null -ne (Get-OnlineOwnedProcess $Server)) 'server_exited_during_phase'
         foreach($role in @('client1','client2')){
             if($results.ContainsKey($role)){continue}
-            $record=$Clients[$role];$report=Read-OnlineReport $record -AllowMissing;$crash=$CrashSecond -and $role -ceq 'client2'
+            $record=$Clients[$role];$report=Read-OnlineReport $record -AllowMissing
+            $crash=$CrashSecond -and $role -ceq 'client2' -and -not($Scenario -ceq 'reconnect' -and $reconnectResumed)
             if($report -and (($crash -and $report.status -ceq 'crash-ready') -or (-not $crash -and $report.status -ceq 'passed'))){
-                Assert-OnlineClientReport $report $role $Phase $crash
+                if($Scenario -ceq 'reconnect' -and $crash){Assert-OnlineMidrun $report $role $true}
+                else{
+                    $validationPhase=if($record.phase -ceq 'register-resume'){'resume'}else{$Phase}
+                    Assert-OnlineClientReport $report $role $validationPhase $crash
+                }
                 if($crash){
                     if($null -eq $crashObservedAt){$crashObservedAt=[DateTime]::UtcNow}
-                    # Give the queued PNG write time to complete before killing this process only.
                     if(([DateTime]::UtcNow-$crashObservedAt).TotalSeconds -lt 2){continue}
-                    $null=Assert-OnlineShots $report $Phase 5
+                    $null=Assert-OnlineShots $report $record.phase 5
                     Write-OnlineJson (Join-Path (Join-Path $runFolder $Phase) 'client2-crash-checkpoint.json') $report
                     Stop-OnlineOwned $record $true
+                    if($Scenario -ceq 'reconnect'){
+                        $Clients.client2=Resume-OnlineInterruptedClient $Server $Clients.client1 $report
+                        $reconnectResumed=$true;$crashObservedAt=$null;continue
+                    }
                 }
                 $results[$role]=$report
             }else{Assert-Online ($null -ne (Get-OnlineOwnedProcess $record)) 'client_exited_without_terminal_report'}
@@ -445,7 +508,7 @@ function Wait-OnlineDrain([string]$Phase,$Server,$Clients,$Reports){
         if($closed -and $zero -and $released){
             $observedIds=Assert-OnlineServerObservation $report $Reports
             $result=@{};$comparisons=@()
-            foreach($role in @('client1','client2')){$result[$role]=Read-OnlineCanonical $role;$comparisons+=@(Assert-OnlineCanonical $result[$role] $Reports[$role] $role ($Phase -ceq 'register' -and $role -ceq 'client2'))}
+            foreach($role in @('client1','client2')){$result[$role]=Read-OnlineCanonical $role;$comparisons+=@(Assert-OnlineCanonical $result[$role] $Reports[$role] $role ([bool]$Clients[$role].forcedForScenario))}
             Write-OnlineJson (Join-Path (Join-Path $runFolder $Phase) 'canonical.json') $result
             return [pscustomobject]@{canonical=$result;comparisons=$comparisons;server=$report;serverObservedPlayerIds=$observedIds;serverObservedIdsMatchCheckpoints=$true;allClientProcessesExited=$true;serverRemoteControllers=0;allLeasesInactive=$true}
         }
@@ -566,7 +629,7 @@ try{
     $reports=Wait-OnlinePhase 'register' $server $clients $true
     $drained=Wait-OnlineDrain 'register' $server $clients $reports
     $freshCanonical=$drained.canonical
-    $shots=@();$shots+=@(Assert-OnlineShots $reports.client1 'register' 7);$shots+=@(Assert-OnlineShots $reports.client2 'register' 5)
+    $shots=@();$shots+=@(Assert-OnlineShots $reports.client1 $clients.client1.phase 7);$shots+=@(Assert-OnlineShots $reports.client2 $clients.client2.phase 5)
     $summary.phases.register=[ordered]@{status='passed';connectionFailureObservedAtStep5=$true;serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;forcedCloseRole='client2';serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;reports=@((Join-Path $runFolder 'register\client1.json'),(Join-Path $runFolder 'register\client2-crash-checkpoint.json'));canonical=(Join-Path $runFolder 'register\canonical.json')}
     Quit-OnlineServer 'register' $server
 

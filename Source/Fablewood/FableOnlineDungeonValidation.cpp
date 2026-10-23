@@ -76,6 +76,7 @@ void UFableOnlineValidationDriver::DungeonFight(AFablePlayerController* PC,doubl
 bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFablePlayerState* P,AFableCharacter* Hero,double Now)
 {
     auto* GS=Hero->GetWorld()->GetGameState<AFableGameState>();if(!GS)return false;
+    if(Scenario==TEXT("reconnect")&&bResumeExpedition)return TickReconnect(PC,P,Hero,Now);
     if(!DungeonInitial){DungeonInitial=Profile(P);DungeonStepAt=Now;}
     const auto Advance=[&](int32 Next)
     {
@@ -87,7 +88,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
         if(GS->PlayerArray.Num()!=2)return false;
         for(APlayerState* Entry:GS->PlayerArray){const auto* Other=Cast<AFablePlayerState>(Entry);if(!Other||Other->GetQuestStage(Quest)!=Stage)return false;}return true;
     };
-    if(Now-DungeonStepAt>180){Finish(false,FString::Printf(TEXT("Online dungeon step %d timed out."),DungeonStep));return false;}
+    if(Now-DungeonStepAt>(Scenario==TEXT("reconnect")?360:180)){Finish(false,FString::Printf(TEXT("Online dungeon step %d timed out."),DungeonStep));return false;}
     if(GS->bPartyRecoveryPending||Hero->IsDefeated())
     {Finish(false,TEXT("The online dungeon party required automatic recovery."));return false;}
     auto* Target=DungeonTarget(Hero);
@@ -129,6 +130,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
         else{PC->UIClosePanels();DungeonKey(PC,EKeys::E);}DungeonActionAt=Now;break;
     }
     case 7:
+        if(Scenario==TEXT("reconnect"))return TickReconnect(PC,P,Hero,Now);
         if(GS->DungeonWave>=2)Checks.Add(TEXT("second_wave"),true);
         if(GS->AdventureStage==EFableAdventureStage::Boss)
         {

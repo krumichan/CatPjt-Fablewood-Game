@@ -11,6 +11,7 @@ class AFablePlayerState;
 class AFablePlayerController;
 class AFableCharacter;
 class AFableEnemy;
+class UWorld;
 /** Opt-in UI workflow observer. Uses real account APIs and normal gameplay inputs. */
 UCLASS()
 class FABLEWOOD_API UFableOnlineValidationDriver : public UGameInstanceSubsystem
@@ -33,6 +34,15 @@ private:
     int32 GrowthWeaponId=0,GrowthArmorId=0,GrowthGoldBefore=0,GrowthOreBefore=0,GrowthGoldCost=0,GrowthOreCost=0;
     FFableItem GrowthBeforeItem;
     TSharedPtr<FJsonObject> GrowthReport;
+    bool bResumeExpedition=false,bReconnectPeerGone=false;
+    int32 ReconnectStep=0,ReconnectSerial=0,ReconnectWaypoint=0;
+    double ReconnectStarted=0;
+    TWeakObjectPtr<AFableEnemy> ReconnectVictim;
+    TSharedPtr<FJsonObject> MidRunReport,ReconnectProgress,ServerMidBefore,ServerMidSolo,ServerMidRejoined;
+    bool TickReconnect(AFablePlayerController* PC,AFablePlayerState* Profile,AFableCharacter* Hero,double Now);
+    bool ReconnectWalkSafe(AFablePlayerController* PC);
+    void ObserveReconnectServer(UWorld* World);
+    TSharedRef<FJsonObject> ReconnectServerSnapshot(UWorld* World) const;
     FString Scenario=TEXT("connectivity");
     int32 DungeonStep=0,DungeonWeaponId=0;
     double DungeonStepAt=0,DungeonActionAt=-10,DungeonAttackAt=-10,DungeonSkillAt=-10;
