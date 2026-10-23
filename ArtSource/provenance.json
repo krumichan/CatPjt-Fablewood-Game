@@ -1,0 +1,18 @@
+{
+  "mesh_authoring": "Original deterministic Python geometry; no external mesh downloads",
+  "coordinates": "centimeters, X-forward, Y-right, Z-up",
+  "mesh_generators": [
+    "Tools/Art/create_character_meshes.py",
+    "Tools/Art/create_world_meshes.py",
+    "Tools/Art/create_guardian_meshes.py"
+  ],
+  "textures": [
+    {
+      "file": "ArtSource/Textures/T_StorybookMeadow.png",
+      "generation_tool": "built-in image_gen.imagegen",
+      "mode": "generate",
+      "prompt": "Use case: stylized-concept. Asset type: tileable game terrain base-color texture for an original storybook 3D forest RPG. Generate a square seamless repeating hand-painted forest meadow ground texture, straight orthographic top-down view, flat albedo with no directional lighting, no cast shadows, no perspective. Dense short soft sage and moss green grass blades in brushy clumps, tiny restrained olive leaves, subtle pale golden dried grass specks, very occasional little earth peeking through. Finely painted surface at the scale of a 2 meter square patch. Soft varied greens with natural muted warmth, readable painterly detail, not photorealistic. Uniform density across image, no paths, no large rocks, no flowers, no objects, no border, no text, no watermark. All four edges seamless tileable. This is a material texture filling the entire image, not a landscape scene.",
+      "sha256": "d55acb036a1f3fc1cbde1400a2233b38ce1565c4e444322f2c8733230a2faff5"
+    }
+  ]
+}

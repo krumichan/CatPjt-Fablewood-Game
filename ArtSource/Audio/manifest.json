@@ -1,0 +1,45 @@
+{
+  "method": "Original deterministic synthesis; no external recordings or downloads",
+  "sounds": [
+    {
+      "name": "SW_FableHit",
+      "duration_seconds": 0.16,
+      "sample_rate": 44100,
+      "channels": 1,
+      "bits": 16,
+      "peak_dbfs": -6.02,
+      "bytes": 14156,
+      "sha256": "ae921b2b8d6737c8f544320102c431ff05e1646272622517d343bff78a30937f"
+    },
+    {
+      "name": "SW_FableSkill",
+      "duration_seconds": 0.3,
+      "sample_rate": 44100,
+      "channels": 1,
+      "bits": 16,
+      "peak_dbfs": -6.02,
+      "bytes": 26504,
+      "sha256": "4eed0638eba7b24a2a3bb8e7824674046718905566f9d09ce15c74aed16f85e2"
+    },
+    {
+      "name": "SW_FableShield",
+      "duration_seconds": 0.38,
+      "sample_rate": 44100,
+      "channels": 1,
+      "bits": 16,
+      "peak_dbfs": -6.02,
+      "bytes": 33560,
+      "sha256": "d9fce578be7de1ff8c0bbca7a757b72e14b1cec2e19467fbe8f7034dd447ccfd"
+    },
+    {
+      "name": "SW_FableAdvance",
+      "duration_seconds": 0.76,
+      "sample_rate": 44100,
+      "channels": 1,
+      "bits": 16,
+      "peak_dbfs": -6.02,
+      "bytes": 67076,
+      "sha256": "30ae8fe4188c34b80011a76ec6e5f4d5f189c9685c70f19de4786a886ff80fec"
+    }
+  ]
+}

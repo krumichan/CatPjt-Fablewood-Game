@@ -1,0 +1,487 @@
+#include "FableWorld.h"
+#include "FableRPGTypes.h"
+
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/World.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/ConstructorHelpers.h"
+#include "UObject/UObjectGlobals.h"
+
+namespace
+{
+    const FName GeneratedTag(TEXT("FableGeneratedEnvironment"));
+
+    UStaticMesh* ForestMesh(const TCHAR* Name)
+    {
+        return LoadObject<UStaticMesh>(nullptr,
+            *FString::Printf(TEXT("/Game/Art/Meshes/%s.%s"), Name, Name));
+    }
+
+    void HideCollision(UInstancedStaticMeshComponent* Component)
+    {
+        if (Component)
+        {
+            Component->SetVisibility(false);
+            Component->SetHiddenInGame(true);
+            Component->SetCastShadow(false);
+        }
+    }
+}
+
+AFableWorld::AFableWorld()
+{
+    PrimaryActorTick.bCanEverTick = false;
+    bReplicates = false;
+    bNetLoadOnClient = true;
+    RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("ForestRoot"));
+    RootComponent->SetMobility(EComponentMobility::Static);
+
+    // Primitives are only the invisible, predictable gameplay collision.
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+    CubeMesh = Cube.Object;
+    CylinderMesh = Cylinder.Object;
+    ShapeMaterial = Material.Object;
+}
+
+void AFableWorld::OnConstruction(const FTransform& Transform)
+{
+    Super::OnConstruction(Transform);
+    BuildEnvironment();
+}
+
+void AFableWorld::PostRegisterAllComponents()
+{
+    Super::PostRegisterAllComponents();
+#if WITH_EDITOR
+    // Reloading a saved level registers native components but does not necessarily
+    // rerun construction. Recreate its transient forest for the editor viewport.
+    UWorld* World = GetWorld();
+    if (!World || World->WorldType != EWorldType::Editor || IsTemplate()
+        || bBuildingEnvironment || !RootComponent || !RootComponent->IsRegistered())
+    {
+        return;
+    }
+    TArray<UInstancedStaticMeshComponent*> Existing;
+    GetComponents(Existing);
+    for (UInstancedStaticMeshComponent* Component : Existing)
+    {
+        if (Component && Component->ComponentHasTag(GeneratedTag))
+        {
+            return;
+        }
+    }
+    BuildEnvironment();
+#endif
+}
+
+void AFableWorld::BeginPlay()
+{
+    Super::BeginPlay();
+    // Rebuild once on every machine, also for a level loaded without construction.
+    BuildEnvironment();
+}
+
+UInstancedStaticMeshComponent* AFableWorld::MakeBatch(FName Name, UStaticMesh* Mesh,
+    const FLinearColor& Color, bool bBlocking, UMaterialInterface* MaterialOverride, float Roughness)
+{
+    if (!Mesh)
+    {
+        return nullptr;
+    }
+    // Both peers build identically named components under the same map actor.
+    // CharacterMovement can reference a base by this path without replicating the forest.
+    const FName ComponentName(*FString::Printf(TEXT("Fable_%s"), *Name.ToString()));
+    UInstancedStaticMeshComponent* Batch = NewObject<UInstancedStaticMeshComponent>(this, ComponentName, RF_Transient);
+    Batch->SetNetAddressable();
+    Batch->ComponentTags.Add(GeneratedTag);
+    Batch->ComponentTags.Add(Name);
+    Batch->CreationMethod = EComponentCreationMethod::UserConstructionScript;
+    Batch->SetupAttachment(RootComponent);
+    Batch->SetMobility(EComponentMobility::Static);
+    Batch->SetStaticMesh(Mesh);
+    Batch->SetCollisionEnabled(bBlocking ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+    Batch->SetCollisionObjectType(ECC_WorldStatic);
+    Batch->SetCollisionResponseToAllChannels(ECR_Block);
+    Batch->SetCanEverAffectNavigation(false);
+    Batch->SetCastShadow(true);
+    UMaterialInterface* BaseMaterial = MaterialOverride ? MaterialOverride : ShapeMaterial.Get();
+    if (BaseMaterial)
+    {
+        UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(BaseMaterial, Batch);
+        Material->SetVectorParameterValue(TEXT("Color"), Color);
+        Material->SetScalarParameterValue(TEXT("Roughness"), Roughness);
+        Batch->SetMaterial(0, Material);
+    }
+    Batch->RegisterComponent();
+    return Batch;
+}
+
+void AFableWorld::Place(UInstancedStaticMeshComponent* Batch, const FVector& Location,
+    const FVector& Scale, const FRotator& Rotation)
+{
+    if (Batch)
+    {
+        Batch->AddInstance(FTransform(Rotation, Location, Scale));
+    }
+}
+
+void AFableWorld::BuildEnvironment()
+{
+    if (bBuildingEnvironment || IsTemplate() || !GetWorld())
+    {
+        return;
+    }
+    TGuardValue<bool> BuildingGuard(bBuildingEnvironment, true);
+    TArray<UInstancedStaticMeshComponent*> Previous;
+    GetComponents(Previous);
+    for (UInstancedStaticMeshComponent* Component : Previous)
+    {
+        if (Component && Component->ComponentHasTag(GeneratedTag))
+        {
+            Component->DestroyComponent();
+            // Retire destroyed UObject names before rebuilding stable network paths.
+            const FName RetiredName = MakeUniqueObjectName(Component->GetOuter(),
+                Component->GetClass(), TEXT("TRASH_FableGenerated"));
+            Component->Rename(*RetiredName.ToString(), nullptr,
+                REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty);
+        }
+    }
+    if (!CubeMesh || !CylinderMesh || !ShapeMaterial)
+    {
+        return;
+    }
+
+    if (UMaterialInterface* Paint = LoadObject<UMaterialInterface>(nullptr,
+        TEXT("/Game/Art/Materials/M_FablePaint.M_FablePaint")))
+    {
+        ShapeMaterial = Paint;
+    }
+    UMaterialInterface* GroundMaterial = LoadObject<UMaterialInterface>(nullptr,
+        TEXT("/Game/Art/Materials/M_FableGround.M_FableGround"));
+    UMaterialInterface* WaterMaterial = LoadObject<UMaterialInterface>(nullptr,
+        TEXT("/Game/Art/Materials/M_FableWater.M_FableWater"));
+
+    UStaticMesh* TerrainMesh = ForestMesh(TEXT("SM_ForestTerrain"));
+    UStaticMesh* OakMeshA = ForestMesh(TEXT("SM_ForestOakTrunk"));
+    UStaticMesh* OakMeshB = ForestMesh(TEXT("SM_ForestOakTrunkB"));
+    UStaticMesh* LeavesMeshA = ForestMesh(TEXT("SM_ForestOakLeaves"));
+    UStaticMesh* LeavesMeshB = ForestMesh(TEXT("SM_ForestOakLeavesB"));
+    UStaticMesh* GrassMesh = ForestMesh(TEXT("SM_ForestGrass"));
+    UStaticMesh* FernMesh = ForestMesh(TEXT("SM_ForestFern"));
+    UStaticMesh* RockMesh = ForestMesh(TEXT("SM_ForestRock"));
+
+    auto* Ground = MakeBatch(TEXT("Meadow"), CubeMesh, FLinearColor(0.25f, 0.37f, 0.15f), true);
+    Place(Ground, FVector(0, 0, -60), FVector(60, 60, 1.2f));
+    if (TerrainMesh)
+    {
+        HideCollision(Ground);
+    }
+    auto* Meadow = MakeBatch(TEXT("MeadowSurface"), TerrainMesh, FLinearColor::White, false, GroundMaterial);
+    auto* Path = MakeBatch(TEXT("WarmPath"), ForestMesh(TEXT("SM_ForestPath")), FLinearColor(0.48f, 0.35f, 0.20f));
+    auto* Water = MakeBatch(TEXT("QuietBrook"), ForestMesh(TEXT("SM_ForestBrook")),
+        FLinearColor(0.10f, 0.40f, 0.44f), false, WaterMaterial, 0.28f);
+    Place(Meadow, FVector::ZeroVector, FVector::OneVector);
+    Place(Path, FVector::ZeroVector, FVector::OneVector);
+    Place(Water, FVector::ZeroVector, FVector::OneVector);
+    // Lower, non-colliding ground continues behind the finite playable clearing.
+    // Even the highest point stays over 30 cm below the original surface.
+    auto* ForestUnderlay = MakeBatch(TEXT("DistantForestGround"), TerrainMesh,
+        FLinearColor::White, false, GroundMaterial);
+    Place(ForestUnderlay, FVector(0, 0, -70), FVector(3.0f));
+    if (ForestUnderlay)
+    {
+        ForestUnderlay->SetCastShadow(false);
+    }
+    if (Water)
+    {
+        Water->SetCastShadow(false);
+    }
+
+    auto* TrunkCollision = MakeBatch(TEXT("TreeTrunks"), CylinderMesh, FLinearColor::Black, true);
+    auto* RockCollision = MakeBatch(TEXT("StoneCollision"), CubeMesh, FLinearColor::Black, true);
+    auto* HouseCollision = MakeBatch(TEXT("CottageCollision"), CubeMesh, FLinearColor::Black, true);
+    auto* BridgeCollision = MakeBatch(TEXT("BridgeStone"), CubeMesh, FLinearColor::Black, true);
+    HideCollision(TrunkCollision);
+    HideCollision(RockCollision);
+    HideCollision(HouseCollision);
+    HideCollision(BridgeCollision);
+
+    auto* OakA = MakeBatch(TEXT("OakBark"), OakMeshA, FLinearColor(0.25f, 0.125f, 0.052f));
+    auto* OakB = MakeBatch(TEXT("OldOakBark"), OakMeshB, FLinearColor(0.20f, 0.105f, 0.045f));
+    auto* LeavesA = MakeBatch(TEXT("MossCanopy"), LeavesMeshA, FLinearColor(0.19f, 0.34f, 0.085f));
+    auto* LeavesB = MakeBatch(TEXT("SunCanopy"), LeavesMeshB, FLinearColor(0.34f, 0.43f, 0.13f));
+    auto* ShadeLeavesA = MakeBatch(TEXT("DeepCanopy"), LeavesMeshA, FLinearColor(0.12f, 0.245f, 0.07f));
+    auto* ShadeLeavesB = MakeBatch(TEXT("ShadeCanopy"), LeavesMeshB, FLinearColor(0.20f, 0.315f, 0.08f));
+    auto* Rocks = MakeBatch(TEXT("SoftStones"), RockMesh, FLinearColor(0.40f, 0.41f, 0.32f));
+    auto* MossRocks = MakeBatch(TEXT("MossyStones"), RockMesh, FLinearColor(0.29f, 0.34f, 0.20f));
+    auto* Bridge = MakeBatch(TEXT("ArchedStoneBridge"), ForestMesh(TEXT("SM_ForestBridge")),
+        FLinearColor(0.47f, 0.45f, 0.33f));
+
+    const FVector BridgeOrigin(-2180, -350, 0);
+    Place(Bridge, BridgeOrigin, FVector::OneVector);
+    for (int32 I = 0; I < 19; ++I)
+    {
+        // Short, gently pitched slabs follow the artwork's walkable arch.
+        const float X = -360.0f + I * 40.0f;
+        const float Z = 14.0f + 100.0f * (1.0f - FMath::Square(X / 380.0f));
+        const float Slope = -200.0f * X / FMath::Square(380.0f);
+        const FRotator Pitch(FMath::RadiansToDegrees(FMath::Atan(Slope)), 0, 0);
+        Place(BridgeCollision, BridgeOrigin + FVector(X, 0, Z - 10),
+            FVector(0.42f, 3.70f, 0.20f), Pitch);
+        Place(BridgeCollision, BridgeOrigin + FVector(X, -204, Z + 24), FVector(0.40f, 0.38f, 0.48f));
+        Place(BridgeCollision, BridgeOrigin + FVector(X, 204, Z + 24), FVector(0.40f, 0.38f, 0.48f));
+    }
+
+    FRandomStream Random(30721);
+    auto AddTree = [&](const FVector& Base, float Scale, float Yaw, int32 Variant)
+    {
+        const FVector Size(Scale);
+        const FRotator Rotation(0, Yaw, 0);
+        const bool bSecond = (Variant % 2) != 0;
+        Place(bSecond ? OakB : OakA, Base, Size, Rotation);
+        auto* Canopy = bSecond ? ((Variant % 4 == 1) ? LeavesB : ShadeLeavesB)
+                              : ((Variant % 4 == 0) ? LeavesA : ShadeLeavesA);
+        Place(Canopy, Base, Size, Rotation);
+        // The foliage never contributes a large convex collision hull.
+        Place(TrunkCollision, Base + FVector(0, 0, 330 * Scale), FVector(1.48f * Scale, 1.48f * Scale, 6.6f * Scale));
+    };
+    for (int32 I = 0; I < 44; ++I)
+    {
+        const float Angle = I * 2.0f * PI / 44.0f;
+        const float Radius = Random.FRandRange(2360, 2820);
+        const FVector Base(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0);
+        if ((Base.Y > 1800 && FMath::Abs(Base.X) < 1650)
+            || (Base.X < -1900 && FMath::Abs(Base.Y + 350) < 570))
+        {
+            continue;
+        }
+        AddTree(Base, Random.FRandRange(0.85f, 1.28f), Random.FRandRange(0, 360), I);
+    }
+    // Nearer roots and overhead sprays frame the clearing without blocking combat.
+    AddTree(FVector(-1740, -1290, 0), 1.13f, 25, 0);
+    AddTree(FVector(1830, -1190, 0), 1.18f, 147, 1);
+    AddTree(FVector(-1720, 1460, 0), 1.05f, 60, 3);
+    AddTree(FVector(1810, 1390, 0), 1.15f, 214, 2);
+
+    // Three staggered depth bands turn the village skyline into a forest.
+    // A separate stream preserves every existing playable tree, stone, and flower.
+    FRandomStream BackgroundRandom(30722);
+    auto* BackgroundBarkA = MakeBatch(TEXT("BackgroundOakBark"), OakMeshA,
+        FLinearColor(0.21f, 0.145f, 0.075f));
+    auto* BackgroundBarkB = MakeBatch(TEXT("BackgroundOldOakBark"), OakMeshB,
+        FLinearColor(0.19f, 0.145f, 0.08f));
+    auto* BackgroundLeavesA = MakeBatch(TEXT("BackgroundMossCanopy"), LeavesMeshA,
+        FLinearColor(0.17f, 0.29f, 0.095f));
+    auto* BackgroundLeavesB = MakeBatch(TEXT("BackgroundSunCanopy"), LeavesMeshB,
+        FLinearColor(0.25f, 0.355f, 0.14f));
+    auto* FarBarkA = MakeBatch(TEXT("FarForestBark"), OakMeshA,
+        FLinearColor(0.215f, 0.24f, 0.17f));
+    auto* FarBarkB = MakeBatch(TEXT("FarForestOldBark"), OakMeshB,
+        FLinearColor(0.20f, 0.235f, 0.175f));
+    auto* FarLeavesA = MakeBatch(TEXT("FarForestCanopy"), LeavesMeshA,
+        FLinearColor(0.225f, 0.325f, 0.195f));
+    auto* FarLeavesB = MakeBatch(TEXT("FarForestLightCanopy"), LeavesMeshB,
+        FLinearColor(0.29f, 0.375f, 0.235f));
+    // The 48 background trees use existing instanced meshes and no shadow maps.
+    // They have no collision, so the 60 m gameplay boundary and movement bases are unchanged.
+    for (auto* Batch : {BackgroundBarkA, BackgroundBarkB, BackgroundLeavesA,
+        BackgroundLeavesB, FarBarkA, FarBarkB, FarLeavesA, FarLeavesB})
+    {
+        if (Batch)
+        {
+            Batch->SetCastShadow(false);
+        }
+    }
+    auto AddBackgroundTree = [&](const FVector& Base, float Scale, int32 Variant, bool bFar)
+    {
+        const bool bSecond = (Variant % 2) != 0;
+        auto* Bark = bFar ? (bSecond ? FarBarkB : FarBarkA)
+                         : (bSecond ? BackgroundBarkB : BackgroundBarkA);
+        auto* Crown = bFar ? (bSecond ? FarLeavesB : FarLeavesA)
+                          : (bSecond ? BackgroundLeavesB : BackgroundLeavesA);
+        const FRotator Rotation(0, BackgroundRandom.FRandRange(0, 360), 0);
+        const FVector Size(Scale, Scale, Scale * BackgroundRandom.FRandRange(0.94f, 1.09f));
+        Place(Bark, Base, Size, Rotation);
+        Place(Crown, Base, Size, Rotation);
+    };
+    for (int32 I = 0; I < 10; ++I)
+    {
+        // The nearest background trunks begin beyond the cottages' rear walls.
+        AddBackgroundTree(FVector(-3670 + I * 810 + BackgroundRandom.FRandRange(-110, 110),
+            3650 + BackgroundRandom.FRandRange(-180, 240), -70),
+            BackgroundRandom.FRandRange(1.28f, 1.65f), I, false);
+    }
+    for (int32 I = 0; I < 10; ++I)
+    {
+        AddBackgroundTree(FVector(-4530 + I * 1010 + BackgroundRandom.FRandRange(-150, 150),
+            4960 + BackgroundRandom.FRandRange(-230, 260), -70),
+            BackgroundRandom.FRandRange(1.70f, 2.15f), I + 1, true);
+    }
+    for (int32 I = 0; I < 6; ++I)
+    {
+        AddBackgroundTree(FVector(-4600 + I * 1840 + BackgroundRandom.FRandRange(-180, 180),
+            6300 + BackgroundRandom.FRandRange(-170, 170), -70),
+            BackgroundRandom.FRandRange(2.30f, 2.70f), I, true);
+    }
+    for (int32 Side : {-1, 1})
+    {
+        for (int32 I = 0; I < 11; ++I)
+        {
+            const int32 Layer = I % 3;
+            const float X = Side * (3550.0f + Layer * 1250.0f + BackgroundRandom.FRandRange(-120, 120));
+            const float Y = -3070 + I * 690.0f + BackgroundRandom.FRandRange(-160, 160);
+            AddBackgroundTree(FVector(X, Y, -70),
+                BackgroundRandom.FRandRange(1.32f + Layer * 0.35f, 1.70f + Layer * 0.35f),
+                I + (Side > 0 ? 1 : 0), Layer > 0);
+        }
+    }
+
+    for (int32 I = 0; I < 39; ++I)
+    {
+        const float Angle = I * 2.0f * PI / 39.0f;
+        const float Radius = Random.FRandRange(1830, 2830);
+        const FVector Base(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0);
+        if ((Base.X < -1770 && FMath::Abs(Base.Y + 350) < 430)
+            || (Base.Y > 1850 && FMath::Abs(Base.X) < 1650))
+        {
+            continue;
+        }
+        const float Scale = Random.FRandRange(0.65f, 1.60f);
+        const float Yaw = Random.FRandRange(0, 360);
+        Place((I % 3 == 0) ? MossRocks : Rocks, Base, FVector(Scale), FRotator(0, Yaw, 0));
+        Place(RockCollision, Base + FVector(0, 0, 35 * Scale),
+            FVector(1.3f * Scale, 0.9f * Scale, 0.7f * Scale), FRotator(0, Yaw, 0));
+    }
+    // Small irregular stones follow both curved stream banks.
+    for (int32 I = 0; I < 50; ++I)
+    {
+        const float Y = -2800 + I * 114.0f;
+        if (FMath::Abs(Y + 350) < 280)
+        {
+            continue;
+        }
+        const float StreamX = -2180 + 95 * FMath::Sin(Y * 0.0011f) + 25 * FMath::Sin(Y * 0.004f);
+        for (int32 Side : {-1, 1})
+        {
+            const FVector Base(StreamX + Side * Random.FRandRange(212, 253), Y, 0);
+            Place((I % 3 == 0) ? MossRocks : Rocks, Base,
+                FVector(Random.FRandRange(0.3f, 0.65f)), FRotator(0, Random.FRandRange(0, 360), 0));
+        }
+    }
+
+    auto* Walls = MakeBatch(TEXT("CottagePlaster"), ForestMesh(TEXT("SM_ForestCottageWalls")),
+        FLinearColor(0.72f, 0.55f, 0.31f));
+    auto* Roofs = MakeBatch(TEXT("CottageRoofs"), ForestMesh(TEXT("SM_ForestCottageRoof")),
+        FLinearColor(0.46f, 0.115f, 0.045f));
+    auto* Wood = MakeBatch(TEXT("CottageTimber"), ForestMesh(TEXT("SM_ForestCottageTimber")),
+        FLinearColor(0.19f, 0.085f, 0.035f));
+    auto* Windows = MakeBatch(TEXT("AmberWindows"), ForestMesh(TEXT("SM_ForestCottageWindows")),
+        FLinearColor(0.95f, 0.55f, 0.16f), false, nullptr, 0.42f);
+    auto* CottageStone = MakeBatch(TEXT("CottageStonework"), ForestMesh(TEXT("SM_ForestCottageStone")),
+        FLinearColor(0.44f, 0.40f, 0.29f));
+    for (int32 I = 0; I < 5; ++I)
+    {
+        const FVector Base(-1370 + I * 685, 2500 + (I % 2) * 140, 0);
+        const float Scale = (I == 2) ? 1.22f : Random.FRandRange(0.86f, 1.05f);
+        const float Yaw = (2 - I) * 5.0f;
+        const FRotator Rotation(0, Yaw, 0);
+        for (auto* Batch : {Walls, Roofs, Wood, Windows, CottageStone})
+        {
+            Place(Batch, Base, FVector(Scale), Rotation);
+        }
+        Place(HouseCollision, Base + FVector(0, 0, 150 * Scale), FVector(5 * Scale, 4.2f * Scale, 3 * Scale), Rotation);
+    }
+
+    auto* Grass = MakeBatch(TEXT("GrassBlades"), GrassMesh, FLinearColor(0.23f, 0.36f, 0.09f));
+    auto* LightGrass = MakeBatch(TEXT("SunlitGrass"), GrassMesh, FLinearColor(0.39f, 0.44f, 0.14f));
+    auto* Ferns = MakeBatch(TEXT("WoodlandFerns"), FernMesh, FLinearColor(0.16f, 0.32f, 0.08f));
+    auto* FlowerStems = MakeBatch(TEXT("FlowerStems"), ForestMesh(TEXT("SM_ForestFlowerStems")),
+        FLinearColor(0.18f, 0.30f, 0.075f));
+    UStaticMesh* PetalMesh = ForestMesh(TEXT("SM_ForestFlowerPetals"));
+    auto* Flowers = MakeBatch(TEXT("CreamFlowers"), PetalMesh, FLinearColor(0.94f, 0.84f, 0.57f));
+    auto* PurpleFlowers = MakeBatch(TEXT("LilacFlowers"), PetalMesh, FLinearColor(0.49f, 0.30f, 0.48f));
+    auto* Hearts = MakeBatch(TEXT("FlowerHearts"), ForestMesh(TEXT("SM_ForestFlowerHearts")),
+        FLinearColor(0.82f, 0.46f, 0.08f));
+    auto* MushroomStems = MakeBatch(TEXT("MushroomStems"), ForestMesh(TEXT("SM_ForestMushroomStems")),
+        FLinearColor(0.72f, 0.62f, 0.41f));
+    auto* MushroomCaps = MakeBatch(TEXT("MushroomCaps"), ForestMesh(TEXT("SM_ForestMushroomCaps")),
+        FLinearColor(0.55f, 0.19f, 0.075f));
+
+    // Personal story objects stay in the world after use: each player investigates
+    // independently. Authored flowers, roots and stones add no walking collision.
+    auto* StoryStems = MakeBatch(TEXT("StoryLanternStems"), ForestMesh(TEXT("SM_ForestFlowerStems")),
+        FLinearColor(0.18f, 0.34f, 0.18f));
+    auto* StoryPetals = MakeBatch(TEXT("StoryLanternPetals"), PetalMesh,
+        FLinearColor(1.0f, 0.67f, 0.20f), false, nullptr, 0.56f);
+    auto* StoryHearts = MakeBatch(TEXT("StoryLanternHearts"), ForestMesh(TEXT("SM_ForestFlowerHearts")),
+        FLinearColor(1.0f, 0.92f, 0.52f), false, nullptr, 0.48f);
+    auto* StoryStones = MakeBatch(TEXT("StoryTrailStones"), RockMesh, FLinearColor(0.51f, 0.52f, 0.36f));
+    for (int32 ObjectIndex = 0; ObjectIndex < 3; ++ObjectIndex)
+    {
+        const FVector Base = FableRPG::StoryObjectLocation(ObjectIndex) + FVector(0, 0, 4);
+        const FRotator Facing(0, ObjectIndex * 47.0f, 0);
+        for (auto* Batch : {StoryStems, StoryPetals, StoryHearts})
+            Place(Batch, Base, FVector(1.65f), Facing);
+        for (int32 StoneIndex = 0; StoneIndex < 6; ++StoneIndex)
+        {
+            const float Angle = StoneIndex * PI / 3.0f;
+            Place(StoryStones, Base + FVector(FMath::Cos(Angle) * 94, FMath::Sin(Angle) * 94, 0),
+                FVector(0.16f, 0.13f, 0.09f), FRotator(0, StoneIndex * 61.0f, 0));
+        }
+    }
+    auto* StoryRoots = MakeBatch(TEXT("StoryFadedRoots"), OakMeshB, FLinearColor(0.32f, 0.22f, 0.13f));
+    auto* StoryCrown = MakeBatch(TEXT("StoryFadedCrown"), LeavesMeshB, FLinearColor(0.37f, 0.38f, 0.17f));
+    const FVector RootBase = FableRPG::StoryObjectLocation(3) + FVector(0, 0, 4);
+    Place(StoryRoots, RootBase, FVector(0.18f, 0.18f, 0.16f), FRotator(0, 38, 0));
+    Place(StoryCrown, RootBase, FVector(0.18f, 0.18f, 0.16f), FRotator(0, 38, 0));
+    Place(Ferns, RootBase + FVector(-70, 20, 0), FVector(1.4f), FRotator(0, 45, 0));
+    Place(StoryStones, RootBase + FVector(65, -40, 0), FVector(0.30f, 0.23f, 0.14f));
+
+    // About 1,600 total instances: detailed silhouettes stay inexpensive through ISM batches.
+    for (int32 I = 0; I < 1400; ++I)
+    {
+        const FVector Base(Random.FRandRange(-2870, 2870), Random.FRandRange(-2850, 2840), 1);
+        const float StreamX = -2180 + 95 * FMath::Sin(Base.Y * 0.0011f) + 25 * FMath::Sin(Base.Y * 0.004f);
+        const float PathX = 130 * FMath::Sin(Base.Y * 0.0017f);
+        const bool bClearing = FMath::Square(Base.X / 1420) + FMath::Square((Base.Y - 120) / 1500) < 1;
+        const bool bRoad = FMath::Abs(Base.X - PathX) < 240;
+        const bool bBridgePath = Base.X < -1050 && FMath::Abs(Base.Y + 350) < 245;
+        const bool bVillage = Base.Y > 2150 && FMath::Abs(Base.X) < 1700;
+        if (bClearing || bRoad || bBridgePath || bVillage || FMath::Abs(Base.X - StreamX) < 203)
+        {
+            continue;
+        }
+        const float Scale = Random.FRandRange(0.75f, 1.45f);
+        const FRotator Rotation(0, Random.FRandRange(0, 360), 0);
+        Place((I % 4 == 0) ? LightGrass : Grass, Base, FVector(Scale), Rotation);
+        if (I % 5 == 0)
+        {
+            Place(Ferns, Base + FVector(25, -20, 0), FVector(Scale * 0.85f), Rotation);
+        }
+        if (I % 8 == 0)
+        {
+            const FVector FlowerScale(Scale);
+            Place(FlowerStems, Base, FlowerScale, Rotation);
+            Place((I % 24 == 0) ? PurpleFlowers : Flowers, Base, FlowerScale, Rotation);
+            Place(Hearts, Base, FlowerScale, Rotation);
+        }
+        if (I % 31 == 0)
+        {
+            Place(MushroomStems, Base, FVector(Scale), Rotation);
+            Place(MushroomCaps, Base, FVector(Scale), Rotation);
+        }
+    }
+
+    // An invisible boundary keeps play inside the 60 m prototype.
+    auto* Boundary = MakeBatch(TEXT("PrototypeBoundary"), CubeMesh, FLinearColor::Black, true);
+    HideCollision(Boundary);
+    Place(Boundary, FVector(-3010, 0, 1000), FVector(0.2f, 62, 22));
+    Place(Boundary, FVector(3010, 0, 1000), FVector(0.2f, 62, 22));
+    Place(Boundary, FVector(0, -3010, 1000), FVector(62, 0.2f, 22));
+    Place(Boundary, FVector(0, 3010, 1000), FVector(62, 0.2f, 22));
+}

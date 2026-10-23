@@ -1,0 +1,27 @@
+# Unreal build outputs and machine-local editor state
+/Binaries/
+/DerivedDataCache/
+/Intermediate/
+/Saved/
+/Builds/
+/.vs/
+/Fablewood.sln
+/Fablewood.slnx
+/Automation_Fablewood.sln
+/Automation_Fablewood.slnx
+/.vsconfig
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
+*.log
+/Tools/.local/
+**/__pycache__/
+*.pyc
+# Captures and their historical manifests remain locally preserved.
+/ArtDirection/Previews/
+.env
+.env.*
+!.env.example
+*.user
+# Do not ignore *.obj: ArtSource/Meshes/*.obj are mesh source assets.

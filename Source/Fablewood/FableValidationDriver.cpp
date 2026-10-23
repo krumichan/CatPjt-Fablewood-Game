@@ -1,0 +1,633 @@
+#include "FableValidationDriver.h"
+
+#include "FableCharacter.h"
+#include "FableEnemy.h"
+#include "FableGameState.h"
+#include "Dom/JsonObject.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "InputKeyEventArgs.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
+#include "GameFramework/PlayerState.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Parse.h"
+#include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "UnrealClient.h"
+
+UFableValidationDriver::UFableValidationDriver()
+{
+    PrimaryComponentTick.bCanEverTick = true;
+    PrimaryComponentTick.bStartWithTickEnabled = true;
+}
+
+bool UFableValidationDriver::IsRequested()
+{
+#if UE_BUILD_SHIPPING
+    return false;
+#else
+    FString RequestedRole;
+    return FParse::Value(FCommandLine::Get(), TEXT("FableValidationRole="), RequestedRole);
+#endif
+}
+
+void UFableValidationDriver::BeginPlay()
+{
+    Super::BeginPlay();
+#if UE_BUILD_SHIPPING
+    SetComponentTickEnabled(false);
+    return;
+#else
+    Player = Cast<APlayerController>(GetOwner());
+    if (!IsRequested() || !Player.IsValid() || !Player->IsLocalController())
+    {
+        SetComponentTickEnabled(false);
+        return;
+    }
+    StartedAt = FPlatformTime::Seconds();
+    FParse::Value(FCommandLine::Get(), TEXT("FableValidationRole="), Role);
+    FParse::Value(FCommandLine::Get(), TEXT("FableValidationDirectory="), Directory);
+    FParse::Value(FCommandLine::Get(), TEXT("FableValidationRunId="), RunId);
+    Role.ToLowerInline();
+    if ((Role != TEXT("host") && Role != TEXT("guest")) || Directory.IsEmpty() || FPaths::IsRelative(Directory))
+    {
+        UE_LOG(LogTemp, Error, TEXT("FABLE_VALIDATION invalid role or non-absolute output directory"));
+        SetComponentTickEnabled(false);
+        return;
+    }
+    FPaths::NormalizeDirectoryName(Directory);
+    if (RunId.IsEmpty()) { RunId = FPaths::GetCleanFilename(Directory); }
+    if (!IFileManager::Get().MakeDirectory(*Directory, true))
+    {
+        UE_LOG(LogTemp, Error, TEXT("FABLE_VALIDATION cannot create output directory: %s"), *Directory);
+        SetComponentTickEnabled(false);
+        return;
+    }
+    // Each process must keep ticking when its window is not focused. No persistent config is changed.
+    if (IConsoleVariable* Idle = IConsoleManager::Get().FindConsoleVariable(TEXT("t.IdleWhenNotForeground"))) { Idle->Set(0); }
+    WriteReport();
+#endif
+}
+
+void UFableValidationDriver::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    ReleaseInputs();
+    if (!Directory.IsEmpty() && Status == TEXT("running") && StartedAt > 0.0)
+    {
+        Status = TEXT("failed");
+        Failure = TEXT("World ended before all validation conditions completed.");
+        WriteReport();
+    }
+    Super::EndPlay(EndPlayReason);
+}
+
+void UFableValidationDriver::SetHeldKey(const FKey& Key, bool bDown)
+{
+    APlayerController* PC = Player.Get();
+    if (!PC || !PC->PlayerInput) { return; }
+    // Re-check engine key state: a viewport losing focus may have flushed its pressed keys.
+    if (PC->IsInputKeyDown(Key) != bDown)
+    {
+        PC->InputKey(FInputKeyEventArgs::CreateSimulated(Key, bDown ? IE_Pressed : IE_Released,
+            bDown ? 1.0f : 0.0f, 0, FInputDeviceId::CreateFromInternalId(0)));
+    }
+}
+
+void UFableValidationDriver::PulseKey(const FKey& Key)
+{
+    APlayerController* PC = Player.Get();
+    if (!PC || !PC->PlayerInput) { return; }
+    PC->InputKey(FInputKeyEventArgs::CreateSimulated(Key, IE_Pressed, 1.0f, 0, FInputDeviceId::CreateFromInternalId(0)));
+    PulseKeysToRelease.AddUnique(Key);
+}
+
+void UFableValidationDriver::ReleaseInputs()
+{
+    if (APlayerController* PC = Player.Get())
+    {
+        for (const FKey& Key : PulseKeysToRelease)
+        {
+            PC->InputKey(FInputKeyEventArgs::CreateSimulated(Key, IE_Released, 0.0f, 0, FInputDeviceId::CreateFromInternalId(0)));
+        }
+        PulseKeysToRelease.Empty();
+        SetHeldKey(EKeys::W, false);
+        SetHeldKey(EKeys::S, false);
+    }
+}
+
+void UFableValidationDriver::AimAt(const FVector& Location, float DeltaTime)
+{
+    APlayerController* PC = Player.Get();
+    if (!PC || !PC->GetPawn()) { return; }
+    const double DesiredYaw = (Location - PC->GetPawn()->GetActorLocation()).Rotation().Yaw;
+    const double CurrentYaw = PC->GetControlRotation().Yaw;
+    const double Error = FMath::FindDeltaAngleDegrees(CurrentYaw, DesiredYaw);
+    const double RawMouse = FMath::Clamp(Error * 0.25, -15.0, 15.0);
+    FInputKeyEventArgs MouseEvent = FInputKeyEventArgs::CreateSimulated(EKeys::MouseX, IE_Axis,
+        static_cast<float>(RawMouse), 1, FInputDeviceId::CreateFromInternalId(0));
+    MouseEvent.DeltaTime = DeltaTime;
+    PC->InputKey(MouseEvent);
+    if (FMath::Abs(Error) > 12.0 && FMath::Abs(FMath::FindDeltaAngleDegrees(LastAimYaw, CurrentYaw)) < 0.03)
+    {
+        AimStalledSeconds += DeltaTime;
+    }
+    else { AimStalledSeconds = 0.0; }
+    if (AimStalledSeconds > 1.0)
+    {
+        // Aiming is the sole fallback for platform mouse routing; movement/damage remain normal input.
+        PC->SetControlRotation(FRotator(-14.0, DesiredYaw, 0.0));
+        ++AimFallbacks;
+        AimStalledSeconds = 0.0;
+    }
+    LastAimYaw = PC->GetControlRotation().Yaw;
+}
+
+void UFableValidationDriver::ObserveMovement(AFableCharacter* Pawn)
+{
+    if (Pawn)
+    {
+        const FVector Location = Pawn->GetActorLocation();
+        if (LastLocalPawn.Get() == Pawn)
+        {
+            const double Step = FVector::Dist2D(Location, LastLocalLocation);
+            if (Step < 250.0) { LocalMovement += Step; } // Do not count respawn teleports.
+        }
+        LastLocalPawn = Pawn;
+        LastLocalLocation = Location;
+    }
+    AFableCharacter* Other = nullptr;
+    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
+    {
+        if (*It != Pawn && It->GetPlayerState()) { Other = *It; break; }
+    }
+    if (Other)
+    {
+        const FVector Location = Other->GetActorLocation();
+        if (LastRemotePawn.Get() == Other)
+        {
+            const double Step = FVector::Dist2D(Location, LastRemoteLocation);
+            if (Step < 250.0) { RemoteMovement += Step; }
+        }
+        LastRemotePawn = Other;
+        LastRemoteLocation = Location;
+    }
+}
+
+void UFableValidationDriver::ObserveCooldown(AFableCharacter* Pawn, FCooldownObservation& Observation, double ServerNow)
+{
+    if (!Pawn) { return; }
+    if (Observation.Pawn.Get() != Pawn || !Pawn->IsAlive())
+    {
+        // Respawning/new rounds intentionally reset cooldowns; exclude those transitions from interval checks.
+        Observation.Pawn = Pawn;
+        Observation.AttackEnd = Observation.SkillEnd = Observation.DodgeEnd = 0.0;
+        if (!Pawn->IsAlive()) { return; }
+    }
+    const auto Observe = [ServerNow](float Remaining, double& PreviousEnd, int32& Cycles, double* MinimumGap)
+    {
+        if (Remaining <= 0.02f) { return; }
+        const double End = ServerNow + Remaining;
+        if (PreviousEnd == 0.0 || End > PreviousEnd + 0.10)
+        {
+            if (PreviousEnd > 0.0 && MinimumGap) { *MinimumGap = FMath::Min(*MinimumGap, End - PreviousEnd); }
+            PreviousEnd = End;
+            ++Cycles;
+        }
+    };
+    Observe(Pawn->GetAttackCooldownRemaining(), Observation.AttackEnd, Observation.AttackCycles, &Observation.MinimumAttackGap);
+    Observe(Pawn->GetSkillCooldownRemaining(), Observation.SkillEnd, Observation.SkillCycles, nullptr);
+    Observe(Pawn->GetDodgeCooldownRemaining(), Observation.DodgeEnd, Observation.DodgeCycles, nullptr);
+}
+
+bool UFableValidationDriver::ServerCooldownsPassed() const
+{
+    if (Role != TEXT("host")) { return true; }
+    if (ServerCooldowns.Num() != 2) { return false; }
+    for (const auto& Pair : ServerCooldowns)
+    {
+        const FCooldownObservation& Item = Pair.Value;
+        if (Item.AttackCycles < 4 || Item.SkillCycles < 1 || Item.DodgeCycles < 1
+            || Item.MinimumAttackGap < 0.50 || Item.MinimumAttackGap > 1000.0) { return false; }
+    }
+    return true;
+}
+
+void UFableValidationDriver::DriveCombat(AFableCharacter* Pawn, int32 Round, float DeltaTime)
+{
+    if (!Pawn || !Pawn->IsAlive()) { SetHeldKey(EKeys::W, false); return; }
+    AFableEnemy* Enemy = Target.Get();
+    if (!Enemy || !Enemy->IsAlive())
+    {
+        Enemy = nullptr;
+        double BestSide = Role == TEXT("host") ? TNumericLimits<double>::Max() : -TNumericLimits<double>::Max();
+        for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
+        {
+            if (!It->IsAlive()) { continue; }
+            const double Side = It->GetActorLocation().X;
+            if (!Enemy || (Role == TEXT("host") ? Side < BestSide : Side > BestSide))
+            {
+                Enemy = *It;
+                BestSide = Side;
+            }
+        }
+        Target = Enemy;
+    }
+    if (!Enemy) { SetHeldKey(EKeys::W, false); return; }
+    const FVector Difference = Enemy->GetActorLocation() - Pawn->GetActorLocation();
+    const double Distance = Difference.Size2D();
+    AimAt(Enemy->GetActorLocation(), DeltaTime);
+    const double HeadingError = FMath::Abs(FMath::FindDeltaAngleDegrees(Player->GetControlRotation().Yaw, Difference.Rotation().Yaw));
+    SetHeldKey(EKeys::W, Distance > 155.0 && HeadingError < 35.0);
+    const double Now = FPlatformTime::Seconds();
+    if (Now < NextPulseAt || Distance > 425.0 || HeadingError > 30.0) { return; }
+    if (!bCombatScreenshotQueued)
+    {
+        bCombatScreenshotQueued = true;
+        QueueScreenshot(TEXT("combat"));
+    }
+    NextPulseAt = Now + 0.12;
+    if (LastDodgeRound != Round && Distance < 240.0 && Pawn->GetDodgeCooldownRemaining() <= 0.0f && Now - LastDodgeAttemptAt > 0.8)
+    {
+        PulseKey(EKeys::LeftShift);
+        ++DodgeInputs;
+        LastDodgeAttemptAt = Now;
+        // Confirm acceptance from the authoritative cooldown instead of assuming the input worked.
+        return;
+    }
+    if (Pawn->GetSkillCooldownRemaining() <= 0.0f && Now - LastSkillAttemptAt > 0.7)
+    {
+        PulseKey(EKeys::K);
+        ++SkillInputs;
+        LastSkillAttemptAt = Now;
+        return;
+    }
+    if (Distance <= 225.0)
+    {
+        // Faster than the 0.52s server cooldown, while slower than the 0.06s local request limiter.
+        PulseKey(EKeys::J);
+        ++AttackInputs;
+    }
+}
+
+void UFableValidationDriver::RecordCheckpoint(FCheckpoint& Checkpoint, const AFableGameState* State)
+{
+    Checkpoint.Round = State->Round;
+    Checkpoint.Defeated = State->DefeatedEnemies;
+    Checkpoint.Required = State->RequiredEnemies;
+    Checkpoint.bComplete = State->bObjectiveComplete;
+    Checkpoint.Elapsed = FPlatformTime::Seconds() - ScenarioStartedAt;
+}
+
+void UFableValidationDriver::QueueScreenshot(const FString& Name)
+{
+    const FString Path = FPaths::Combine(Directory, Role + TEXT("-") + Name + TEXT(".png"));
+    if (!SavedScreenshots.Contains(Path) && !ScreenshotQueue.Contains(Path) && PendingScreenshot != Path) { ScreenshotQueue.Add(Path); }
+}
+
+bool UFableValidationDriver::HasScreenshot(const FString& Name) const
+{
+    return SavedScreenshots.Contains(FPaths::Combine(Directory, Role + TEXT("-") + Name + TEXT(".png")));
+}
+
+void UFableValidationDriver::ProcessScreenshots(double Now)
+{
+    if (!PendingScreenshot.IsEmpty())
+    {
+        if (IFileManager::Get().FileSize(*PendingScreenshot) > 128)
+        {
+            SavedScreenshots.AddUnique(PendingScreenshot);
+            PendingScreenshot.Empty();
+        }
+        else if (Now - ScreenshotRequestedAt > 10.0)
+        {
+            Fail(TEXT("Engine did not save the requested gameplay screenshot: ") + PendingScreenshot);
+            return;
+        }
+    }
+    if (PendingScreenshot.IsEmpty() && ScreenshotQueue.Num() > 0 && !FScreenshotRequest::IsScreenshotRequested())
+    {
+        PendingScreenshot = ScreenshotQueue[0];
+        ScreenshotQueue.RemoveAt(0);
+        ScreenshotRequestedAt = Now;
+        FScreenshotRequest::RequestScreenshot(PendingScreenshot, true, false, false);
+    }
+}
+
+TSharedPtr<FJsonObject> UFableValidationDriver::ReadPeerReport() const
+{
+    FString Content;
+    const FString PeerRole = Role == TEXT("host") ? TEXT("guest") : TEXT("host");
+    if (!FFileHelper::LoadFileToString(Content, *FPaths::Combine(Directory, PeerRole + TEXT(".json")))) { return nullptr; }
+    TSharedPtr<FJsonObject> Object;
+    if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Content), Object) || !Object.IsValid()) { return nullptr; }
+    FString PeerRun;
+    if (!Object->TryGetStringField(TEXT("run_id"), PeerRun) || PeerRun != RunId) { return nullptr; }
+    return Object;
+}
+
+bool UFableValidationDriver::PeerFlag(const TSharedPtr<FJsonObject>& Peer, const FString& Name) const
+{
+    bool Value = false;
+    return Peer.IsValid() && Peer->TryGetBoolField(Name, Value) && Value;
+}
+
+void UFableValidationDriver::WriteReport()
+{
+    if (Directory.IsEmpty()) { return; }
+    const double Now = FPlatformTime::Seconds();
+    TSharedRef<FJsonObject> Report = MakeShared<FJsonObject>();
+    Report->SetStringField(TEXT("run_id"), RunId);
+    Report->SetStringField(TEXT("role"), Role);
+    Report->SetStringField(TEXT("status"), Status);
+    Report->SetStringField(TEXT("phase"), Phase);
+    Report->SetStringField(TEXT("failure"), Failure);
+    Report->SetStringField(TEXT("reason"), Failure);
+    const ENetMode Mode = GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone;
+    Report->SetStringField(TEXT("network_mode"), Mode == NM_ListenServer ? TEXT("listen_server") : (Mode == NM_Client ? TEXT("client") : (Mode == NM_DedicatedServer ? TEXT("dedicated_server") : TEXT("standalone"))));
+    Report->SetBoolField(TEXT("is_local_controller"), Player.IsValid() && Player->IsLocalController());
+    Report->SetNumberField(TEXT("process_id"), FPlatformProcess::GetCurrentProcessId());
+    Report->SetNumberField(TEXT("local_player_id"), LocalPlayerId);
+    Report->SetNumberField(TEXT("startup_elapsed_seconds"), Now - StartedAt);
+    Report->SetNumberField(TEXT("scenario_elapsed_seconds"), ScenarioStartedAt > 0 ? Now - ScenarioStartedAt : 0.0);
+    Report->SetBoolField(TEXT("ready"), bReady);
+    Report->SetBoolField(TEXT("quorum_observed"), bQuorumObserved);
+    Report->SetNumberField(TEXT("maximum_player_count"), MaximumPlayerCount);
+    Report->SetBoolField(TEXT("warmup_complete"), bWarmupComplete);
+    Report->SetBoolField(TEXT("round_one_complete"), bRoundOneComplete);
+    Report->SetBoolField(TEXT("round_two_started"), bRoundTwoStarted);
+    Report->SetBoolField(TEXT("round_two_complete"), bRoundTwoComplete);
+    Report->SetBoolField(TEXT("round_one_screenshot_saved"), HasScreenshot(TEXT("round1-complete")));
+    Report->SetBoolField(TEXT("round_two_screenshot_saved"), HasScreenshot(TEXT("round2-complete")));
+    Report->SetBoolField(TEXT("server_cooldown_checks_passed"), Role == TEXT("host") && ServerCooldownsPassed());
+    Report->SetNumberField(TEXT("local_movement_cm"), LocalMovement);
+    Report->SetNumberField(TEXT("observed_remote_movement_cm"), RemoteMovement);
+    Report->SetNumberField(TEXT("attack_input_count"), AttackInputs);
+    Report->SetNumberField(TEXT("skill_input_count"), SkillInputs);
+    Report->SetNumberField(TEXT("dodge_input_count"), DodgeInputs);
+    Report->SetNumberField(TEXT("restart_input_count"), RestartInputs);
+    Report->SetNumberField(TEXT("aim_fallback_count"), AimFallbacks);
+    Report->SetNumberField(TEXT("observed_local_attack_cycles"), LocalCooldown.AttackCycles);
+    Report->SetNumberField(TEXT("observed_local_skill_cycles"), LocalCooldown.SkillCycles);
+    Report->SetNumberField(TEXT("observed_local_dodge_cycles"), LocalCooldown.DodgeCycles);
+    const auto CheckpointJson = [](const FCheckpoint& Point)
+    {
+        TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+        Object->SetNumberField(TEXT("round"), Point.Round);
+        Object->SetNumberField(TEXT("defeated"), Point.Defeated);
+        Object->SetNumberField(TEXT("required"), Point.Required);
+        Object->SetBoolField(TEXT("complete"), Point.bComplete);
+        Object->SetNumberField(TEXT("elapsed_seconds"), Point.Elapsed);
+        return Object;
+    };
+    Report->SetObjectField(TEXT("round_one"), CheckpointJson(RoundOne));
+    Report->SetObjectField(TEXT("round_two_reset"), CheckpointJson(RoundTwoReset));
+    Report->SetObjectField(TEXT("round_two"), CheckpointJson(RoundTwo));
+    TArray<TSharedPtr<FJsonValue>> Cooldowns;
+    for (const auto& Pair : ServerCooldowns)
+    {
+        TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetNumberField(TEXT("player_id"), Pair.Key);
+        Item->SetNumberField(TEXT("accepted_attack_cycles"), Pair.Value.AttackCycles);
+        Item->SetNumberField(TEXT("accepted_skill_cycles"), Pair.Value.SkillCycles);
+        Item->SetNumberField(TEXT("accepted_dodge_cycles"), Pair.Value.DodgeCycles);
+        Item->SetNumberField(TEXT("minimum_attack_interval_seconds"), Pair.Value.MinimumAttackGap);
+        Cooldowns.Add(MakeShared<FJsonValueObject>(Item));
+    }
+    Report->SetArrayField(TEXT("server_cooldowns"), Cooldowns);
+    TArray<TSharedPtr<FJsonValue>> Screenshots;
+    for (const FString& Path : SavedScreenshots) { Screenshots.Add(MakeShared<FJsonValueString>(Path)); }
+    Report->SetArrayField(TEXT("screenshots"), Screenshots);
+    FString Serialized;
+    if (FJsonSerializer::Serialize(Report, TJsonWriterFactory<>::Create(&Serialized)))
+    {
+        const FString Destination = FPaths::Combine(Directory, Role + TEXT(".json"));
+        const FString Temporary = Destination + TEXT(".tmp");
+        if (FFileHelper::SaveStringToFile(Serialized, *Temporary, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+        {
+            IFileManager::Get().Move(*Destination, *Temporary, true, false);
+        }
+    }
+    LastReportAt = Now;
+}
+
+void UFableValidationDriver::Fail(const FString& Reason)
+{
+    if (Status != TEXT("running")) { return; }
+    Failure = Reason;
+    Finish(false);
+}
+
+void UFableValidationDriver::Finish(bool bPassed)
+{
+    ReleaseInputs();
+    Status = bPassed ? TEXT("passed") : TEXT("failed");
+    Phase = bPassed ? TEXT("completed") : TEXT("failed");
+    FinishedAt = FPlatformTime::Seconds();
+    WriteReport();
+    UE_LOG(LogTemp, Display, TEXT("FABLE_VALIDATION role=%s status=%s reason=%s"), *Role, *Status, *Failure);
+}
+
+void UFableValidationDriver::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+    Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+#if UE_BUILD_SHIPPING
+    return;
+#else
+    APlayerController* PC = Player.Get();
+    if (!PC || !PC->IsLocalController() || StartedAt <= 0.0 || Directory.IsEmpty()) { return; }
+    // Release a press on the following frame, allowing the ordinary input stack to consume it first.
+    for (const FKey& Key : PulseKeysToRelease)
+    {
+        PC->InputKey(FInputKeyEventArgs::CreateSimulated(Key, IE_Released, 0.0f, 0, FInputDeviceId::CreateFromInternalId(0)));
+    }
+    PulseKeysToRelease.Empty();
+    const double Now = FPlatformTime::Seconds();
+    const TSharedPtr<FJsonObject> Peer = ReadPeerReport();
+    if (Status != TEXT("running"))
+    {
+        if (!bQuitRequested && Now - FinishedAt > 2.0)
+        {
+            bool bPeerFinished = false;
+            FString PeerStatus;
+            if (Peer.IsValid() && Peer->TryGetStringField(TEXT("status"), PeerStatus)) { bPeerFinished = PeerStatus == TEXT("passed") || PeerStatus == TEXT("failed"); }
+            if (Role == TEXT("guest") || Status == TEXT("failed") || bPeerFinished || Now - FinishedAt > 15.0)
+            {
+                bQuitRequested = true;
+                PC->ConsoleCommand(TEXT("quit"));
+            }
+        }
+        return;
+    }
+    FString PeerStatus;
+    if (Peer.IsValid() && Peer->TryGetStringField(TEXT("status"), PeerStatus) && PeerStatus == TEXT("failed"))
+    {
+        FString PeerFailure;
+        Peer->TryGetStringField(TEXT("failure"), PeerFailure);
+        Fail(TEXT("Peer validation failed: ") + PeerFailure);
+        return;
+    }
+    if (ScenarioStartedAt == 0.0 && Now - StartedAt > 180.0) { Fail(TEXT("Timed out waiting 180 seconds for two local players and their peer report.")); return; }
+    if (ScenarioStartedAt > 0.0 && Now - ScenarioStartedAt > 95.0) { Fail(TEXT("Gameplay scenario exceeded its 95-second deadline.")); return; }
+    ProcessScreenshots(Now);
+    if (Status != TEXT("running")) { return; }
+    AFableCharacter* Pawn = Cast<AFableCharacter>(PC->GetPawn());
+    AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
+    if (State) { MaximumPlayerCount = FMath::Max(MaximumPlayerCount, State->PlayerArray.Num()); }
+    if (PC->PlayerState) { LocalPlayerId = PC->PlayerState->GetPlayerId(); }
+    if (!State || !Pawn || !PC->PlayerInput)
+    {
+        ReleaseInputs();
+        if (Now - LastReportAt > 0.25) { WriteReport(); }
+        return;
+    }
+    const ENetMode NetMode = GetWorld()->GetNetMode();
+    if ((Role == TEXT("host") && NetMode != NM_ListenServer) || (Role == TEXT("guest") && NetMode != NM_Client))
+    {
+        Fail(TEXT("Validation role does not match the actual listen-server/client network mode."));
+        return;
+    }
+    int32 PawnCount = 0;
+    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It) { if (It->GetPlayerState()) { ++PawnCount; } }
+    bReady = State->PlayerArray.Num() == 2 && PawnCount == 2 && Pawn->IsAlive();
+    if (ScenarioStartedAt == 0.0)
+    {
+        Phase = TEXT("awaiting_quorum");
+        if (bReady && PeerFlag(Peer, TEXT("ready")))
+        {
+            bQuorumObserved = true;
+            ScenarioStartedAt = Now;
+            FirstRoundPawn = Pawn;
+            Phase = TEXT("cooldown_input_warmup");
+            QueueScreenshot(TEXT("ready"));
+            PC->SetControlRotation(FRotator(-14, -90, 0));
+        }
+        WriteReport();
+        return;
+    }
+    ObserveMovement(Pawn);
+    ObserveCooldown(Pawn, LocalCooldown, State->GetServerWorldTimeSeconds());
+    if (Pawn->GetDodgeCooldownRemaining() > 0.1f) { LastDodgeRound = State->Round; }
+    if (Role == TEXT("host") && GetWorld()->GetNetMode() == NM_ListenServer)
+    {
+        for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
+        {
+            if (const APlayerState* OwnerState = It->GetPlayerState())
+            {
+                ObserveCooldown(*It, ServerCooldowns.FindOrAdd(OwnerState->GetPlayerId()), State->GetServerWorldTimeSeconds());
+            }
+        }
+    }
+    if (!bWarmupComplete)
+    {
+        Phase = TEXT("cooldown_input_warmup");
+        if (Pawn->IsAlive())
+        {
+            WarmupSeconds += DeltaTime;
+            // Walk away from the clearing briefly, then repeatedly swing into empty space.
+            PC->SetControlRotation(FRotator(-14, -90, 0));
+            SetHeldKey(EKeys::W, WarmupSeconds < 0.9);
+            if (Now >= NextPulseAt)
+            {
+                PulseKey(EKeys::J);
+                ++AttackInputs;
+                NextPulseAt = Now + 0.12;
+            }
+        }
+        else { SetHeldKey(EKeys::W, false); }
+        if (WarmupSeconds >= 3.4 && AttackInputs >= 20 && LocalCooldown.AttackCycles >= 4)
+        {
+            bWarmupComplete = true;
+            ReleaseInputs();
+
+        }
+    }
+    else if (!PeerFlag(Peer, TEXT("warmup_complete")))
+    {
+        Phase = TEXT("awaiting_peer_warmup");
+        ReleaseInputs();
+    }
+    else if (!bRoundOneComplete)
+    {
+        Phase = TEXT("round_one_combat");
+        if (State->Round != 1) { Fail(TEXT("Round changed before both players observed the first completion.")); return; }
+        if (State->bObjectiveComplete && State->DefeatedEnemies == 3 && State->RequiredEnemies == 3)
+        {
+            bRoundOneComplete = true;
+            RecordCheckpoint(RoundOne, State);
+            ReleaseInputs();
+            QueueScreenshot(TEXT("round1-complete"));
+            WriteReport();
+        }
+        else { DriveCombat(Pawn, 1, DeltaTime); }
+    }
+    else if (!bRoundTwoStarted)
+    {
+        Phase = TEXT("awaiting_round_two_reset");
+        ReleaseInputs();
+        if (State->Round == 2 && State->DefeatedEnemies == 0 && State->RequiredEnemies == 3 && !State->bObjectiveComplete
+            && Pawn != FirstRoundPawn.Get() && Pawn->IsAlive())
+        {
+            bRoundTwoStarted = true;
+            RecordCheckpoint(RoundTwoReset, State);
+            Target.Reset();
+            QueueScreenshot(TEXT("round2-reset"));
+            WriteReport();
+        }
+        else if (Role == TEXT("host") && State->Round == 1 && State->bObjectiveComplete
+            && PeerFlag(Peer, TEXT("round_one_complete")) && PeerFlag(Peer, TEXT("round_one_screenshot_saved"))
+            && HasScreenshot(TEXT("round1-complete")) && Now >= NextRestartAt)
+        {
+            PulseKey(EKeys::R);
+            ++RestartInputs;
+            NextRestartAt = Now + 1.0;
+        }
+    }
+    else if (!PeerFlag(Peer, TEXT("round_two_started")) || !HasScreenshot(TEXT("round2-reset")))
+    {
+        Phase = TEXT("awaiting_peer_round_two_reset");
+        ReleaseInputs();
+    }
+    else if (!bRoundTwoComplete)
+    {
+        Phase = TEXT("round_two_combat");
+        if (State->Round != 2) { Fail(TEXT("Unexpected round while validating the second encounter.")); return; }
+        if (State->bObjectiveComplete && State->DefeatedEnemies == 3 && State->RequiredEnemies == 3)
+        {
+            bRoundTwoComplete = true;
+            RecordCheckpoint(RoundTwo, State);
+            ReleaseInputs();
+            QueueScreenshot(TEXT("round2-complete"));
+            WriteReport();
+        }
+        else { DriveCombat(Pawn, 2, DeltaTime); }
+    }
+    else
+    {
+        Phase = TEXT("awaiting_final_evidence");
+        ReleaseInputs();
+        const bool bLocalConditions = bQuorumObserved && LocalMovement >= 250.0 && RemoteMovement >= 150.0
+            && AttackInputs >= 20 && SkillInputs >= 1 && DodgeInputs >= 1 && LocalCooldown.AttackCycles >= 4
+            && LocalCooldown.SkillCycles >= 1 && LocalCooldown.DodgeCycles >= 1
+            && HasScreenshot(TEXT("ready")) && HasScreenshot(TEXT("combat"))
+            && HasScreenshot(TEXT("round1-complete")) && HasScreenshot(TEXT("round2-reset")) && HasScreenshot(TEXT("round2-complete"));
+        const bool bPeerConditions = PeerFlag(Peer, TEXT("round_two_complete")) && PeerFlag(Peer, TEXT("round_two_screenshot_saved"));
+        if (bLocalConditions && bPeerConditions && ServerCooldownsPassed())
+        {
+            // The guest waits for authoritative cadence checks; the host waits for the guest's final report.
+            if (Role == TEXT("guest") && PeerFlag(Peer, TEXT("server_cooldown_checks_passed"))) { Finish(true); }
+            else if (Role == TEXT("host") && PeerStatus == TEXT("passed")) { Finish(true); }
+        }
+    }
+    if (Now - LastReportAt > 0.25) { WriteReport(); }
+#endif
+}
+
+
+

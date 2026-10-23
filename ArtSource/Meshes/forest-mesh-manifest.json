@@ -1,0 +1,405 @@
+{
+  "coordinate_system": "centimetres; Z-up; X-forward; right-handed OBJ; importer reflects Y",
+  "material_slots": 1,
+  "generated_assets": [
+    {
+      "file": "SM_ForestTerrain.obj",
+      "vertices": 21600,
+      "triangles": 7200,
+      "bounds_cm": [
+        [
+          -3000,
+          3000
+        ],
+        [
+          -3000,
+          3000
+        ],
+        [
+          -9.0,
+          12.29
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestPath.obj",
+      "vertices": 762,
+      "triangles": 254,
+      "bounds_cm": [
+        [
+          -2717.5,
+          1340.45
+        ],
+        [
+          -3001.04,
+          2908.22
+        ],
+        [
+          2.1,
+          2.3
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestBrook.obj",
+      "vertices": 3168,
+      "triangles": 1056,
+      "bounds_cm": [
+        [
+          -2482.57,
+          -1895.75
+        ],
+        [
+          -2930,
+          2966
+        ],
+        [
+          1.98,
+          2.62
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestRock.obj",
+      "vertices": 264,
+      "triangles": 88,
+      "bounds_cm": [
+        [
+          -103.66,
+          95.7
+        ],
+        [
+          -77.18,
+          76.3
+        ],
+        [
+          -14.09,
+          105
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestGrass.obj",
+      "vertices": 207,
+      "triangles": 69,
+      "bounds_cm": [
+        [
+          -37.3,
+          45.36
+        ],
+        [
+          -41.48,
+          34.47
+        ],
+        [
+          0.0,
+          51.7
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestFern.obj",
+      "vertices": 10176,
+      "triangles": 3392,
+      "bounds_cm": [
+        [
+          -110.91,
+          107.69
+        ],
+        [
+          -127.14,
+          94.28
+        ],
+        [
+          4.66,
+          58.99
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestBridge.obj",
+      "vertices": 3528,
+      "triangles": 1176,
+      "bounds_cm": [
+        [
+          -380.5,
+          380.5
+        ],
+        [
+          -239.5,
+          239.5
+        ],
+        [
+          -110.0,
+          168.69
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestOakTrunk.obj",
+      "vertices": 8544,
+      "triangles": 2848,
+      "bounds_cm": [
+        [
+          -279.4,
+          311.54
+        ],
+        [
+          -302.77,
+          305.41
+        ],
+        [
+          -14.37,
+          1038.23
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestOakLeaves.obj",
+      "vertices": 59052,
+      "triangles": 19684,
+      "bounds_cm": [
+        [
+          -467.45,
+          461.41
+        ],
+        [
+          -450.68,
+          478.25
+        ],
+        [
+          545.82,
+          1077.2
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestOakTrunkB.obj",
+      "vertices": 8544,
+      "triangles": 2848,
+      "bounds_cm": [
+        [
+          -314.97,
+          311.62
+        ],
+        [
+          -343.95,
+          349.2
+        ],
+        [
+          -13.93,
+          1060.1
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestOakLeavesB.obj",
+      "vertices": 59052,
+      "triangles": 19684,
+      "bounds_cm": [
+        [
+          -463.77,
+          477.03
+        ],
+        [
+          -506.76,
+          545.49
+        ],
+        [
+          555.55,
+          1102.63
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestFlowerStems.obj",
+      "vertices": 930,
+      "triangles": 310,
+      "bounds_cm": [
+        [
+          -35.31,
+          25.57
+        ],
+        [
+          -28.46,
+          25.85
+        ],
+        [
+          -0.15,
+          60.17
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestFlowerPetals.obj",
+      "vertices": 1680,
+      "triangles": 560,
+      "bounds_cm": [
+        [
+          -40.52,
+          32.34
+        ],
+        [
+          -33.06,
+          34.67
+        ],
+        [
+          35.3,
+          61.02
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestFlowerHearts.obj",
+      "vertices": 540,
+      "triangles": 180,
+      "bounds_cm": [
+        [
+          -30.26,
+          20.63
+        ],
+        [
+          -21.74,
+          23.41
+        ],
+        [
+          35.6,
+          62.5
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestCottageWalls.obj",
+      "vertices": 42,
+      "triangles": 14,
+      "bounds_cm": [
+        [
+          -250.0,
+          250.0
+        ],
+        [
+          -210.0,
+          210.0
+        ],
+        [
+          0.0,
+          486
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestCottageRoof.obj",
+      "vertices": 6036,
+      "triangles": 2012,
+      "bounds_cm": [
+        [
+          -302,
+          302
+        ],
+        [
+          -282.0,
+          285.0
+        ],
+        [
+          297.01,
+          522.24
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestCottageTimber.obj",
+      "vertices": 2484,
+      "triangles": 828,
+      "bounds_cm": [
+        [
+          -270.74,
+          270.74
+        ],
+        [
+          -259.5,
+          224.5
+        ],
+        [
+          0.0,
+          504.57
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestCottageWindows.obj",
+      "vertices": 108,
+      "triangles": 36,
+      "bounds_cm": [
+        [
+          -191.5,
+          191.5
+        ],
+        [
+          -223.5,
+          -218.5
+        ],
+        [
+          165.5,
+          412.0
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestCottageStone.obj",
+      "vertices": 288,
+      "triangles": 96,
+      "bounds_cm": [
+        [
+          -260.0,
+          260.0
+        ],
+        [
+          -289.5,
+          220.0
+        ],
+        [
+          0.0,
+          568.0
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestMushroomStems.obj",
+      "vertices": 432,
+      "triangles": 144,
+      "bounds_cm": [
+        [
+          -22.92,
+          25.27
+        ],
+        [
+          -4.23,
+          20.21
+        ],
+        [
+          -0.88,
+          38.25
+        ]
+      ]
+    },
+    {
+      "file": "SM_ForestMushroomCaps.obj",
+      "vertices": 288,
+      "triangles": 96,
+      "bounds_cm": [
+        [
+          -34.0,
+          44.0
+        ],
+        [
+          -23.0,
+          36.0
+        ],
+        [
+          18,
+          47
+        ]
+      ]
+    }
+  ]
+}
