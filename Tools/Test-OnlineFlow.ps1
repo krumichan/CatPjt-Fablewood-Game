@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -267,7 +267,11 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
     }else{
         Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
-        Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
+        if($Scenario -ceq 'dungeon'){
+            Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
+        }else{
+            Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 265 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 3 -and $Checkpoint.dungeonCompletions -eq 1) 'growth_progression_totals_mismatch'
+        }
     }
     Require-OnlineFields $Checkpoint.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'checkpoint_wallet_incomplete'
     Assert-Online (@($Checkpoint.wallet.PSObject.Properties).Count -eq 7) 'checkpoint_wallet_shape'
@@ -276,7 +280,14 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
         Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
-        Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
+        if($Scenario -ceq 'dungeon'){
+            Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
+        }else{
+            Assert-Online ($growthExpectations.ContainsKey($Role)) 'growth_expectation_missing'
+            $expected=$growthExpectations[$Role]
+            Assert-Online ($Checkpoint.wallet.gold -eq $expected.gold -and $Checkpoint.wallet.ore -eq $expected.ore -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 7 -and $Checkpoint.stashCount -eq 0) 'growth_reward_and_cost_totals_mismatch'
+            Assert-Online ($Checkpoint.equippedWeaponInstanceId -ceq $expected.weapon -and $Checkpoint.equippedArmorInstanceId -ceq $expected.armor) 'growth_equipped_reward_identity_mismatch'
+        }
     }
     Assert-Online (@($Checkpoint.items).Count -eq $Checkpoint.bagCount+$Checkpoint.stashCount) 'checkpoint_item_counts'
 }
@@ -291,6 +302,28 @@ function Assert-OnlineShots($Report,[string]$Phase,[int]$Minimum){
         $result+=@([pscustomobject]@{path=$path;sha256=Hash-Online $path;actuallyViewed=$false})
     };return $result
 }
+function Assert-OnlineGrowth($Report,[string]$Role){
+    Require-OnlineFields $Report @('growth','checkpoint') 'growth_report_missing'
+    $g=$Report.growth
+    Require-OnlineFields $g @('goldAfterQuest','oreAfterQuest','enhanceGoldCost','enhanceOreCost','enhanceBefore','enhanceAfter','repairGoldCost','repairOreCost','repairBefore','repairAfter','finalGold','finalOre','randomRewards') 'growth_report_incomplete'
+    foreach($name in @('root_quest_reward_claimed','random_reward_rolls_valid','new_reward_equipment','normal_enhance_saved_once','normal_repair_saved_once','growth_final_saved')){
+        Assert-Online (Test-OnlineCheck $Report $name) 'normal_growth_action_missing'
+    }
+    Assert-Online ($g.goldAfterQuest -eq 533 -and $g.oreAfterQuest -eq 29 -and $g.enhanceGoldCost -eq 30 -and $g.enhanceOreCost -eq 2 -and $g.randomRewards -eq 3) 'growth_cost_contract_mismatch'
+    $enhanced=($g.enhanceBefore|ConvertTo-Json -Depth 12|ConvertFrom-Json)
+    Assert-Online ($enhanced.upgrade -eq 0 -and $enhanced.rarity -eq 2 -and $enhanced.slot -eq 0 -and $enhanced.rollVersion -eq 1) 'enhanced_reward_invalid'
+    $enhanced.upgrade=1;Assert-Online (Equal-Online $enhanced $g.enhanceAfter) 'enhance_random_fields_changed'
+    $repaired=($g.repairBefore|ConvertTo-Json -Depth 12|ConvertFrom-Json)
+    $missing=[int]$repaired.maxDurability-[int]$repaired.durability
+    Assert-Online ($missing -gt 0 -and $g.repairGoldCost -eq $missing*([int]$repaired.rarity+1) -and $g.repairOreCost -eq [Math]::Ceiling($missing/25.0)) 'repair_cost_contract_mismatch'
+    $repaired.durability=$repaired.maxDurability;Assert-Online (Equal-Online $repaired $g.repairAfter) 'repair_random_fields_changed'
+    Assert-Online ($g.finalGold -eq 503-$g.repairGoldCost -and $g.finalOre -eq 27-$g.repairOreCost) 'growth_final_currency_mismatch'
+    $cp=$Report.checkpoint
+    Assert-Online ($cp.equippedWeaponInstanceId -ceq $g.enhanceAfter.instanceId) 'enhanced_weapon_not_equipped'
+    $armor=@($cp.items|Where-Object {$_.instanceId -ceq $cp.equippedArmorInstanceId})
+    Assert-Online ($armor.Count -eq 1 -and $armor[0].rarity -eq 2 -and $armor[0].slot -eq 1 -and $armor[0].setId -eq 1) 'boss_armor_not_equipped'
+    $growthExpectations[$Role]=@{gold=[int]$g.finalGold;ore=[int]$g.finalOre;weapon=$cp.equippedWeaponInstanceId;armor=$cp.equippedArmorInstanceId}
+}
 function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$Crash){
     Require-OnlineFields $Report @('movementCm','checkpoint','joinAttempts','hasSession','flowState') 'client_report_incomplete'
     Assert-Online ($Report.movementCm -ge 65) 'normal_movement_missing'
@@ -298,13 +331,14 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
     if($Phase -ceq 'register'){
         Assert-Online (Test-OnlineCheck $Report 'connection_failure_visible') 'offline_failure_missing'
         Assert-Online (Test-OnlineCheck $Report 'normal_potion_saved_once') 'potion_ack_missing'
-        if($Scenario -ceq 'dungeon'){
+        if($Scenario -in @('dungeon','growth')){
             foreach($name in @('both_forest_quests_active','forest_reward_equipped','entered_root_ruins','second_wave','boss_seen','ally_downed','boss_defeated','ally_revived','server_reward_totals')){
                 Assert-Online (Test-OnlineCheck $Report $name) 'dungeon_normal_gameplay_check_missing'
             }
         }
         Assert-Online ($Report.joinAttempts -ge 2) 'fresh_ticket_retry_missing'
     }
+    if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
     Assert-OnlineCheckpoint $Report.checkpoint $Role
     if($Crash){Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true) 'crash_checkpoint_not_ready'}
     else{
@@ -320,7 +354,7 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
-    if($Scenario -ceq 'dungeon' -and $ClientReports.client1.mode -ceq 'register'){
+    if($Scenario -in @('dungeon','growth') -and $ClientReports.client1.mode -ceq 'register'){
         Require-OnlineFields $ServerReport @('serverDungeonObservation') 'server_dungeon_observation_missing'
         Assert-Online (Test-OnlineCheck $ServerReport 'server_observed_dungeon_completion') 'server_dungeon_completion_not_observed'
         $observation=$ServerReport.serverDungeonObservation
@@ -462,7 +496,7 @@ $runFolder=Join-Path $script:FableProjectRoot ('Saved\OnlineValidation\'+$runId)
 $privateFolder=Join-Path $runFolder 'private'
 [void][IO.Directory]::CreateDirectory($privateFolder)
 $ownedProcesses=[Collections.Generic.List[object]]::new();$processHandles=@{}
-$accounts=@{};$readerTokens=@{};$allReaderTokens=[Collections.Generic.List[string]]::new()
+$accounts=@{};$growthExpectations=@{};$readerTokens=@{};$allReaderTokens=[Collections.Generic.List[string]]::new()
 $originalFiles=@();$inputFiles=@();$snapshotsCaptured=$false;$backendBefore=$null;$resumeAccounts=$null
 $serverExecutable='';$clientExecutable='';$stage='preflight'
 $backendExe=Join-Path $backendLink.root 'Fablewood.Backend\bin\Release\net10.0\Fablewood.Backend.exe'

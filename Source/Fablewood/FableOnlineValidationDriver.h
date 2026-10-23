@@ -30,6 +30,9 @@ private:
     void PublishTerminal();
     void ReleaseSkillInput();
     TSharedRef<FJsonObject> Profile(const AFablePlayerState* P) const;
+    int32 GrowthWeaponId=0,GrowthArmorId=0,GrowthGoldBefore=0,GrowthOreBefore=0,GrowthGoldCost=0,GrowthOreCost=0;
+    FFableItem GrowthBeforeItem;
+    TSharedPtr<FJsonObject> GrowthReport;
     FString Scenario=TEXT("connectivity");
     int32 DungeonStep=0,DungeonWeaponId=0;
     double DungeonStepAt=0,DungeonActionAt=-10,DungeonAttackAt=-10,DungeonSkillAt=-10;

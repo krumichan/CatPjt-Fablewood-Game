@@ -58,7 +58,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
             ||!(*Account)->TryGetStringField(TEXT("name"),AccountName)||!(*Account)->TryGetStringField(TEXT("password"),Password))
         {Finish(false,TEXT("Invalid private validation context; values suppressed."));return;}
         J->TryGetStringField(TEXT("scenario"),Scenario);
-        if(Scenario!=TEXT("connectivity")&&Scenario!=TEXT("dungeon")){Finish(false,TEXT("Unknown gameplay validation scenario."));return;}
+        if(Scenario!=TEXT("connectivity")&&Scenario!=TEXT("dungeon")&&Scenario!=TEXT("growth")){Finish(false,TEXT("Unknown gameplay validation scenario."));return;}
         InitialClass=(*Account)->GetIntegerField(TEXT("initialClass"));
         const TSharedPtr<FJsonObject>* E=nullptr;if((*Account)->TryGetObjectField(TEXT("expected"),E))Expected=*E;
         J->TryGetBoolField(TEXT("offlineFailure"),bOfflineFailure);FString Crash;J->TryGetStringField(TEXT("crashRole"),Crash);bCrashRole=Role==Crash;
@@ -121,6 +121,7 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status,cons
         if(ServerDungeonObservation)J->SetObjectField(TEXT("serverDungeonObservation"),ServerDungeonObservation);
     }
     if(Checkpoint)J->SetObjectField(TEXT("checkpoint"),Checkpoint);
+    if(GrowthReport)J->SetObjectField(TEXT("growth"),GrowthReport);
     J->SetBoolField(TEXT("report_snapshot_frozen"),Status==TEXT("passed")||Status==TEXT("failed"));
     if(!MenuProfileHash.IsEmpty()){J->SetStringField(TEXT("menuProfileHash"),MenuProfileHash);J->SetNumberField(TEXT("menuRevision"),double(MenuRevision));}
     if(auto* Flow=GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>())
@@ -309,7 +310,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         PC->UIUseManaPotion();LastAction=Now;break;
     case 100:
         if(!P||!Hero||!PC)return true;
-        if(TickDungeon(PC,P,Hero,Now)){Checkpoint=Profile(P);Capture(TEXT("dungeon-cleared"));Advance(30);}
+        if(TickDungeon(PC,P,Hero,Now)){Checkpoint=Profile(P);Capture(Scenario==TEXT("growth")?TEXT("growth-finished"):TEXT("dungeon-cleared"));Advance(30);}
         break;
     case 30:
         if(bCrashRole)return true;

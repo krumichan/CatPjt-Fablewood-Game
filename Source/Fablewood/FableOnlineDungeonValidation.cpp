@@ -4,6 +4,7 @@
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
+#include "FableInventorySnapshot.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -173,7 +174,132 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC,AFable
         if(P->Gold!=383||P->Ore!=21||P->RootCores!=1||P->Level!=4||P->Experience!=65||P->DungeonCompletions!=0
             ||P->Inventory.Num()!=DungeonInitial->GetIntegerField(TEXT("bagCount"))+2)
         {Finish(false,TEXT("Dungeon rewards do not match three forest kills, six guardians and one boss."));break;}
-        Checks.Add(TEXT("server_reward_totals"),true);return true;
+        Checks.Add(TEXT("server_reward_totals"),true);
+        if(Scenario==TEXT("dungeon"))return true;
+        if(Now-DungeonStepAt>=2)Advance(12);break;
+    case 12:
+        if(GS->ActiveRegion==EFableRegion::Village&&FableRPG::IsInRegion(EFableRegion::Village,Hero->GetActorLocation())){Advance(13);break;}
+        if(PC->IsAnyPanelOpen())PC->UIClosePanels();
+        if(DungeonWalk(PC,FableRPG::RegionReturnPortal(EFableRegion::RootRuins)+FVector(Role==TEXT("client1")?-80:80,0,100),100)
+            &&Hero->GetVelocity().Size2D()<10&&Now-DungeonActionAt>1)
+        {DungeonKey(PC,EKeys::E);DungeonActionAt=Now;}
+        break;
+    case 13:
+        if(P->DungeonQuest==EFableQuestStage::Completed&&P->DungeonCompletions==1)
+        {
+            if(P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+            if(P->Gold!=533||P->Ore!=29||P->Level!=4||P->Experience!=265||P->Inventory.Num()!=7)
+            {Finish(false,TEXT("The RootRuins quest reward was not granted exactly once."));break;}
+            Checks.Add(TEXT("root_quest_reward_claimed"),true);Advance(14);break;
+        }
+        DungeonQuest(PC,EFableQuestId::RootRuins,Now);break;
+    case 14:
+    {
+        if(P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+        int32 NewRolls=0;TSet<FGuid> Identities;
+        for(const auto& Item:P->Inventory)
+        {
+            if(!Item.InstanceId.IsValid()||Identities.Contains(Item.InstanceId))
+            {Finish(false,TEXT("A reward lost its unique item identity."));return false;}
+            Identities.Add(Item.InstanceId);
+            if(Item.Id>4)
+            {
+                if(Item.RollVersion!=1||!FableRPG::IsValidItemRoll(Item)||!FableRPG::IsValidItemDurability(Item))
+                {Finish(false,TEXT("A genuine quest/boss reward has invalid roll or durability data."));return false;}
+                ++NewRolls;
+            }
+            if(Item.Rarity==2&&Item.Slot==EFableEquipmentSlot::Weapon&&Item.HeroClass==P->HeroClass)GrowthWeaponId=Item.Id;
+            if(Item.Rarity==2&&Item.Slot==EFableEquipmentSlot::Armor&&Item.SetId==EFableEquipmentSet::RootGuardian)GrowthArmorId=Item.Id;
+        }
+        if(NewRolls!=3||GrowthWeaponId<=4||GrowthArmorId<=4||GrowthWeaponId==GrowthArmorId)
+        {Finish(false,TEXT("The three genuinely earned random equipment rewards are missing."));break;}
+        Checks.Add(TEXT("random_reward_rolls_valid"),true);
+        if(P->EquippedWeaponId!=GrowthWeaponId)
+        {if(Now-DungeonActionAt>1){PC->UIEquip(GrowthWeaponId);DungeonActionAt=Now;}break;}
+        Advance(15);break;
+    }
+    case 15:
+        if(P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+        if(P->EquippedArmorId!=GrowthArmorId)
+        {if(Now-DungeonActionAt>1){PC->UIEquip(GrowthArmorId);DungeonActionAt=Now;}break;}
+        Checks.Add(TEXT("new_reward_equipment"),true);
+        if(!Checks.FindRef(TEXT("growth_equipment_captured"))){PC->UIToggleInventory();PC->UISelectItem(GrowthWeaponId);Capture(TEXT("growth-equipped"));Checks.Add(TEXT("growth_equipment_captured"),true);DungeonActionAt=Now;break;}
+        if(Now-DungeonActionAt>.6)Advance(16);break;
+    case 16:
+        if(PC->IsAnyPanelOpen())PC->UIClosePanels();
+        if(DungeonWalk(PC,FableRPG::ForgeLocation()+FVector(Role==TEXT("client1")?-80:80,-100,100),90)&&Hero->GetVelocity().Size2D()<10)Advance(17);
+        break;
+    case 17:
+    {
+        if(Checks.FindRef(TEXT("normal_enhance_saved_once"))){if(Now-DungeonActionAt>.6)Advance(18);break;}
+        if(!P->IsBackendReady()||P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+        const auto* Item=P->FindItem(GrowthWeaponId);if(!Item){Finish(false,TEXT("The equipped random weapon disappeared."));break;}
+        if(DungeonActionAt<0)
+        {
+            GrowthBeforeItem=*Item;GrowthGoldBefore=P->Gold;GrowthOreBefore=P->Ore;
+            GrowthGoldCost=P->GetUpgradeGoldCost(Item->Id);GrowthOreCost=P->GetUpgradeOreCost(Item->Id);
+            if(Item->Upgrade!=0||GrowthGoldCost!=30||GrowthOreCost!=2){Finish(false,TEXT("Unexpected first enhancement cost."));break;}
+            GrowthReport=MakeShared<FJsonObject>();GrowthReport->SetNumberField(TEXT("goldAfterQuest"),P->Gold);GrowthReport->SetNumberField(TEXT("oreAfterQuest"),P->Ore);
+            GrowthReport->SetNumberField(TEXT("enhanceGoldCost"),GrowthGoldCost);GrowthReport->SetNumberField(TEXT("enhanceOreCost"),GrowthOreCost);
+            GrowthReport->SetObjectField(TEXT("enhanceBefore"),FableInventorySnapshot::MakeItem(*Item,0,0));
+            PC->UIToggleInventory();PC->UISelectItem(Item->Id);Capture(TEXT("enhance-before"));DungeonActionAt=Now;break;
+        }
+        if(Now-DungeonActionAt<.8)break;
+        if(!Checks.FindRef(TEXT("enhance_request_sent"))){PC->UIEnhance(Item->Id);Checks.Add(TEXT("enhance_request_sent"),true);DungeonActionAt=Now;break;}
+        if(Item->Upgrade==GrowthBeforeItem.Upgrade+1)
+        {
+            auto ExpectedItem=GrowthBeforeItem;++ExpectedItem.Upgrade;
+            if(Item->InstanceId!=GrowthBeforeItem.InstanceId||FableRPG::ItemPersistentSignature(*Item)!=FableRPG::ItemPersistentSignature(ExpectedItem)
+                ||P->Gold!=GrowthGoldBefore-GrowthGoldCost||P->Ore!=GrowthOreBefore-GrowthOreCost)
+            {Finish(false,TEXT("Enhancement altered a roll/identity or charged an incorrect amount."));break;}
+            GrowthReport->SetObjectField(TEXT("enhanceAfter"),FableInventorySnapshot::MakeItem(*Item,0,0));
+            Checks.Add(TEXT("normal_enhance_saved_once"),true);Capture(TEXT("enhance-after"));DungeonActionAt=Now;break;
+        }
+        if(Now-DungeonStepAt>12)Finish(false,TEXT("The normal enhancement was not acknowledged."));
+        break;
+    }
+    case 18:
+    {
+        if(P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+        const auto* Item=P->FindItem(DungeonWeaponId);if(!Item){Finish(false,TEXT("The combat-worn forest weapon disappeared."));break;}
+        const int32 Missing=Item->MaxDurability-Item->Durability;
+        if(Missing<=0||!P->GetRepairBlockReason(Item->Id).IsEmpty())
+        {Finish(false,TEXT("The genuinely combat-worn item cannot be repaired at the forge."));break;}
+        GrowthBeforeItem=*Item;GrowthGoldBefore=P->Gold;GrowthOreBefore=P->Ore;
+        const auto Cost=P->GetRepairCost(Item->Id);GrowthGoldCost=Cost.Gold;GrowthOreCost=Cost.Ore;
+        if(Cost.Gold!=Missing*(Item->Rarity+1)||Cost.Ore!=(Missing+24)/25||Cost.Essence!=0||Cost.RootCores!=0||Cost.MoonCrystals!=0)
+        {Finish(false,TEXT("Repair cost differs from the visible durability contract."));break;}
+        GrowthReport->SetNumberField(TEXT("repairGoldCost"),GrowthGoldCost);GrowthReport->SetNumberField(TEXT("repairOreCost"),GrowthOreCost);
+        GrowthReport->SetObjectField(TEXT("repairBefore"),FableInventorySnapshot::MakeItem(*Item,0,0));
+        Advance(19);PC->UIOpenWorkshop();PC->UISelectWorkshopTab(EFableWorkshopTab::Repair);PC->UISelectWorkshopItem(Item->Id);Capture(TEXT("repair-before"));break;
+    }
+    case 19:
+    {
+        if(Checks.FindRef(TEXT("normal_repair_saved_once"))){if(Now-DungeonActionAt>.6)Advance(20);break;}
+        if(!P->IsBackendReady()||P->IsBackendSavePending()||!P->bLastSaveSucceeded)break;
+        const auto* Item=P->FindItem(DungeonWeaponId);if(!Item){Finish(false,TEXT("The repair target disappeared."));break;}
+        if(Now-DungeonStepAt<.8)break;
+        if(!Checks.FindRef(TEXT("repair_request_sent"))){PC->UIRepair(Item->Id);Checks.Add(TEXT("repair_request_sent"),true);DungeonActionAt=Now;break;}
+        if(Item->Durability==Item->MaxDurability)
+        {
+            auto ExpectedItem=GrowthBeforeItem;ExpectedItem.Durability=ExpectedItem.MaxDurability;
+            if(Item->InstanceId!=GrowthBeforeItem.InstanceId||FableRPG::ItemPersistentSignature(*Item)!=FableRPG::ItemPersistentSignature(ExpectedItem)
+                ||P->Gold!=GrowthGoldBefore-GrowthGoldCost||P->Ore!=GrowthOreBefore-GrowthOreCost)
+            {Finish(false,TEXT("Repair altered a roll/identity or charged an incorrect amount."));break;}
+            GrowthReport->SetObjectField(TEXT("repairAfter"),FableInventorySnapshot::MakeItem(*Item,0,0));
+            Checks.Add(TEXT("normal_repair_saved_once"),true);Capture(TEXT("repair-after"));DungeonActionAt=Now;break;
+        }
+        if(Now-DungeonStepAt>12)Finish(false,TEXT("The normal repair was not acknowledged."));
+        break;
+    }
+    case 20:
+        if(!P->IsBackendReady()||P->IsBackendSavePending()||!P->bLastSaveSucceeded||P->GetBackendRevision()!=P->GetBackendAcknowledgedRevision()||Now-DungeonStepAt<1)break;
+        if(P->Gold!=503-GrowthReport->GetIntegerField(TEXT("repairGoldCost"))||P->Ore!=27-GrowthReport->GetIntegerField(TEXT("repairOreCost"))
+            ||P->Inventory.Num()!=7||P->Level!=4||P->Experience!=265||P->DungeonCompletions!=1||P->DungeonQuest!=EFableQuestStage::Completed
+            ||P->EquippedWeaponId!=GrowthWeaponId||P->EquippedArmorId!=GrowthArmorId)
+        {Finish(false,TEXT("The final growth checkpoint differs from the earned and spent totals."));break;}
+        GrowthReport->SetNumberField(TEXT("finalGold"),P->Gold);GrowthReport->SetNumberField(TEXT("finalOre"),P->Ore);
+        GrowthReport->SetNumberField(TEXT("randomRewards"),3);Checks.Add(TEXT("growth_final_saved"),true);PC->UIToggleInventory();PC->UISelectItem(GrowthWeaponId);return true;
     default:Finish(false,TEXT("Unknown online dungeon step."));break;
     }
     return false;
