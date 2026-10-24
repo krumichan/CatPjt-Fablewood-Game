@@ -24,6 +24,8 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 {
     // 일반 파티 정보와 소유자에게만 전달할 저장·창고 정보를 등록한다.
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFablePlayerState, PartyPlayerKey);
+    DOREPLIFETIME(AFablePlayerState, PartyId);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendPlayerId, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendReady, COND_OwnerOnly);

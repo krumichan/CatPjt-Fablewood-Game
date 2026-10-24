@@ -14,6 +14,13 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
     GENERATED_BODY()
 
 public:
+    /** 백엔드 식별자와 분리된 현재 서버의 공개 파티 식별 정보. */
+    UPROPERTY(Replicated, BlueprintReadOnly)
+    FString PartyPlayerKey;
+
+    UPROPERTY(Replicated, BlueprintReadOnly)
+    FGuid PartyId;
+
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFablePlayerState();
 

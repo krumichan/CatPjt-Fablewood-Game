@@ -1,4 +1,5 @@
 #include "FableGameMode.h"
+#include "FablePartyManager.h"
 #include "FableBackend.h"
 #include "FableDedicatedValidationDriver.h"
 #include "GameFramework/GameSession.h"
@@ -165,6 +166,14 @@ void AFableGameMode::PostLogin(APlayerController* NewPlayer)
 
     Super::PostLogin(NewPlayer);
 
+    if (Profile && !bFrontEnd)
+    {
+        if (AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld()))
+        {
+            Parties->RegisterPlayer(NewPlayer);
+        }
+    }
+
     // 지역·적·전투 진행 처리
     if (Profile && !bLegacyMode && IsDungeonRunning() &&
         !Profile->IsRegionEligible(GetGameState<AFableGameState>()->ActiveRegion))
@@ -176,6 +185,12 @@ void AFableGameMode::PostLogin(APlayerController* NewPlayer)
 /** 접속 종료에 따른 세션과 소유 상태의 정리를 처리한다. */
 void AFableGameMode::Logout(AController* Exiting)
 {
+    // 인증 프로필을 해제하기 전에 파티의 재접속 자리를 예약한다.
+    if (AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld()))
+    {
+        Parties->DisconnectPlayer(Cast<APlayerController>(Exiting));
+    }
+
     // 접속 권한·저장 리비전·멱등 키 처리
     if (!bLegacyMode && Exiting)
     {
@@ -339,6 +354,11 @@ void AFableGameMode::CompleteBackendLogin(APlayerController* Player, bool bSucce
 
     // 서버 시각과 재사용 대기시간 처리
     PendingLoginTimes.Remove(Player);
+    if (AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld()))
+    {
+        Parties->RegisterPlayer(Player);
+    }
+
     RestartPlayer(Player);
     UE_LOG(LogTemp, Display, TEXT("FABLE_BACKEND_LOGIN_READY player=%s slot=%d"), *Profile->GetBackendPlayerId(),
            GetConnectionSlot(Player));
@@ -380,6 +400,19 @@ void AFableGameMode::CheckBackendLogins()
 void AFableGameMode::BeginPlay()
 {
     Super::BeginPlay();
+
+    // 명부는 서버만 생성하고 클라이언트는 복제된 관리자를 사용한다.
+    if (!bFrontEnd && !bLegacyMode && !AFablePartyManager::Find(GetWorld()))
+    {
+        if (AFablePartyManager* Parties = GetWorld()->SpawnActor<AFablePartyManager>())
+        {
+            // 초기 로컬 접속은 월드 BeginPlay보다 먼저 완료될 수도 있다.
+            for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+            {
+                Parties->RegisterPlayer(It->Get());
+            }
+        }
+    }
 
     // 체력·마나·보호막·피해량 처리
     if (bDedicatedMode)
