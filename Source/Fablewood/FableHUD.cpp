@@ -1,4 +1,5 @@
 #include "FableHUD.h"
+#include "FableAdventure.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
@@ -171,19 +172,19 @@ void AFableHUD::DrawPanel(const FString& Title, float X, float Y, float Width, f
 }
 
 /** 현재 안내 목표의 이름과 거리를 표시 문구로 만든다. */
-FString AFableHUD::DestinationText(const AFablePlayerState* State, const AFableGameState* GS) const
+FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableAdventureView& GS) const
 {
     // 현재 월드와 플레이어 참조 조건 검사
-    if (!State || !PlayerOwner || !PlayerOwner->GetPawn())
+    if (!State || !PlayerOwner || !PlayerOwner->GetPawn() || !GS)
     {
         return TEXT("모험가를 준비하고 있습니다");
     }
 
     // 지역·적·전투 진행에 필요한 값 준비
     const FVector Here = PlayerOwner->GetPawn()->GetActorLocation();
-    const EFableRegion Region = FableRPG::IsInRegion(EFableRegion::Moonwell, Here)    ? EFableRegion::Moonwell
-                                : FableRPG::IsInRegion(EFableRegion::RootRuins, Here) ? EFableRegion::RootRuins
-                                                                                      : EFableRegion::Village;
+    const EFableRegion Region = GS.IsInRegion(EFableRegion::Moonwell, Here)    ? EFableRegion::Moonwell
+                                : GS.IsInRegion(EFableRegion::RootRuins, Here) ? EFableRegion::RootRuins
+                                                                               : EFableRegion::Village;
     const AFablePlayerController* PC = Cast<AFablePlayerController>(PlayerOwner);
     FVector PrimaryTarget;
     FString PrimaryLabel;
@@ -226,7 +227,7 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const AFableG
     // 생존 상태와 부활 진행 처리
     if (Region != EFableRegion::Village)
     {
-        Destination = FableRPG::RegionReturnPortal(Region);
+        Destination = GS.ToWorld(Region, FableRPG::RegionReturnPortal(Region));
         Label = TEXT("마을 귀환 포털");
         if (GS && GS->AdventureStage != EFableAdventureStage::Cleared)
         {
@@ -234,7 +235,7 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const AFableG
             if (Region == EFableRegion::Moonwell && GS->AdventureStage == EFableAdventureStage::Dungeon &&
                 GS->ActiveSealIndex >= 0 && GS->ActiveSealIndex < 3)
             {
-                Destination = FableRPG::MoonSealLocation(GS->ActiveSealIndex);
+                Destination = GS.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(GS->ActiveSealIndex));
                 Label = FString::Printf(TEXT("봉인 %d"), GS->ActiveSealIndex + 1);
                 if (GS->RequiredEnemies > 0 && GS->DefeatedEnemies >= GS->RequiredEnemies)
                 {
@@ -273,7 +274,8 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const AFableG
         float Best = TNumericLimits<float>::Max();
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
-            if (!It->IsAlive() || !FableRPG::IsInRegion(Region, It->GetActorLocation()))
+            if (!It->IsAlive() || !FableAdventure::SameScope(PlayerOwner, *It) ||
+                !GS.IsInRegion(Region, It->GetActorLocation()))
             {
                 continue;
             }
@@ -318,7 +320,11 @@ void AFableHUD::DrawWorldLabels(float S)
     }
 
     // 지역·적·전투 진행에 필요한 값 준비
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PlayerOwner);
+    if (!GS)
+    {
+        return;
+    }
     const FVector Locations[] = {FableRPG::BoardLocation(),
                                  FableRPG::ForgeLocation(),
                                  FableRPG::MerchantLocation(),
@@ -349,8 +355,14 @@ void AFableHUD::DrawWorldLabels(float S)
     // 퀘스트와 이야기 진행 순회
     for (int32 Index = 0; Index < UE_ARRAY_COUNT(Locations); ++Index)
     {
+        // 현재 원정의 원점에서 월드 라벨 위치를 계산한다.
+        const EFableRegion LabelRegion = Index < 4    ? EFableRegion::Village
+                                         : Index == 4 ? EFableRegion::RootRuins
+                                                      : EFableRegion::Moonwell;
+        const FVector WorldLocation = GS.ToWorld(LabelRegion, Locations[Index]);
+
         // 위치·방향·거리 계산 처리
-        if (FVector::DistSquared2D(Here, Locations[Index]) > FMath::Square(1500.0f))
+        if (FVector::DistSquared2D(Here, WorldLocation) > FMath::Square(1500.0f))
         {
             continue;
         }
@@ -358,7 +370,7 @@ void AFableHUD::DrawWorldLabels(float S)
         FVector2D Screen;
 
         // 현재 월드와 플레이어 참조 처리
-        if (!PlayerOwner->ProjectWorldLocationToScreen(Locations[Index] + FVector(0, 0, 220), Screen))
+        if (!PlayerOwner->ProjectWorldLocationToScreen(WorldLocation + FVector(0, 0, 220), Screen))
         {
             continue;
         }
@@ -416,7 +428,7 @@ void AFableHUD::DrawWorldLabels(float S)
     // 퀘스트와 이야기 진행 순회
     for (int32 Index = 0; Index < 5; ++Index)
     {
-        const FVector Location = FableRPG::StoryObjectLocation(Index);
+        const FVector Location = GS.ToWorld(FableRPG::StoryObjectRegion(Index), FableRPG::StoryObjectLocation(Index));
 
         // 위치·방향·거리 계산 처리
         if (FVector::DistSquared2D(Here, Location) > FMath::Square(1500.f))
@@ -480,20 +492,22 @@ void AFableHUD::DrawStoryTracker(AFablePlayerController* PC, const AFablePlayerS
 }
 
 /** 미니맵 UI를 현재 상태에 맞게 그린다. */
-void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState* State, const AFableGameState* GS,
+void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState* State, const FFableAdventureView& GS,
                             float S)
 {
     // 현재 월드와 플레이어 참조 조건 검사
-    if (!State || !PC->GetPawn() || PC->IsAnyPanelOpen())
+    if (!State || !PC->GetPawn() || PC->IsAnyPanelOpen() || !GS)
     {
         return;
     }
 
     // 지역·적·전투 진행에 필요한 값 준비
-    const FVector Here = PC->GetPawn()->GetActorLocation();
-    const EFableRegion Region = FableRPG::IsInRegion(EFableRegion::Moonwell, Here)    ? EFableRegion::Moonwell
-                                : FableRPG::IsInRegion(EFableRegion::RootRuins, Here) ? EFableRegion::RootRuins
-                                                                                      : EFableRegion::Village;
+    const FVector HereWorld = PC->GetPawn()->GetActorLocation();
+    const EFableRegion Region = GS.IsInRegion(EFableRegion::Moonwell, HereWorld)    ? EFableRegion::Moonwell
+                                : GS.IsInRegion(EFableRegion::RootRuins, HereWorld) ? EFableRegion::RootRuins
+                                                                                    : EFableRegion::Village;
+    // 이동하는 표식만 원본 좌표로 한 번 되돌리고 고정 표식과 함께 그린다.
+    const FVector Here = GS.ToCanonical(Region, HereWorld);
     const FVector Center = Region == EFableRegion::Village ? FVector(0, 500, 0) : FableRPG::RegionCenter(Region);
     const float Extent = Region == EFableRegion::Village ? 3000.f : 3700.f;
     const float X = Canvas->ClipX - 184 * S, Y = 153 * S, Width = 170 * S;
@@ -521,7 +535,12 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     };
     FVector Objective;
     FString ObjectiveLabel;
-    const bool bHasObjective = State->GetStoryTarget(Objective, ObjectiveLabel);
+    EFableRegion ObjectiveRegion = EFableRegion::Village;
+    const bool bHasObjective = State->GetStoryTarget(Objective, ObjectiveLabel, &ObjectiveRegion);
+    if (bHasObjective)
+    {
+        Objective = GS.ToCanonical(Region, GS.ToWorld(ObjectiveRegion, Objective));
+    }
     const FVector2D Self = Point(Here);
     const FVector2D ObjectivePoint = bHasObjective ? Point(Objective) : FVector2D::ZeroVector;
     const auto Marker = [this, S, &Point, &Self, &ObjectivePoint, bHasObjective](const FVector& Location,
@@ -589,16 +608,17 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     const AFablePartyManager* PartyManager = AFablePartyManager::Find(GetWorld());
     if (GS && PartyManager)
     {
-        for (APlayerState* Member : GS->PlayerArray)
+        for (APlayerState* Member : GS.Players())
         {
             const AFablePlayerState* MemberProfile = Cast<AFablePlayerState>(Member);
-            if (MemberProfile && MemberProfile != State && PartyManager->ArePartyMembers(State, MemberProfile))
+            if (MemberProfile && MemberProfile != State && PartyManager->ArePartyMembers(State, MemberProfile) &&
+                FableAdventure::SameScope(PC, MemberProfile))
             {
                 if (const AFableCharacter* Ally = Cast<AFableCharacter>(Member->GetPawn()))
                 {
-                    if (FableRPG::IsInRegion(Region, Ally->GetActorLocation()))
+                    if (GS.IsInRegion(Region, Ally->GetActorLocation()))
                     {
-                        Marker(Ally->GetActorLocation(), TEXT(""),
+                        Marker(GS.ToCanonical(Region, Ally->GetActorLocation()), TEXT(""),
                                Ally->IsAlive() ? FLinearColor(.43f, .74f, 1) : Warning);
                     }
                 }
@@ -618,12 +638,21 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
 }
 
 /** 파티 상태 UI를 현재 상태에 맞게 그린다. */
-void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameState* GS, float S)
+void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const FFableAdventureView& GS, float S)
 {
     // 화면 표시와 사용자 안내에 필요한 값 준비
     const float Width = 268 * S, X = (Canvas->ClipX - Width) * .5f, Y = 14 * S;
     DrawRect(Ink, X, Y, Width, 133 * S);
     DrawButton(TEXT("G 파티"), TEXT("PartyOpen"), X + 180 * S, Y + 7 * S, 76 * S, 27 * S, S);
+
+    // 소유 UUID가 먼저 복제되면 다른 진행으로 대체하지 않고 명시적으로 기다린다.
+    if (!GS)
+    {
+        DrawFitted(TEXT("원정 정보를 불러오는 중"), Cream, X + 12 * S, Y + 7 * S, 156 * S, .60f * S);
+        DrawWrapped(TEXT("현재 파티의 원정 상태가 도착하면 동료 정보를 표시합니다."), Muted, X + 12 * S, Y + 43 * S,
+                    244 * S, .59f * S, 3);
+        return;
+    }
 
     // 같은 서버의 접속자와 실제 파티 구성원을 구분한다.
     const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
@@ -633,10 +662,11 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     // 현재 월드와 플레이어 참조 처리
     if (GS)
     {
-        for (APlayerState* Member : GS->PlayerArray)
+        for (APlayerState* Member : GS.Players())
         {
             const AFablePlayerState* Candidate = Cast<AFablePlayerState>(Member);
-            if (Candidate && MyState && Manager && Manager->ArePartyMembers(MyState, Candidate) && Candidate != MyState)
+            if (Candidate && MyState && Manager && Manager->ArePartyMembers(MyState, Candidate) &&
+                Candidate != MyState && FableAdventure::SameScope(PC, Candidate))
             {
                 PartnerState = Candidate;
                 break;
@@ -691,9 +721,9 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
                             : FMath::Clamp(Partner->GetHealth() / FMath::Max(1.f, Partner->GetMaxHealth()), 0.f, 1.f);
     DrawRect(Partner->IsAlive() ? Mint : Warning, X + 12 * S, Y + 61 * S, 244 * S * Fraction, 6 * S);
     const FVector Position = Partner->GetActorLocation();
-    const EFableRegion Region = FableRPG::IsInRegion(EFableRegion::Moonwell, Position)    ? EFableRegion::Moonwell
-                                : FableRPG::IsInRegion(EFableRegion::RootRuins, Position) ? EFableRegion::RootRuins
-                                                                                          : EFableRegion::Village;
+    const EFableRegion Region = GS.IsInRegion(EFableRegion::Moonwell, Position)    ? EFableRegion::Moonwell
+                                : GS.IsInRegion(EFableRegion::RootRuins, Position) ? EFableRegion::RootRuins
+                                                                                   : EFableRegion::Village;
     FString Location = FableRPG::RegionName(Region);
 
     // 위치·방향·거리 계산 처리
@@ -776,9 +806,12 @@ void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGame
     const FFablePartyInvite* Invite = Manager->GetPendingInviteFor(Mine->GetPlayerId());
     const bool bLeader = Party && Party->LeaderKey == MyKey;
     const bool bProfileReady = !Mine->IsBackendEnabled() || Mine->IsBackendReady();
-    const bool bForestBattle = GS->AdventureStage == EFableAdventureStage::Forest && !GS->bObjectiveComplete;
-    const bool bPartyEditable =
-        GS->ActiveRegion == EFableRegion::Village && !GS->bPartyRecoveryPending && !bForestBattle && bProfileReady;
+    const FFableAdventureView Adventure = FableAdventure::For(PC);
+    const bool bForestBattle =
+        Adventure && Adventure->AdventureStage == EFableAdventureStage::Forest && !Adventure->bObjectiveComplete;
+    const bool bPartyEditable = Adventure && Adventure->ActiveRegion == EFableRegion::Village &&
+                                !Adventure->bPartyRecoveryPending && !Mine->ActiveExpeditionId.IsValid() &&
+                                !bForestBattle && bProfileReady;
     const bool bCanInvite = bPartyEditable && bLeader && Party->Members.Num() < AFablePartyManager::MaxMembers;
 
     // 접속자 목록을 안정된 플레이어 ID 순서로 표시한다.
@@ -1056,7 +1089,7 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
 }
 
 /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
-void AFableHUD::DrawRecoveryStatus(AFablePlayerController* PC, const AFableGameState* GS, float S)
+void AFableHUD::DrawRecoveryStatus(AFablePlayerController* PC, const FFableAdventureView& GS, float S)
 {
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (PC->IsAnyPanelOpen())
@@ -1079,7 +1112,7 @@ void AFableHUD::DrawRecoveryStatus(AFablePlayerController* PC, const AFableGameS
     // 생존 상태와 부활 진행 처리
     if (GS && GS->bPartyRecoveryPending)
     {
-        Title = FString::Printf(TEXT("파티 전멸 · 마을 구조까지 %.0f초"), GS->GetPartyRecoveryTimeRemaining());
+        Title = FString::Printf(TEXT("파티 전멸 · 마을 구조까지 %.0f초"), GS.RecoveryRemaining());
         Body = FString::Printf(
             TEXT("전멸 %d회 · 성장 / 장비 / 의뢰는 유지됩니다.\n마을에서 재정비한 뒤 R로 재도전하세요."),
             GS->PartyRecoveryCount + 1);
@@ -1177,7 +1210,8 @@ void AFableHUD::DrawHUD()
 
     // 화면 표시와 사용자 안내에 필요한 값 준비
     const AFablePlayerState* State = PC->GetPlayerState<AFablePlayerState>();
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const AFableGameState* RootState = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC);
     const AFableCharacter* Hero = Cast<AFableCharacter>(PC->GetPawn());
     DrawWorldLabels(S);
     DrawPartyStatus(PC, GS, S);
@@ -1210,7 +1244,7 @@ void AFableHUD::DrawHUD()
         DrawFitted(FString::Printf(TEXT("경험치 %d / %d"), State->Experience, State->GetExperienceRequired()), Muted,
                    26 * S, 119 * S, 264 * S, .54f * S);
         DrawRect(Ink, W - 310 * S, 14 * S, 296 * S, 133 * S);
-        FString Stage = GS ? FableRPG::StageName(GS->AdventureStage) : TEXT("숲 마을");
+        FString Stage = GS ? FableRPG::StageName(GS->AdventureStage) : TEXT("원정 정보 확인 중");
 
         // 지역·적·전투 진행 처리
         if (GS && GS->ActiveRegion != EFableRegion::Village)
@@ -1360,7 +1394,7 @@ void AFableHUD::DrawHUD()
     // 직업·스킬·특성 빌드 처리
     if (PC->IsPartyOpen() && State)
     {
-        DrawPartyManagement(PC, GS, S);
+        DrawPartyManagement(PC, RootState, S);
     }
     else if (PC->IsWorkshopOpen() && State)
     {
@@ -2139,7 +2173,7 @@ void AFableHUD::DrawBuildResetConfirmation(AFablePlayerController* PC, const AFa
 }
 
 /** 퀘스트 목록 UI를 현재 상태에 맞게 그린다. */
-void AFableHUD::DrawQuests(AFablePlayerController* PC, const AFablePlayerState* State, const AFableGameState* GS,
+void AFableHUD::DrawQuests(AFablePlayerController* PC, const AFablePlayerState* State, const FFableAdventureView& GS,
                            float S)
 {
     const float X = (Canvas->ClipX - 850 * S) / 2, Y = (Canvas->ClipY - 530 * S) / 2 - 12 * S;
@@ -2367,7 +2401,7 @@ void AFableHUD::DrawDialogue(AFablePlayerController* PC, const AFablePlayerState
     }
 
     // 지역·적·전투 진행에 필요한 값 준비
-    const AFableGameState* Adventure = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView Adventure = FableAdventure::For(PC);
     const bool bForestRetry =
         Adventure && Adventure->bRetryAvailable && Adventure->RetryRegion == EFableRegion::Village;
     DrawFitted(TEXT("↑↓ 의뢰 선택 · E 수락 / 보고 · 현재 ") + State->GetAdvancedClassName(), Mint, X + 24 * S,

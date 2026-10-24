@@ -24,11 +24,33 @@ public:
     /** 컴포넌트 등록이 끝나면 배경 구성을 확인한다. */
     virtual void PostRegisterAllComponents() override;
 
+    /** 최종 원점에서 생성한 사설 배경을 해당 원정 UUID에 연결한다. */
+    void BindExpedition(FGuid InExpeditionId, bool bInPrivateDungeonOnly = true);
+
+    /** 이 배경을 소유하는 원정 UUID를 반환한다. */
+    FGuid GetExpeditionId() const
+    {
+        return ExpeditionId;
+    }
+
+    /** 결정된 원정 배경 설정을 클라이언트에 복제한다. */
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 protected:
     /** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
     virtual void BeginPlay() override;
 
 private:
+    /** 초기 복제 후 로컬 배경도 같은 사설·공용 구성으로 다시 만든다. */
+    UFUNCTION()
+    void OnRep_ExpeditionContext();
+
+    UPROPERTY(ReplicatedUsing = OnRep_ExpeditionContext)
+    FGuid ExpeditionId;
+
+    UPROPERTY(ReplicatedUsing = OnRep_ExpeditionContext)
+    bool bPrivateDungeonOnly = false;
+
     /** 지역의 지형·건축물·식생·조명을 구성한다. */
     void BuildEnvironment();
 

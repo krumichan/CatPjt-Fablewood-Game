@@ -1,4 +1,6 @@
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
+#include "FablePartyEncounter.h"
 #include "FableGameMode.h"
 #include "FableGameInstance.h"
 #include "FableOnlineFlowSubsystem.h"
@@ -215,13 +217,14 @@ namespace
     EFableRegion PawnRegion(const APlayerController* PC)
     {
         const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+        const FFableAdventureView Adventure = FableAdventure::For(PC);
 
         // 지역·적·전투 진행 조건 검사
-        if (Pawn && FableRPG::IsInRegion(EFableRegion::Moonwell, Pawn->GetActorLocation()))
+        if (Pawn && Adventure && Adventure.IsInRegion(EFableRegion::Moonwell, Pawn->GetActorLocation()))
         {
             return EFableRegion::Moonwell;
         }
-        if (Pawn && FableRPG::IsInRegion(EFableRegion::RootRuins, Pawn->GetActorLocation()))
+        if (Pawn && Adventure && Adventure.IsInRegion(EFableRegion::RootRuins, Pawn->GetActorLocation()))
         {
             return EFableRegion::RootRuins;
         }
@@ -233,9 +236,10 @@ namespace
     int32 NearbyMoonSeal(const APlayerController* PC)
     {
         const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+        const FFableAdventureView Adventure = FableAdventure::For(PC);
 
         // 지역·적·전투 진행 조건 검사
-        if (!Pawn || PawnRegion(PC) != EFableRegion::Moonwell)
+        if (!Pawn || !Adventure || PawnRegion(PC) != EFableRegion::Moonwell)
         {
             return INDEX_NONE;
         }
@@ -243,7 +247,8 @@ namespace
         // 위치·방향·거리 계산 순회
         for (int32 Index = 0; Index < 3; ++Index)
         {
-            const FVector Delta = Pawn->GetActorLocation() - FableRPG::MoonSealLocation(Index);
+            const FVector Delta =
+                Pawn->GetActorLocation() - Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(Index));
             if (Delta.SizeSquared2D() <= FMath::Square(330.f) && FMath::Abs(Delta.Z) < 300.f)
             {
                 return Index;
@@ -257,25 +262,27 @@ namespace
     EFableService NearestService(const APlayerController* PC)
     {
         const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+        const FFableAdventureView Adventure = FableAdventure::For(PC);
 
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-        if (!Pawn)
+        if (!Pawn || !Adventure)
         {
             return EFableService::None;
         }
 
         // 지역·적·전투 진행에 필요한 값 준비
-        const FVector Locations[] = {FableRPG::BoardLocation(),
-                                     FableRPG::ForgeLocation(),
-                                     FableRPG::MerchantLocation(),
-                                     FableRPG::PortalLocation(),
-                                     FableRPG::RegionEntrance(EFableRegion::RootRuins),
-                                     FableRPG::RegionReturnPortal(EFableRegion::RootRuins),
-                                     FableRPG::RegionEntrance(EFableRegion::Moonwell),
-                                     FableRPG::RegionReturnPortal(EFableRegion::Moonwell),
-                                     FableRPG::MoonSealLocation(0),
-                                     FableRPG::MoonSealLocation(1),
-                                     FableRPG::MoonSealLocation(2)};
+        const FVector Locations[] = {
+            FableRPG::BoardLocation(),
+            FableRPG::ForgeLocation(),
+            FableRPG::MerchantLocation(),
+            FableRPG::PortalLocation(),
+            Adventure.ToWorld(EFableRegion::RootRuins, FableRPG::RegionEntrance(EFableRegion::RootRuins)),
+            Adventure.ToWorld(EFableRegion::RootRuins, FableRPG::RegionReturnPortal(EFableRegion::RootRuins)),
+            Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::RegionEntrance(EFableRegion::Moonwell)),
+            Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::RegionReturnPortal(EFableRegion::Moonwell)),
+            Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(0)),
+            Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(1)),
+            Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(2))};
         const EFableService Services[] = {
             EFableService::Board,        EFableService::Forge,        EFableService::Merchant,
             EFableService::Portal,       EFableService::ReturnPortal, EFableService::ReturnPortal,
@@ -300,7 +307,8 @@ namespace
         // 퀘스트와 이야기 진행 순회
         for (int32 Index = 0; Index < 5; ++Index)
         {
-            const FVector Delta = Pawn->GetActorLocation() - FableRPG::StoryObjectLocation(Index);
+            const FVector Delta = Pawn->GetActorLocation() - Adventure.ToWorld(FableRPG::StoryObjectRegion(Index),
+                                                                               FableRPG::StoryObjectLocation(Index));
             const float DistanceSquared = Delta.SizeSquared2D();
             if (DistanceSquared <= FMath::Square(330.f) && DistanceSquared < NearestSquared &&
                 FMath::Abs(Delta.Z) < 300.f)
@@ -341,8 +349,7 @@ namespace
     /** 새 원정 준비가 가능한 마을의 공유 전투 상태를 확인한다. */
     bool IsExpeditionPreparationSafe(const AFablePlayerController* PC)
     {
-        const AFableGameState* Adventure =
-            PC && PC->GetWorld() ? PC->GetWorld()->GetGameState<AFableGameState>() : nullptr;
+        const FFableAdventureView Adventure = FableAdventure::For(PC);
         const AFablePlayerState* Profile = PC ? PC->GetPlayerState<AFablePlayerState>() : nullptr;
         return Adventure && Profile && !Profile->ActiveExpeditionId.IsValid() &&
                Adventure->ActiveRegion == EFableRegion::Village && !Adventure->bPartyRecoveryPending &&
@@ -711,7 +718,7 @@ void AFablePlayerController::PlayerTick(float DeltaTime)
         const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
         const FFablePartyRecord* Party = FindControllerParty(this);
         if (Profile && Profile->ActiveExpeditionId.IsValid() && Profile->ActiveExpeditionId != PartyExpeditionAtOpen &&
-            Hero && Party && FableRPG::IsInRegion(Party->SelectedRegion, Hero->GetActorLocation()))
+            Hero && Party && FableAdventure::For(this).IsInRegion(Party->SelectedRegion, Hero->GetActorLocation()))
         {
             UIClosePanels();
         }
@@ -998,10 +1005,10 @@ FString AFablePlayerController::GetWorkshopBlockReason() const
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 프로필과 저장 스냅숏 조건 검사
-    if (!State || !State->bProfileLoaded)
+    if (!State || !State->bProfileLoaded || !Adventure)
     {
         return TEXT("모험 정보를 불러오는 중입니다.");
     }
@@ -1581,11 +1588,17 @@ void AFablePlayerController::ServerResumePartyExpedition_Implementation(FGuid Re
         Mode->IsExpeditionParticipant(Profile) && PawnRegion(this) == EFableRegion::Village &&
         NearestService(this) == EFableService::Portal)
     {
-        const FFableExpeditionTicket Ticket = Mode->GetActiveExpedition();
+        const AFablePartyEncounter* Encounter = Mode->GetExpeditionFor(Profile);
+        if (!Encounter)
+        {
+            ReplyPartyPreparation(RequestId, false, NoticeBefore);
+            return;
+        }
+        const FFableExpeditionTicket Ticket = Encounter->GetTicket();
         Mode->RequestEnterRegion(this, Ticket.Region, Ticket.Difficulty);
         const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
         bSuccess = Mode->IsExpeditionParticipant(Profile) && Hero && Hero->IsAlive() &&
-                   FableRPG::IsInRegion(Ticket.Region, Hero->GetActorLocation());
+                   FableAdventure::For(Profile).IsInRegion(Ticket.Region, Hero->GetActorLocation());
     }
     else if (Profile)
     {
@@ -2284,9 +2297,10 @@ bool AFablePlayerController::IsNearTownService() const
 int32 AFablePlayerController::GetNearbyStoryObjectIndex() const
 {
     const APawn* HeroPawn = GetPawn();
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!HeroPawn)
+    if (!HeroPawn || !Adventure)
     {
         return INDEX_NONE;
     }
@@ -2297,7 +2311,8 @@ int32 AFablePlayerController::GetNearbyStoryObjectIndex() const
     // 퀘스트와 이야기 진행 순회
     for (int32 Index = 0; Index < 5; ++Index)
     {
-        const FVector Delta = HeroPawn->GetActorLocation() - FableRPG::StoryObjectLocation(Index);
+        const FVector Delta = HeroPawn->GetActorLocation() - Adventure.ToWorld(FableRPG::StoryObjectRegion(Index),
+                                                                               FableRPG::StoryObjectLocation(Index));
         const float Distance = Delta.SizeSquared2D();
         if (Distance <= Best && FMath::Abs(Delta.Z) < 300.f)
         {
@@ -2316,10 +2331,10 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
     OutLabel.Empty();
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 화면 표시와 사용자 안내 조건 검사
-    if (!Hero || !State)
+    if (!Hero || !State || !Adventure)
     {
         return false;
     }
@@ -2338,15 +2353,18 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
     const EFableRegion Region = PawnRegion(this);
     float Nearest = TNumericLimits<float>::Max();
     const AFableCharacter* DownedAlly = nullptr;
+    const AFablePartyManager* PartyManager = AFablePartyManager::Find(GetWorld());
 
     // 생존 상태와 부활 진행 처리
     if (Adventure)
     {
-        for (APlayerState* Member : Adventure->PlayerArray)
+        for (APlayerState* Member : Adventure.Players())
         {
             if (const AFableCharacter* Ally = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr)
             {
-                if (Ally != Hero && Ally->IsDowned() && FableRPG::IsInRegion(Region, Ally->GetActorLocation()))
+                if (Ally != Hero && Ally->IsDowned() && FableAdventure::SameScope(this, Ally) &&
+                    Adventure.IsInRegion(Region, Ally->GetActorLocation()) && PartyManager &&
+                    PartyManager->ArePartyMembers(State, Cast<AFablePlayerState>(Member)))
                 {
                     const float Distance = FVector::DistSquared2D(Hero->GetActorLocation(), Ally->GetActorLocation());
                     if (Distance < Nearest)
@@ -2384,7 +2402,8 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         // 지역·적·전투 진행 순회
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
-            if (It->IsAlive() && FableRPG::IsInRegion(Region, It->GetActorLocation()))
+            if (It->IsAlive() && FableAdventure::SameScope(this, *It) &&
+                Adventure.IsInRegion(Region, It->GetActorLocation()))
             {
                 const float Distance = FVector::DistSquared2D(Hero->GetActorLocation(), It->GetActorLocation());
                 if (Distance < Nearest)
@@ -2405,15 +2424,19 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         if (Region == EFableRegion::Moonwell && Adventure->ActiveSealIndex >= 0 && Adventure->ActiveSealIndex < 3 &&
             Adventure->AdventureStage == EFableAdventureStage::Dungeon)
         {
-            OutLocation = FableRPG::MoonSealLocation(Adventure->ActiveSealIndex);
+            OutLocation =
+                Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(Adventure->ActiveSealIndex));
             OutLabel = FString::Printf(TEXT("봉인 %d · E 정화"), Adventure->ActiveSealIndex + 1);
             return true;
         }
     }
 
     // 화면 표시와 사용자 안내 조건 검사
-    if (State->GetStoryTarget(OutLocation, OutLabel))
+    EFableRegion TargetRegion = EFableRegion::Village;
+    if (State->GetStoryTarget(OutLocation, OutLabel, &TargetRegion))
     {
+        // 안내 함수의 공개 계약은 실제 월드 좌표로 통일한다.
+        OutLocation = Adventure.ToWorld(TargetRegion, OutLocation);
         return true;
     }
 
@@ -2462,8 +2485,13 @@ FString AFablePlayerController::GetContextActionText() const
     }
 
     // 현재 월드와 플레이어 참조에 필요한 값 준비
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
+
+    if (!Adventure)
+    {
+        return TEXT("원정 정보를 불러오는 중입니다.");
+    }
 
     // 생존 상태와 부활 진행 조건 검사
     if (Adventure && Adventure->bPartyRecoveryPending)
@@ -2724,7 +2752,7 @@ AFableCharacter* AFablePlayerController::GetNearbyReviveTarget() const
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!Hero || !Hero->IsAlive() || !Adventure || Adventure->bPartyRecoveryPending)
@@ -2736,10 +2764,13 @@ AFableCharacter* AFablePlayerController::GetNearbyReviveTarget() const
     float Best = FMath::Square(230.f);
 
     // 생존 상태와 부활 진행 순회
-    for (APlayerState* Member : Adventure->PlayerArray)
+    for (APlayerState* Member : Adventure.Players())
     {
         AFableCharacter* Candidate = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
-        if (!Candidate || Candidate == Hero || !Candidate->IsDowned() ||
+        const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+        if (!Candidate || Candidate == Hero || !Candidate->IsDowned() || !FableAdventure::SameScope(this, Candidate) ||
+            !Manager ||
+            !Manager->ArePartyMembers(GetPlayerState<AFablePlayerState>(), Cast<AFablePlayerState>(Member)) ||
             (Candidate->GetReviver() && Candidate->GetReviver() != Hero))
         {
             continue;
@@ -2765,7 +2796,11 @@ void AFablePlayerController::UIRetryEncounter()
     }
 
     // 던전 재도전도 선택한 원정의 전원 준비 절차를 거치도록 안내한다.
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
+    if (!Adventure)
+    {
+        return;
+    }
     if (Adventure && Adventure->RetryRegion != EFableRegion::Village)
     {
         UIOpenPartyExpedition();
@@ -2788,7 +2823,7 @@ void AFablePlayerController::UIRetryEncounter()
 bool AFablePlayerController::CanRetryEncounter() const
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
 
@@ -2810,13 +2845,13 @@ bool AFablePlayerController::CanRetryEncounter() const
     {
         return false;
     }
-    if (Adventure->PlayerArray.IsEmpty())
+    if (Adventure.Players().IsEmpty())
     {
         return false;
     }
 
     // 지역·적·전투 진행 순회
-    for (APlayerState* Member : Adventure->PlayerArray)
+    for (APlayerState* Member : Adventure.Players())
     {
         const AFablePlayerState* Profile = Cast<AFablePlayerState>(Member);
         const AFableCharacter* MemberHero = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
@@ -2833,7 +2868,7 @@ bool AFablePlayerController::CanRetryEncounter() const
 /** 재도전 동작의 안내 문구 값을 반환한다. */
 FString AFablePlayerController::GetRetryActionText() const
 {
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 서버 시각과 재사용 대기시간 조건 검사
     if (!Adventure)
@@ -2842,7 +2877,7 @@ FString AFablePlayerController::GetRetryActionText() const
     }
     if (Adventure->bPartyRecoveryPending)
     {
-        return FString::Printf(TEXT("파티 구조 중 · 마을 복귀까지 %.0f초"), Adventure->GetPartyRecoveryTimeRemaining());
+        return FString::Printf(TEXT("파티 구조 중 · 마을 복귀까지 %.0f초"), Adventure.RecoveryRemaining());
     }
     if (!Adventure->bRetryAvailable)
     {
@@ -2862,7 +2897,7 @@ FString AFablePlayerController::GetRetryActionText() const
     }
 
     // 지역·적·전투 진행 순회
-    for (APlayerState* Member : Adventure->PlayerArray)
+    for (APlayerState* Member : Adventure.Players())
     {
         const AFablePlayerState* Profile = Cast<AFablePlayerState>(Member);
         const AFableCharacter* MemberHero = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
@@ -3223,10 +3258,14 @@ void AFablePlayerController::ServerStartRevive_Implementation(AFableCharacter* T
 
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
-    const AFableGameState* Adventure = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!Mode || Mode->IsFrontEnd() || (Adventure && Adventure->bPartyRecoveryPending))
+    const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    const AFablePlayerState* TargetProfile = Target ? Target->GetPlayerState<AFablePlayerState>() : nullptr;
+    if (!Mode || Mode->IsFrontEnd() || !Adventure || Adventure->bPartyRecoveryPending || !Target ||
+        !FableAdventure::SameScope(this, Target) || !Manager ||
+        !Manager->ArePartyMembers(GetPlayerState<AFablePlayerState>(), TargetProfile))
     {
         return;
     }
@@ -3531,7 +3570,12 @@ void AFablePlayerController::ServerAdvanceClass_Implementation()
 /** 선택한 전직 시험을 다시 시작하도록 요청한다. */
 void AFablePlayerController::RestartTrial()
 {
-    const AFableGameState* Adventure = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView Adventure = FableAdventure::For(this);
+
+    if (!Adventure)
+    {
+        return;
+    }
 
     // 원정 탭 안의 R 입력도 새 준비·입장 경로에서만 처리한다.
     if (IsPartyExpeditionOpen())

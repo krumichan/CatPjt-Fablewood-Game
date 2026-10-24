@@ -5,6 +5,7 @@
 class AFablePlayerController;
 class AFablePlayerState;
 class AFableGameState;
+struct FFableAdventureView;
 class UFont;
 
 /** 모험 안내·전투 상태·퀘스트·장비 UI를 그리는 HUD. */
@@ -42,7 +43,7 @@ private:
     void DrawWorkshop(AFablePlayerController* PC, const AFablePlayerState* State, float Scale);
 
     /** 퀘스트 목록 UI를 현재 상태에 맞게 그린다. */
-    void DrawQuests(AFablePlayerController* PC, const AFablePlayerState* State, const AFableGameState* GameState,
+    void DrawQuests(AFablePlayerController* PC, const AFablePlayerState* State, const FFableAdventureView& Adventure,
                     float Scale);
 
     /** 현재 열려 있는 대화 종류 UI를 현재 상태에 맞게 그린다. */
@@ -75,11 +76,11 @@ private:
     void DrawStoryTracker(AFablePlayerController* PC, const AFablePlayerState* State, float Scale);
 
     /** 미니맵 UI를 현재 상태에 맞게 그린다. */
-    void DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState* State, const AFableGameState* GameState,
+    void DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState* State, const FFableAdventureView& Adventure,
                      float Scale);
 
     /** 파티 상태 UI를 현재 상태에 맞게 그린다. */
-    void DrawPartyStatus(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
+    void DrawPartyStatus(AFablePlayerController* PC, const FFableAdventureView& Adventure, float Scale);
 
     /** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
     void DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
@@ -88,7 +89,7 @@ private:
     void DrawPartyExpedition(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
 
     /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
-    void DrawRecoveryStatus(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
+    void DrawRecoveryStatus(AFablePlayerController* PC, const FFableAdventureView& Adventure, float Scale);
 
     /** 창 UI를 현재 상태에 맞게 그린다. */
     void DrawPanel(const FString& Title, float X, float Y, float Width, float Height, float Scale);
@@ -105,5 +106,5 @@ private:
                       int32 MaxLines = 3);
 
     /** 현재 안내 목표의 이름과 거리를 표시 문구로 만든다. */
-    FString DestinationText(const AFablePlayerState* State, const AFableGameState* GameState) const;
+    FString DestinationText(const AFablePlayerState* State, const FFableAdventureView& Adventure) const;
 };

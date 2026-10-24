@@ -27,11 +27,26 @@ public:
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
     virtual void Tick(float DeltaSeconds) override;
 
+    /** 최종 원점에서 생성한 달샘 배경을 해당 원정 UUID에 연결한다. */
+    void BindExpedition(FGuid InExpeditionId);
+
+    /** 이 배경을 소유하는 원정 UUID를 반환한다. */
+    FGuid GetExpeditionId() const
+    {
+        return ExpeditionId;
+    }
+
+    /** 원정 식별자를 클라이언트의 봉인 연출에 복제한다. */
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 protected:
     /** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
     virtual void BeginPlay() override;
 
 private:
+    UPROPERTY(Replicated)
+    FGuid ExpeditionId;
+
     /** 지역의 지형·건축물·식생·조명을 구성한다. */
     void BuildEnvironment();
 

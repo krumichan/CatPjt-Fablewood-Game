@@ -1,5 +1,6 @@
 #include "FableMoonwellWorld.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
 #include "FableRPGTypes.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -12,6 +13,7 @@
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 #include "UObject/UObjectGlobals.h"
+#include "Net/UnrealNetwork.h"
 
 namespace
 {
@@ -68,6 +70,23 @@ AFableMoonwellWorld::AFableMoonwellWorld()
     Moonlight->Settings.SceneColorTint = FLinearColor(0.66f, 0.78f, 1.0f);
     Moonlight->Settings.bOverride_AutoExposureBias = true;
     Moonlight->Settings.AutoExposureBias = -0.45f;
+}
+
+/** 최종 원점에서 생성한 달샘 배경을 해당 원정 UUID에 연결한다. */
+void AFableMoonwellWorld::BindExpedition(FGuid InExpeditionId)
+{
+    if (HasAuthority())
+    {
+        ExpeditionId = InExpeditionId;
+        ForceNetUpdate();
+    }
+}
+
+/** 원정 식별자를 클라이언트의 봉인 연출에 복제한다. */
+void AFableMoonwellWorld::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFableMoonwellWorld, ExpeditionId);
 }
 
 /** 액터 구성 시 배경과 표시 요소를 준비한다. */
@@ -443,7 +462,7 @@ void AFableMoonwellWorld::Tick(float DeltaSeconds)
 {
     // 현재 월드와 플레이어 참조 처리
     Super::Tick(DeltaSeconds);
-    const AFableGameState* State = GetWorld() ? GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const FFableAdventureView State = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!State)

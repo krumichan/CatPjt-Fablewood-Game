@@ -509,7 +509,7 @@ public:
     /** 주변 이야기 오브젝트의 위치 번호 값을 반환한다. */
     int32 GetNearbyStoryObjectIndex() const;
 
-    /** 현재 목표의 안내 위치 값을 반환한다. */
+    /** 현재 소유 원정의 목표를 실제 월드 좌표로 반환한다. */
     bool GetNavigationTarget(FVector& OutLocation, FString& OutLabel) const;
 
     /** 아직 확인하지 않은 임시 안내를 표시할지 판단한다. */
