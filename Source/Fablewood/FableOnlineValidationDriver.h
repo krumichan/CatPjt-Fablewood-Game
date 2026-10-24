@@ -83,6 +83,21 @@ private:
     TArray<FKey> DungeonReleaseKeys;
     TSharedPtr<FJsonObject> DungeonInitial, ServerDungeonObservation;
 
+    /** 파티 UI 입력과 서버 복제 결과를 단계별로 관찰한다. */
+    bool TickParty(AFablePlayerController* PC, AFablePlayerState* Profile, double Now);
+
+    /** 서버가 관찰한 구성·연결 종료·동일 캐릭터 복귀를 보존한다. */
+    void ObservePartyServer(UWorld* World);
+
+    /** 공개 파티 명부를 검증용 JSON으로 직렬화한다. */
+    TSharedRef<FJsonObject> PartyServerSnapshot(UWorld* World) const;
+
+    int32 PartyStep = 0, PartyNoticeBefore = 0;
+    double PartyActionAt = -1, PartyLastSentAt = -10;
+    FGuid PartyAcceptedInvite;
+    FString PartyFinalId, PartySelfKey, PartyPeerKey;
+    TSharedPtr<FJsonObject> PartyReport, ServerPartyBefore, ServerPartySolo, ServerPartyRejoined;
+
     /** 협동 던전의 입장·웨이브·부활·보스 검증을 순서대로 진행한다. */
     bool TickDungeon(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
 

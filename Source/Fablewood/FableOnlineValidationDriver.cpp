@@ -109,7 +109,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
-            Scenario != TEXT("reconnect"))
+            Scenario != TEXT("reconnect") && Scenario != TEXT("party"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -256,6 +256,22 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     J->SetStringField(TEXT("reason"), Reason);
     J->SetNumberField(TEXT("step"), Step);
     J->SetStringField(TEXT("scenario"), Scenario);
+    if (PartyReport)
+    {
+        J->SetObjectField(TEXT("partyStage1"), PartyReport);
+    }
+    if (ServerPartyBefore)
+    {
+        J->SetObjectField(TEXT("serverPartyBefore"), ServerPartyBefore);
+    }
+    if (ServerPartySolo)
+    {
+        J->SetObjectField(TEXT("serverPartySolo"), ServerPartySolo);
+    }
+    if (ServerPartyRejoined)
+    {
+        J->SetObjectField(TEXT("serverPartyRejoined"), ServerPartyRejoined);
+    }
     J->SetNumberField(TEXT("dungeonStep"), DungeonStep);
     J->SetNumberField(TEXT("processId"), FPlatformProcess::GetCurrentProcessId());
     J->SetNumberField(TEXT("movementCm"), Movement);
@@ -558,6 +574,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (Scenario == TEXT("party"))
+        {
+            ObservePartyServer(World);
+        }
+
         // 현재 월드와 플레이어 참조 처리
         if (Scenario == TEXT("reconnect"))
         {
@@ -865,7 +886,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         Checks.Add(TEXT("normal_movement"), true);
         if (Mode == TEXT("login"))
         {
-            if (Scenario == TEXT("reconnect") && bResumeExpedition)
+            if ((Scenario == TEXT("reconnect") || Scenario == TEXT("party")) && bResumeExpedition)
             {
                 Advance(100);
             }
@@ -910,10 +931,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         {
             return true;
         }
-        if (TickDungeon(PC, P, Hero, Now))
+        if (Scenario == TEXT("party") ? TickParty(PC, P, Now) : TickDungeon(PC, P, Hero, Now))
         {
             Checkpoint = Profile(P);
-            Capture(Scenario == TEXT("growth")      ? TEXT("growth-finished")
+            Capture(Scenario == TEXT("party")    ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
+                    : Scenario == TEXT("growth") ? TEXT("growth-finished")
                     : Scenario == TEXT("reconnect") ? TEXT("reconnected-dungeon")
                                                     : TEXT("dungeon-cleared"));
             Advance(30);

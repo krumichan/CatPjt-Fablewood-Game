@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth','reconnect')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect','party')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -263,7 +263,7 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
     Assert-Online ($Checkpoint.ready -eq $true -and $Checkpoint.savePending -eq $false -and $Checkpoint.revision -ge 1 -and $Checkpoint.revision -eq $Checkpoint.acknowledgedRevision) 'checkpoint_not_acknowledged'
     Assert-Online ([string]$Checkpoint.playerId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and [string]$Checkpoint.profileHash -cmatch '^[a-f0-9]{64}$') 'checkpoint_identity_format'
     Assert-Online ($Checkpoint.heroClass -eq $accounts[$Role].initialClass -and $Checkpoint.classTier -eq 1) 'unexpected_character_class'
-    if($Scenario -ceq 'connectivity'){
+    if($Scenario -in @('connectivity','party')){
         Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
     }else{
         Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
@@ -279,7 +279,7 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
     }
     Require-OnlineFields $Checkpoint.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'checkpoint_wallet_incomplete'
     Assert-Online (@($Checkpoint.wallet.PSObject.Properties).Count -eq 7) 'checkpoint_wallet_shape'
-    if($Scenario -ceq 'connectivity'){
+    if($Scenario -in @('connectivity','party')){
         Assert-Online ($Checkpoint.wallet.healthPotions -eq 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'normal_potion_durable_quantity_mismatch'
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
@@ -302,10 +302,25 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
 function Assert-OnlineShots($Report,[string]$Phase,[int]$Minimum){
     $shots=@($Report.screenshots);Assert-Online (@($shots|Select-Object -Unique).Count -ge $Minimum) 'screenshots_missing'
     $prefix=[IO.Path]::GetFullPath((Join-Path $runFolder $Phase)).TrimEnd('\')+'\';$result=@()
+    $deadline=[DateTime]::UtcNow.AddSeconds(15)
     foreach($shot in $shots){
         $path=[IO.Path]::GetFullPath([string]$shot)
-        Assert-Online ($path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetExtension($path) -ieq '.png' -and (Test-Path -LiteralPath $path -PathType Leaf)) 'screenshot_path_invalid'
-        $stream=[IO.File]::OpenRead($path);try{$header=[byte[]]::new(24);$length=$stream.Read($header,0,24)}finally{$stream.Dispose()}
+        Assert-Online ($path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetExtension($path) -ieq '.png') 'screenshot_path_invalid'
+        # 파일이 생기는 시점과 비동기 PNG 저장이 끝나는 시점 사이의 짧은 차이를 기다린다.
+        $stream=$null
+        do{
+            if(Test-Path -LiteralPath $path -PathType Leaf){
+                $candidate=$null
+                try{
+                    $candidate=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+                    if($candidate.Length -ge 24){$stream=$candidate;$candidate=$null;break}
+                }catch [IO.IOException]{}catch [UnauthorizedAccessException]{}finally{if($candidate){$candidate.Dispose()}}
+            }
+            if([DateTime]::UtcNow -ge $deadline){break}
+            Start-Sleep -Milliseconds 100
+        }while($true)
+        Assert-Online ($null -ne $stream) 'screenshot_save_timeout'
+        try{$header=[byte[]]::new(24);$length=$stream.Read($header,0,24)}finally{$stream.Dispose()}
         Assert-Online ($length -eq 24 -and ($header[0..7] -join ',') -ceq '137,80,78,71,13,10,26,10') 'screenshot_not_png'
         $result+=@([pscustomobject]@{path=$path;sha256=Hash-Online $path;actuallyViewed=$false})
     };return $result
@@ -343,6 +358,48 @@ function Assert-OnlineMidrun($Report,[string]$Role,[bool]$Interrupted){
         Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true -and $Report.movementCm -ge 65) 'interrupted_checkpoint_invalid'
     }else{Assert-Online (Test-OnlineCheck $Report 'midrun_same_encounter_rejoined') 'midrun_rejoin_not_observed'}
 }
+function Assert-OnlineParty($Report,[string]$Role,[bool]$Resume=$false){
+    Require-OnlineFields $Report @('partyStage1') 'party_stage_report_missing'
+    $party=$Report.partyStage1
+    Require-OnlineFields $party @('selfKey','peerKey','finalPartyId','snapshot') 'party_stage_report_incomplete'
+    Assert-Online ([string]$party.finalPartyId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$') 'party_final_id_invalid'
+    Assert-Online (-not [string]::IsNullOrWhiteSpace([string]$party.selfKey) -and -not [string]::IsNullOrWhiteSpace([string]$party.peerKey) -and $party.selfKey -cne $party.peerKey) 'party_public_member_keys_invalid'
+    if($Resume){
+        Assert-Online ($party.restored -eq $true -and (Test-OnlineCheck $Report 'party_same_character_restored') -and
+            (Test-OnlineCheck $Report 'party_restore_handshake_complete')) 'party_same_character_not_restored'
+        return
+    }
+    Assert-Online ($party.completed -eq $true) 'party_steps_not_complete'
+    $required=if($Role -ceq 'client1'){
+        @('party_created','party_invite_declined','party_invite_accepted','party_invalid_requests_rejected','party_leader_transferred','party_left','party_rejoined_after_leave','party_dissolved','party_final_roster_ready','party_disconnected_leader_reserved','party_disconnect_leader_failover','party_same_character_restored','party_restore_handshake_complete')
+    }else{
+        @('party_invite_declined','party_invite_accepted','party_member_transfer_rejected','party_duplicate_create_rejected','party_invite_replay_rejected','party_leader_transferred','party_member_departure_observed','party_rejoined_after_leave','party_dissolved','party_final_roster_ready')
+    }
+    foreach($name in $required){Assert-Online (Test-OnlineCheck $Report $name) 'party_ui_action_or_server_rejection_missing'}
+}
+function Resume-OnlinePartyClient($Server,$ClientOne,$Interrupted){
+    $deadline=[DateTime]::UtcNow.AddSeconds(100);$ready=$false;$latest=$null
+    do{
+        Assert-Online ($null -ne (Get-OnlineOwnedProcess $Server) -and $null -ne (Get-OnlineOwnedProcess $ClientOne)) 'party_survivors_exited_during_disconnect'
+        $latest=Read-OnlineReport $Server -AllowMissing
+        $survivor=Read-OnlineReport $ClientOne -AllowMissing
+        $me=Api-Online GET '/v1/me' $null $readerTokens.client2
+        if($latest -and @($latest.profiles).Count -eq 1 -and $me.leaseActive -eq $false -and
+            (Test-OnlineCheck $latest 'server_party_disconnected_member_reserved') -and
+            (Test-OnlineCheck $survivor 'party_disconnected_leader_reserved') -and
+            (Test-OnlineCheck $survivor 'party_disconnect_leader_failover')){$ready=$true;break}
+        Start-Sleep -Milliseconds 350
+    }while([DateTime]::UtcNow -lt $deadline)
+    Assert-Online $ready 'party_disconnect_or_lease_release_timeout'
+    Require-OnlineFields $latest @('serverPartyBefore','serverPartySolo') 'party_server_before_or_solo_missing'
+    $canonical=Read-OnlineCanonical 'client2';$comparison=Assert-OnlineCanonical $canonical $Interrupted 'client2' $true
+    Write-OnlineJson (Join-Path (Join-Path $runFolder 'register') 'client2-party-disconnect-canonical.json') $canonical
+    $entry=$accounts.client2;$context=Join-Path $privateFolder 'register-resume-context.private.json'
+    Write-OnlineJson $context @{mode='login';scenario='party';offlineFailure=$false;resumeExpedition=$true;accounts=@{client2=@{name=$entry.name;password=$entry.password;initialClass=$entry.initialClass;expected=@{playerId=$canonical.me.playerId;profileHash=$canonical.me.profileHash;partyId=$Interrupted.partyStage1.finalPartyId}}}}
+    $resumed=Start-OnlineValidationProcess 'client2' 'register-resume' $context
+    $summary['interruption']=[ordered]@{status='reconnecting';originalCheckpoint=$Interrupted.checkpoint;originalParty=$Interrupted.partyStage1;canonicalAfterDisconnect=$comparison;serverSurvived=$true;clientOneSurvived=$true;serverControllersAfterDisconnect=1;clientTwoLeaseReleased=$true;resumeProcessId=$resumed.pid;resumeReportDirectory='register-resume'}
+    return $resumed
+}
 function Resume-OnlineInterruptedClient($Server,$ClientOne,$Interrupted){
     $deadline=[DateTime]::UtcNow.AddSeconds(180);$ready=$false;$latest=$null
     do{
@@ -379,6 +436,7 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
     }
     if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
     if($Scenario -ceq 'reconnect' -and $Phase -in @('register','resume')){Assert-OnlineMidrun $Report $Role $false}
+    if($Scenario -ceq 'party' -and $Phase -in @('register','resume')){Assert-OnlineParty $Report $Role ($Phase -ceq 'resume')}
     Assert-OnlineCheckpoint $Report.checkpoint $Role
     if($Crash){Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true) 'crash_checkpoint_not_ready'}
     else{
@@ -394,6 +452,22 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'party' -and $ClientReports.client1.mode -ceq 'register'){
+        Require-OnlineFields $ServerReport @('serverPartyBefore','serverPartySolo','serverPartyRejoined') 'party_server_snapshots_missing'
+        foreach($name in @('server_party_before_disconnect','server_party_disconnected_member_reserved','server_party_same_character_restored')){Assert-Online (Test-OnlineCheck $ServerReport $name) 'party_server_lifecycle_not_observed'}
+        $before=$ServerReport.serverPartyBefore;$solo=$ServerReport.serverPartySolo;$after=$ServerReport.serverPartyRejoined
+        $partyId=$summary.interruption.originalParty.finalPartyId
+        $memberKeys=@(@($ClientReports.client1.partyStage1.selfKey,$ClientReports.client2.partyStage1.selfKey)|Sort-Object -CaseSensitive)
+        foreach($view in @($before,$solo,$after)){
+            Assert-Online (@($view.parties).Count -eq 1) 'party_server_unexpected_roster_count'
+            $row=$view.parties[0]
+            Assert-Online ($row.partyId -ceq $partyId -and @($row.members).Count -eq 2 -and (Equal-Online @($row.members|ForEach-Object playerKey|Sort-Object -CaseSensitive) $memberKeys)) 'party_same_roster_or_id_not_preserved'
+        }
+        Assert-Online ($before.controllers -eq 2 -and $solo.controllers -eq 1 -and $after.controllers -eq 2 -and @($before.parties[0].members|Where-Object connected).Count -eq 2 -and @($solo.parties[0].members|Where-Object connected).Count -eq 1 -and @($after.parties[0].members|Where-Object connected).Count -eq 2) 'party_server_connected_counts_mismatch'
+        Assert-Online ($before.parties[0].leaderKey -ceq $ClientReports.client2.partyStage1.selfKey -and $solo.parties[0].leaderKey -ceq $ClientReports.client1.partyStage1.selfKey -and $after.parties[0].leaderKey -ceq $ClientReports.client1.partyStage1.selfKey) 'party_disconnect_leader_transfer_not_preserved'
+        $summary.interruption.status='passed';$summary.interruption['partyMembershipRestored']=$true;$summary.interruption['samePartyId']=$partyId
+        $summary['partyStage1']=[ordered]@{status='passed';uiCreateDeclineAcceptLeaveTransferAndDisband=$true;invalidMemberTransferDuplicateCreateAndInviteReplayRejected=$true;serverRosterBeforeDisconnectAfterReconnect=$true;partyId=$partyId;memberKeys=$memberKeys}
+    }
     if($Scenario -in @('dungeon','growth') -and $ClientReports.client1.mode -ceq 'register'){
         Require-OnlineFields $ServerReport @('serverDungeonObservation') 'server_dungeon_observation_missing'
         Assert-Online (Test-OnlineCheck $ServerReport 'server_observed_dungeon_completion') 'server_dungeon_completion_not_observed'
@@ -427,7 +501,7 @@ function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
         foreach($role in @('client1','client2')){
             if($results.ContainsKey($role)){continue}
             $record=$Clients[$role];$report=Read-OnlineReport $record -AllowMissing
-            $crash=$CrashSecond -and $role -ceq 'client2' -and -not($Scenario -ceq 'reconnect' -and $reconnectResumed)
+            $crash=$CrashSecond -and $role -ceq 'client2' -and -not($Scenario -in @('reconnect','party') -and $reconnectResumed)
             if($report -and (($crash -and $report.status -ceq 'crash-ready') -or (-not $crash -and $report.status -ceq 'passed'))){
                 if($Scenario -ceq 'reconnect' -and $crash){Assert-OnlineMidrun $report $role $true}
                 else{
@@ -440,8 +514,8 @@ function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
                     $null=Assert-OnlineShots $report $record.phase 5
                     Write-OnlineJson (Join-Path (Join-Path $runFolder $Phase) 'client2-crash-checkpoint.json') $report
                     Stop-OnlineOwned $record $true
-                    if($Scenario -ceq 'reconnect'){
-                        $Clients.client2=Resume-OnlineInterruptedClient $Server $Clients.client1 $report
+                    if($Scenario -in @('reconnect','party')){
+                        $Clients.client2=if($Scenario -ceq 'party'){Resume-OnlinePartyClient $Server $Clients.client1 $report}else{Resume-OnlineInterruptedClient $Server $Clients.client1 $report}
                         $reconnectResumed=$true;$crashObservedAt=$null;continue
                     }
                 }
