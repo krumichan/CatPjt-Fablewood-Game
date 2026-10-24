@@ -9,6 +9,8 @@
 #include "FablePartyManager.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
+#include "CollisionQueryParams.h"
+#include "CollisionShape.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/World.h"
@@ -662,11 +664,41 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
         return false;
     }
 
-    // 같은 원정 안에서는 마지막 대기 지점만 분리해 두 캐릭터가 서로의 길을 막지 않게 한다.
+    // 고정 지점으로 돌아가지 않고 실제 적·벽·동료를 피하는 일반 입력으로 추적을 끊는다.
     const auto Escape = [&]()
     {
-        if (!Hero->IsAlive())
+        auto EscapeState = ResultsObject(ResultsReport, TEXT("escape"));
+        if (!EscapeState)
         {
+            EscapeState = MakeShared<FJsonObject>();
+            ResultsReport->SetObjectField(TEXT("escape"), EscapeState);
+        }
+        // 다른 단계에서 보낸 시간은 이번 이동의 안정 관측 시간에 포함하지 않는다.
+        double EscapeStep = -1;
+        EscapeState->TryGetNumberField(TEXT("step"), EscapeStep);
+        if (EscapeStep != ResultsStep)
+        {
+            EscapeState->SetNumberField(TEXT("step"), ResultsStep);
+            EscapeState->SetNumberField(TEXT("activeWaypoint"), INDEX_NONE);
+            EscapeState->SetBoolField(TEXT("activeGoalValid"), false);
+            EscapeState->SetNumberField(TEXT("stableAt"), 0);
+            EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+        }
+        const auto Stop = [&]()
+        {
+            DungeonHold(PC, EKeys::W, false);
+            DungeonHold(PC, EKeys::S, false);
+            DungeonHold(PC, EKeys::D, false);
+            DungeonHold(PC, EKeys::J, false);
+        };
+        EscapeState->SetNumberField(TEXT("nearestEnemyDistanceCm"), Nearest);
+        EscapeState->SetNumberField(TEXT("stopDistanceCm"), 2000);
+        if (!Hero->IsAlive() || !View || View.ExpeditionId() != ResultsRetryId || Living.IsEmpty() ||
+            !View.IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()))
+        {
+            Stop();
+            EscapeState->SetNumberField(TEXT("stableAt"), 0);
+            EscapeState->SetStringField(TEXT("mode"), TEXT("inactive"));
             return false;
         }
         PC->UIClosePanels();
@@ -676,14 +708,159 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
             PC->UIUseHealthPotion();
             ResultsLastSentAt = Now;
         }
-        if (ReconnectWaypoint < 3)
+
+        // 적의 두 차례 이상 대상 재검색을 넘겨 실제 정지와 충분한 거리가 유지되는지 확인한다.
+        if (Nearest >= 2000)
         {
-            ReconnectWalkSafe(PC, true);
+            Stop();
+            EscapeState->SetStringField(TEXT("mode"), TEXT("holding"));
+            EscapeState->SetNumberField(TEXT("activeWaypoint"), INDEX_NONE);
+            EscapeState->SetBoolField(TEXT("activeGoalValid"), false);
+            double StableAt = 0;
+            EscapeState->TryGetNumberField(TEXT("stableAt"), StableAt);
+            if (Hero->GetVelocity().Size2D() >= 10)
+            {
+                EscapeState->SetNumberField(TEXT("stableAt"), 0);
+                EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+                return false;
+            }
+            if (StableAt <= 0)
+            {
+                StableAt = Now;
+                EscapeState->SetNumberField(TEXT("stableAt"), StableAt);
+            }
+            EscapeState->SetNumberField(TEXT("stableSeconds"), Now - StableAt);
+            return Now - StableAt >= .9;
+        }
+        EscapeState->SetNumberField(TEXT("stableAt"), 0);
+        EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+
+        // 벽 안쪽의 모서리와 현재 좌표를 바깥 변에 투영한 점으로 우회 방향을 찾는다.
+        const FVector Start = Hero->GetActorLocation();
+        const FVector CanonicalStart = View.ToCanonical(EFableRegion::RootRuins, Start);
+        const double Left = A ? 6400.0 : 6350.0, Right = A ? 9600.0 : 9650.0;
+        const double Bottom = A ? -1550.0 : -1650.0, Top = A ? 1550.0 : 1650.0;
+        const double ProjectedX = FMath::Clamp(CanonicalStart.X, Left, Right);
+        const double ProjectedY = FMath::Clamp(CanonicalStart.Y, Bottom, Top);
+        const FVector Candidates[] = {FVector(Right, Bottom, 100),      FVector(Right, Top, 100),
+                                      FVector(Left, Top, 100),          FVector(Left, Bottom, 100),
+                                      FVector(ProjectedX, Bottom, 100), FVector(Right, ProjectedY, 100),
+                                      FVector(ProjectedX, Top, 100),    FVector(Left, ProjectedY, 100)};
+        const auto SegmentDistance = [&](FVector Point, FVector Goal)
+        {
+            Point.Z = Start.Z;
+            Goal.Z = Start.Z;
+            const FVector Delta = Goal - Start;
+            const float Alpha = FMath::Clamp(
+                float(FVector::DotProduct(Point - Start, Delta) / FMath::Max(Delta.SizeSquared2D(), 1.0)), 0.f, 1.f);
+            return float(FVector::Dist2D(Point, Start + Delta * Alpha));
+        };
+        bool GoalRetained = false;
+        float BestClearance = -1, BestEndClearance = -1;
+        int32 BestIndex = INDEX_NONE;
+        FVector BestGoal = Start;
+        const auto Consider = [&](const FVector& CanonicalGoal, int32 CandidateIndex, bool bRetained)
+        {
+            FVector Goal = View.ToWorld(EFableRegion::RootRuins, CanonicalGoal);
+            Goal.Z = Start.Z;
+            if (FVector::Dist2D(Start, Goal) < 120 || !View.IsInRegion(EFableRegion::RootRuins, Goal))
+            {
+                return false;
+            }
+
+            // 귀환 기둥과 벽을 가로지르는 직선은 현재 월드의 정적 충돌로 제외한다.
+            FHitResult Hit;
+            FCollisionQueryParams Params(SCENE_QUERY_STAT(FableResultsEscape), false, Hero);
+            if (Hero->GetWorld()->SweepSingleByObjectType(Hit, Start, Goal, FQuat::Identity,
+                                                          FCollisionObjectQueryParams(ECC_WorldStatic),
+                                                          FCollisionShape::MakeSphere(55.f), Params))
+            {
+                return false;
+            }
+            bool PeerClear = true;
+            for (APlayerState* Member : View.Players())
+            {
+                const auto* Other = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
+                if (Other && Other != Hero)
+                {
+                    const float PresentDistance = FVector::Dist2D(Start, Other->GetActorLocation());
+                    PeerClear &= SegmentDistance(Other->GetActorLocation(), Goal) >=
+                                 FMath::Min(130.f, FMath::Max(0.f, PresentDistance - 5.f));
+                }
+            }
+            if (!PeerClear)
+            {
+                return false;
+            }
+            float Clearance = MAX_flt, EndClearance = MAX_flt;
+            for (const auto* Enemy : Living)
+            {
+                Clearance = FMath::Min(Clearance, SegmentDistance(Enemy->GetActorLocation(), Goal));
+                EndClearance = FMath::Min(EndClearance, float(FVector::Dist2D(Enemy->GetActorLocation(), Goal)));
+            }
+            if (bRetained || Clearance > BestClearance + 1 ||
+                (FMath::Abs(Clearance - BestClearance) <= 1 && EndClearance > BestEndClearance))
+            {
+                BestIndex = CandidateIndex;
+                BestGoal = Goal;
+                BestClearance = Clearance;
+                BestEndClearance = EndClearance;
+                GoalRetained = bRetained;
+            }
+            return true;
+        };
+
+        // 움직이는 투영점의 인덱스 대신 선택한 좌표 자체를 유지해 매 틱 반전을 막는다.
+        bool ActiveGoalValid = false;
+        double ActiveGoalX = 0, ActiveGoalY = 0, ActiveWaypointValue = INDEX_NONE;
+        EscapeState->TryGetBoolField(TEXT("activeGoalValid"), ActiveGoalValid);
+        EscapeState->TryGetNumberField(TEXT("activeWaypoint"), ActiveWaypointValue);
+        const int32 ActiveWaypoint = int32(ActiveWaypointValue);
+        if (ActiveGoalValid && ActiveWaypoint >= 0 && ActiveWaypoint < int32(UE_ARRAY_COUNT(Candidates)) &&
+            EscapeState->TryGetNumberField(TEXT("activeGoalX"), ActiveGoalX) &&
+            EscapeState->TryGetNumberField(TEXT("activeGoalY"), ActiveGoalY))
+        {
+            Consider(FVector(ActiveGoalX, ActiveGoalY, 100), ActiveWaypoint, true);
+        }
+        if (!GoalRetained)
+        {
+            for (int32 Index = 0; Index < int32(UE_ARRAY_COUNT(Candidates)); ++Index)
+            {
+                Consider(Candidates[Index], Index, false);
+            }
+        }
+        if (BestIndex == INDEX_NONE)
+        {
+            Stop();
+            EscapeState->SetStringField(TEXT("mode"), TEXT("blocked"));
+            Finish(false, TEXT("No collision-safe ordinary-input escape waypoint is currently available."));
             return false;
         }
-        const FVector Canonical = A ? FVector(6300, -1580, 100) : FVector(6480, -1700, 100);
-        return DungeonWalk(PC, View.ToWorld(EFableRegion::RootRuins, Canonical), 65) &&
-               Hero->GetVelocity().Size2D() < 10;
+
+        // 목표를 새로 정할 때만 최소 선분 거리를 비교하고 이후에는 같은 이동 방향을 유지한다.
+        EscapeState->SetNumberField(TEXT("activeWaypoint"), BestIndex);
+        EscapeState->SetBoolField(TEXT("activeGoalValid"), true);
+        const FVector GoalCanonical = View.ToCanonical(EFableRegion::RootRuins, BestGoal);
+        EscapeState->SetNumberField(TEXT("activeGoalX"), GoalCanonical.X);
+        EscapeState->SetNumberField(TEXT("activeGoalY"), GoalCanonical.Y);
+        EscapeState->SetBoolField(TEXT("goalRetained"), GoalRetained);
+        ReconnectWaypoint = BestIndex;
+        EscapeState->SetStringField(TEXT("mode"), TEXT("moving"));
+        EscapeState->SetNumberField(TEXT("waypoint"), BestIndex);
+        EscapeState->SetNumberField(TEXT("segmentClearanceCm"), BestClearance);
+        EscapeState->SetNumberField(TEXT("goalClearanceCm"), BestEndClearance);
+        EscapeState->SetArrayField(TEXT("goalCanonical"),
+                                   ResultsVector(View.ToCanonical(EFableRegion::RootRuins, BestGoal)));
+        DungeonWalk(PC, BestGoal, 70);
+        const FVector Delta = BestGoal - Start, Velocity = Hero->GetVelocity();
+        if (Delta.Size2D() > 300 && Velocity.Size2D() > 100 && Hero->GetDodgeCooldownRemaining() <= 0 &&
+            Now - DungeonActionAt > 1.5 &&
+            FVector::DotProduct(Delta.GetSafeNormal2D(), Velocity.GetSafeNormal2D()) > .95)
+        {
+            DungeonKey(PC, EKeys::LeftShift);
+            DungeonActionAt = Now;
+        }
+        return false;
     };
     const auto ReceiptStable = [&](const FFablePersonalExpeditionResult* Displayed)
     {
@@ -1034,6 +1211,11 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
         }
         break;
     case 12:
+        // 동료가 복귀하는 동안에도 새 추적이 시작되면 일반 입력으로 다시 거리를 확보한다.
+        if (!Escape() || !Safe)
+        {
+            break;
+        }
         if (ResultsCheck(ServerDocument, TEXT("server_results_same_retry_uuid_rejoined")) &&
             ResultsCheck(PeerDocument, TEXT("results_same_character_new_uuid_restored")))
         {
@@ -1094,6 +1276,11 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
         }
         break;
     case 23:
+        // 본인의 복원 증명 뒤에도 서버·동료의 관찰 완료까지 안전을 계속 확인한다.
+        if (!Escape() || !Safe)
+        {
+            break;
+        }
         if (ResultsCheck(ServerDocument, TEXT("server_results_same_retry_uuid_rejoined")) &&
             ResultsCheck(PeerDocument, TEXT("results_peer_server_restoration_observed")))
         {
