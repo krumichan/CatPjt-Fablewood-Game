@@ -1,5 +1,6 @@
 #include "FableEnemyBolt.h"
 #include "FableCharacter.h"
+#include "FableAdventure.h"
 #include "FableEnemy.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -62,6 +63,15 @@ void AFableEnemyBolt::InitializeBolt(FVector Direction, float Damage, EFableRegi
         return;
     }
 
+    // 신뢰한 발사 적의 원정을 발사 순간 고정한다.
+    const auto SourceAdventure = FableAdventure::For(GetOwner());
+    if (!SourceAdventure)
+    {
+        return;
+    }
+
+    ExpeditionId = SourceAdventure.ExpeditionId();
+
     // 이동 입력과 속도 제한 처리
     Direction.Z = 0;
     Velocity = Direction.GetSafeNormal() * 680.0f;
@@ -76,6 +86,7 @@ void AFableEnemyBolt::InitializeBolt(FVector Direction, float Damage, EFableRegi
 void AFableEnemyBolt::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFableEnemyBolt, ExpeditionId);
     DOREPLIFETIME(AFableEnemyBolt, EncounterRegion);
     DOREPLIFETIME(AFableEnemyBolt, bImpacted);
 }
@@ -98,6 +109,14 @@ void AFableEnemyBolt::Tick(float DeltaSeconds)
         return;
     }
 
+    // 종료된 원정과 출처가 달라진 발사체는 다른 진행에 도달하기 전에 제거한다.
+    const auto Adventure = FableAdventure::For(this);
+    if (!Adventure || !IsValid(GetOwner()) || !FableAdventure::CanAffect(this, GetOwner()))
+    {
+        Destroy();
+        return;
+    }
+
     // 이동 입력과 속도 제한에 필요한 값 준비
     const FVector Start = GetActorLocation();
     const FVector Delta =
@@ -114,7 +133,8 @@ void AFableEnemyBolt::Tick(float DeltaSeconds)
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
-        if (!It->IsAlive() || !FableRPG::IsInRegion(EncounterRegion, It->GetActorLocation()))
+        if (!It->IsAlive() || !FableAdventure::CanAffect(this, *It) ||
+            !Adventure.IsInRegion(EncounterRegion, It->GetActorLocation()))
         {
             Params.AddIgnoredActor(*It);
         }
@@ -134,8 +154,8 @@ void AFableEnemyBolt::Tick(float DeltaSeconds)
     for (const FHitResult& Hit : PawnHits)
     {
         AFableCharacter* Hero = Cast<AFableCharacter>(Hit.GetActor());
-        if (Hero && Hero->IsAlive() && FableRPG::IsInRegion(EncounterRegion, Hero->GetActorLocation()) &&
-            (!bHit || Hit.Time < Closest.Time))
+        if (Hero && Hero->IsAlive() && FableAdventure::CanAffect(this, Hero) &&
+            Adventure.IsInRegion(EncounterRegion, Hero->GetActorLocation()) && (!bHit || Hit.Time < Closest.Time))
         {
             Closest = Hit;
             Target = Hero;
@@ -148,9 +168,10 @@ void AFableEnemyBolt::Tick(float DeltaSeconds)
     {
         SetActorLocation(Closest.Location);
         bImpacted = true;
-        if (Target && Target->IsAlive() && FableRPG::IsInRegion(EncounterRegion, Target->GetActorLocation()))
+        if (Target && Target->IsAlive() && FableAdventure::CanAffect(this, Target) &&
+            Adventure.IsInRegion(EncounterRegion, Target->GetActorLocation()))
         {
-            Target->ReceiveHit(DamageAmount);
+            Target->ReceiveHit(DamageAmount, this);
         }
         OnRep_Impact();
         ForceNetUpdate();
@@ -163,7 +184,7 @@ void AFableEnemyBolt::Tick(float DeltaSeconds)
     RemainingRange -= Delta.Size();
 
     // 지역·적·전투 진행 처리
-    if (RemainingRange <= 0 || !FableRPG::IsInRegion(EncounterRegion, End))
+    if (RemainingRange <= 0 || !Adventure.IsInRegion(EncounterRegion, End))
     {
         Destroy();
     }

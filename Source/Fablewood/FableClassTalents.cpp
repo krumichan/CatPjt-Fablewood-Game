@@ -1,6 +1,7 @@
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 
@@ -63,7 +64,8 @@ FString AFablePlayerState::ClassBuildBlockReason() const
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const APlayerController* OwnerPC = Cast<APlayerController>(GetOwner());
     const AFableCharacter* Hero = OwnerPC ? Cast<AFableCharacter>(OwnerPC->GetPawn()) : nullptr;
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    // 로완은 공유 마을에 있지만 전투·구조 잠금은 자신의 원정 진행으로 검사한다.
+    const auto GS = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!Hero || !Hero->IsAlive())

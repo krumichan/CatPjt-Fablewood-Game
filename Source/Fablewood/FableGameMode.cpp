@@ -21,7 +21,10 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
-/** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
+#include "FableAdventure.h"
+#include "FablePartyEncounter.h"
+
+/** AFableGameMode는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 AFableGameMode::AFableGameMode()
 {
     DefaultPawnClass = AFableCharacter::StaticClass();
@@ -34,7 +37,7 @@ AFableGameMode::AFableGameMode()
                   FParse::Param(FCommandLine::Get(), TEXT("FableArtReview"));
 }
 
-/** 월드 초기화 옵션에서 시작 화면·온라인 모드와 접속 설정을 준비한다. */
+/** InitGame는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
     // 서버 권한과 실행 위치 처리
@@ -52,7 +55,7 @@ void AFableGameMode::InitGame(const FString& MapName, const FString& Options, FS
     }
 }
 
-/** 접속을 허용하기 전에 기본 연결 조건을 검사한다. */
+/** PreLogin는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId,
                               FString& ErrorMessage)
 {
@@ -81,7 +84,7 @@ void AFableGameMode::PreLogin(const FString& Options, const FString& Address, co
     }
 }
 
-/** 로그인 요청을 처리하고 필요한 플레이어 연결 상태를 준비한다. */
+/** Login는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 APlayerController* AFableGameMode::Login(UPlayer* NewPlayer, ENetRole InRemoteRole, const FString& Portal,
                                          const FString& Options, const FUniqueNetIdRepl& UniqueId,
                                          FString& ErrorMessage)
@@ -132,7 +135,7 @@ APlayerController* AFableGameMode::Login(UPlayer* NewPlayer, ENetRole InRemoteRo
     return Player;
 }
 
-/** 새 연결을 파티와 백엔드 프로필 초기화 절차에 연결한다. */
+/** PostLogin는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::PostLogin(APlayerController* NewPlayer)
 {
     AFablePlayerState* Profile = NewPlayer ? NewPlayer->GetPlayerState<AFablePlayerState>() : nullptr;
@@ -174,16 +177,9 @@ void AFableGameMode::PostLogin(APlayerController* NewPlayer)
 
     // 재접속 공개 키를 먼저 복구해야 RestartPlayer가 같은 참가 증서를 찾는다.
     Super::PostLogin(NewPlayer);
-
-    // 지역·적·전투 진행 처리
-    if (Profile && !bLegacyMode && IsDungeonRunning() &&
-        !Profile->IsRegionEligible(GetGameState<AFableGameState>()->ActiveRegion))
-    {
-        Profile->SetNotice(TEXT("동료가 유적을 탐험하고 있습니다. 마을에서 의뢰를 준비하세요."));
-    }
 }
 
-/** 접속 종료에 따른 세션과 소유 상태의 정리를 처리한다. */
+/** Logout는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::Logout(AController* Exiting)
 {
     // 인증 프로필을 해제하기 전에 파티의 재접속 자리를 예약한다.
@@ -220,63 +216,7 @@ void AFableGameMode::Logout(AController* Exiting)
     // The regular monitor handles a departed participant and an empty server.
 }
 
-/** 플레이어를 현재 진행에 맞는 시작 지점에 생성한다. */
-void AFableGameMode::RestartPlayer(AController* NewPlayer)
-{
-    // 현재 월드와 플레이어 참조 처리
-    if (bDedicatedMode)
-    {
-        const AFablePlayerState* Profile = NewPlayer ? NewPlayer->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (!Profile || !Profile->IsBackendReady())
-        {
-            return;
-        }
-    }
-
-    Super::RestartPlayer(NewPlayer);
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (bLegacyMode || bFrontEnd || !NewPlayer)
-    {
-        return;
-    }
-
-    // 현재 월드와 플레이어 참조에 필요한 값 준비
-    AFableCharacter* Hero = Cast<AFableCharacter>(NewPlayer->GetPawn());
-    AFablePlayerState* Profile = NewPlayer->GetPlayerState<AFablePlayerState>();
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!Hero)
-    {
-        return;
-    }
-
-    // 지역·적·전투 진행에 필요한 값 준비
-    const AFableGameState* State = GetGameState<AFableGameState>();
-    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-    const bool bBoundParticipant = Profile && ActiveExpedition.Contains(Profile->PartyPlayerKey) &&
-                                   Profile->PartyId == ActiveExpedition.PartyId && Parties &&
-                                   Parties->GetConnectedPlayer(Profile->PartyPlayerKey) == NewPlayer;
-    const bool bJoinDungeon = bBoundParticipant && State && !State->bPartyRecoveryPending && !bReturnPending &&
-                              ActiveExpedition.Region == State->ActiveRegion;
-    if (Profile)
-    {
-        // 구조 대기 중 복귀자는 마을에 생성하되 같은 원정의 복구 대상으로 남는다.
-        Profile->ActiveExpeditionId = bBoundParticipant ? ActiveExpedition.ExpeditionId : FGuid();
-        Profile->ForceNetUpdate();
-    }
-
-    // 지역·적·전투 진행 처리
-    const int32 Slot = bBoundParticipant ? ActiveExpedition.MemberKeys.IndexOfByKey(Profile->PartyPlayerKey)
-                                         : GetConnectionSlot(NewPlayer);
-    if (!MovePlayerToCheckpoint(NewPlayer, bJoinDungeon ? State->ActiveRegion : EFableRegion::Village, Slot) && Profile)
-    {
-        Profile->SetNotice(bJoinDungeon ? TEXT("던전 입구가 막혀 있습니다. 마을의 파란 포털에서 E로 다시 시도하세요.")
-                                        : TEXT("마을 도착 지점이 막혀 있습니다. 빈 공간으로 이동하세요."));
-    }
-}
-
-/** 현재 연결이 차지한 파티 슬롯 값을 반환한다. */
+/** GetConnectionSlot는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 int32 AFableGameMode::GetConnectionSlot(AController* Player) const
 {
     // 서버 권한과 실행 위치 조건 검사
@@ -299,7 +239,7 @@ int32 AFableGameMode::GetConnectionSlot(AController* Player) const
     return 0;
 }
 
-/** 백엔드 접속 실패를 연결에 알리고 대기 상태를 해제한다. */
+/** RejectBackendLogin는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::RejectBackendLogin(APlayerController* Player, const FString& Reason)
 {
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
@@ -323,7 +263,7 @@ void AFableGameMode::RejectBackendLogin(APlayerController* Player, const FString
     }
 }
 
-/** 백엔드 인증 결과를 확인해 플레이어의 게임 진입을 완료한다. */
+/** CompleteBackendLogin는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::CompleteBackendLogin(APlayerController* Player, bool bSuccess, const FString& Reason)
 {
     // 서버 권한과 실행 위치 조건 검사
@@ -376,7 +316,7 @@ void AFableGameMode::CompleteBackendLogin(APlayerController* Player, bool bSucce
            GetConnectionSlot(Player));
 }
 
-/** 백엔드 프로필을 기다리는 연결의 완료·만료 상태를 확인한다. */
+/** CheckBackendLogins는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::CheckBackendLogins()
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
@@ -408,7 +348,7 @@ void AFableGameMode::CheckBackendLogins()
     }
 }
 
-/** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
+/** BeginPlay는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::BeginPlay()
 {
     Super::BeginPlay();
@@ -455,9 +395,11 @@ void AFableGameMode::BeginPlay()
         GetWorld()->SpawnActor<AFableMoonwellWorld>(FVector::ZeroVector, FRotator::ZeroRotator, WorldParams);
 
     // 생존 상태와 부활 진행 처리
-    if (AFableGameState* State = GetGameState<AFableGameState>())
+    if (AFableGameState* RootState = GetGameState<AFableGameState>())
     {
-        State->bFrontEnd = bFrontEnd;
+        FFableAdventureProgress* State = &RootState->FieldProgress;
+
+        RootState->bFrontEnd = bFrontEnd;
         State->AdventureStage = EFableAdventureStage::Village;
         State->ActiveRegion = EFableRegion::Village;
         State->ActiveDifficulty = EFableDifficulty::Normal;
@@ -466,7 +408,7 @@ void AFableGameMode::BeginPlay()
         State->ActiveSealIndex = -1;
         State->RequiredEnemies = 0;
         State->DefeatedEnemies = 0;
-        State->ForceNetUpdate();
+        RootState->ForceNetUpdate();
     }
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
@@ -478,7 +420,7 @@ void AFableGameMode::BeginPlay()
     GetWorldTimerManager().SetTimer(PartyMonitor, this, &AFableGameMode::CheckPartyState, 0.5f, true);
 }
 
-/** 월드 이탈 시 등록한 이벤트와 진행 중인 작업을 정리한다. */
+/** EndPlay는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     GetWorldTimerManager().ClearTimer(EncounterTimer);
@@ -487,204 +429,7 @@ void AFableGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-/** 요청자 생존 여부를 확인한다. */
-bool AFableGameMode::IsRequesterAlive(APlayerController* Requester) const
-{
-    // 서버 권한과 실행 위치 조건 검사
-    if (bFrontEnd || !HasAuthority() || !IsValid(Requester) || Requester->GetWorld() != GetWorld())
-    {
-        return false;
-    }
-
-    const AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    const AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
-    if (State && State->bPartyRecoveryPending && (!ActiveExpedition.IsValid() || IsExpeditionParticipant(Profile)))
-    {
-        return false;
-    }
-
-    const AFableCharacter* Hero = Cast<AFableCharacter>(Requester->GetPawn());
-
-    return Hero && Hero->IsAlive();
-}
-
-/** 현재 접속 객체가 불변 참가 증서의 소유 캐릭터인지 확인한다. */
-bool AFableGameMode::IsExpeditionParticipant(const AFablePlayerState* Profile) const
-{
-    return IsValid(Profile) && Profile->GetWorld() == GetWorld() &&
-           Profile->ActiveExpeditionId == ActiveExpedition.ExpeditionId &&
-           Profile->PartyId == ActiveExpedition.PartyId && ActiveExpedition.Contains(Profile->PartyPlayerKey);
-}
-
-/** 다른 파티는 마을에서 구성을 바꿀 수 있도록 원정 소유 파티만 반환한다. */
-bool AFableGameMode::IsPartyExpeditionActive(FGuid PartyId) const
-{
-    return PartyId.IsValid() && ActiveExpedition.IsValid() && ActiveExpedition.PartyId == PartyId;
-}
-
-/** 원정 동안에는 전체 서버 접속자를 참가자로 간주하지 않는다. */
-TArray<APlayerController*> AFableGameMode::GetEncounterPlayers() const
-{
-    TArray<APlayerController*> Players;
-    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-    {
-        APlayerController* Player = It->Get();
-        const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (!IsValid(Player))
-        {
-            continue;
-        }
-        if (ActiveExpedition.IsValid() && (!IsExpeditionParticipant(Profile) || !Parties ||
-                                           Parties->GetConnectedPlayer(Profile->PartyPlayerKey) != Player))
-        {
-            continue;
-        }
-
-        Players.Add(Player);
-    }
-
-    return Players;
-}
-
-/** 준비 검사와 실제 이동 사이에도 확정한 인원·리비전이 그대로인지 확인한다. */
-bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket,
-                                       TArray<APlayerController*>& OutPlayers) const
-{
-    // 확정 직전의 명부·선택을 다시 읽어 준비 단계와 이동 단계의 경계를 닫는다.
-    OutPlayers.Reset();
-    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-    const FFablePartyRecord* Party =
-        Parties && !Ticket.MemberKeys.IsEmpty() ? Parties->GetPartyForMember(Ticket.MemberKeys[0]) : nullptr;
-    if (!Ticket.IsValid() || !Party || Party->PartyId != Ticket.PartyId ||
-        Party->PreparationRevision != Ticket.PreparationRevision || Party->Members.Num() != Ticket.MemberKeys.Num() ||
-        Party->SelectedRegion != Ticket.Region || Party->SelectedDifficulty != Ticket.Difficulty)
-    {
-        return false;
-    }
-
-    // 전원 검사를 마치기 전에는 이동이나 프로필 binding을 변경하지 않는다.
-    for (const FString& Key : Ticket.MemberKeys)
-    {
-        APlayerController* Player = Parties->GetConnectedPlayer(Key);
-        const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
-        const AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
-        const FFablePartyMember* Member = Party->Members.FindByPredicate(
-            [&](const FFablePartyMember& Entry)
-            {
-                return Entry.PlayerKey == Key;
-            });
-        if (!Player || !Profile || Profile->GetOwner() != Player || !Profile->bProfileLoaded ||
-            (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) || Profile->IsBackendSavePending() ||
-            Profile->ActiveExpeditionId.IsValid() || Profile->PartyId != Ticket.PartyId || !Hero || !Hero->IsAlive() ||
-            Hero->GetController() != Player || Hero->GetPlayerState<AFablePlayerState>() != Profile ||
-            !Profile->IsRegionEligible(Ticket.Region) ||
-            !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) || !Member || !Member->bConnected ||
-            Member->ReadyRevision != Ticket.PreparationRevision)
-        {
-            return false;
-        }
-
-        OutPlayers.Add(Player);
-    }
-
-    return OutPlayers.Num() == Ticket.MemberKeys.Num();
-}
-
-/** 모든 도착점을 선검사하고 회복 효과 없는 이동을 원자적으로 확정한다. */
-bool AFableGameMode::MoveAdmissionParticipants(const FFableExpeditionTicket& Ticket,
-                                               const TArray<APlayerController*>& Players)
-{
-    // 전원 원위치와 시점을 보관하고 비어 있는 도착점을 먼저 확보한다.
-    TArray<FTransform> OriginalTransforms;
-    TArray<FRotator> OriginalViews;
-    TArray<FVector> Destinations;
-    const FRotator ArrivalRotation(0, 90, 0);
-    for (int32 Index = 0; Index < Players.Num(); ++Index)
-    {
-        AFableCharacter* Hero = Players[Index] ? Players[Index]->GetPawn<AFableCharacter>() : nullptr;
-        FVector Destination = FableRPG::RegionEntrance(Ticket.Region) + FVector(Index * 240, 0, 10);
-        if (!Hero || !GetWorld()->FindTeleportSpot(Hero, Destination, ArrivalRotation) ||
-            !FableRPG::IsInRegion(Ticket.Region, Destination))
-        {
-            return false;
-        }
-
-        OriginalTransforms.Add(Hero->GetActorTransform());
-        OriginalViews.Add(Players[Index]->GetControlRotation());
-        Destinations.Add(Destination);
-    }
-
-    // HP/MP를 회복하지 않는 이동 뒤 실제 위치를 확인한다.
-    bool bAllArrived = true;
-    for (int32 Index = 0; Index < Players.Num(); ++Index)
-    {
-        AFableCharacter* Hero = Players[Index]->GetPawn<AFableCharacter>();
-        if (!Hero)
-        {
-            bAllArrived = false;
-            break;
-        }
-
-        Hero->SetCheckpoint(Destinations[Index], ArrivalRotation, false);
-        const FVector Actual = Hero->GetActorLocation();
-        bAllArrived = Hero->IsAlive() && FableRPG::IsInRegion(Ticket.Region, Actual) &&
-                      FVector::DistSquared2D(Actual, Destinations[Index]) <= FMath::Square(150.0f) &&
-                      FMath::Abs(Actual.Z - Destinations[Index].Z) <= 180.0f && bAllArrived;
-    }
-
-    if (!bAllArrived)
-    {
-        // 失敗時はHP/MPを回復せず、元の位置と視点を復元する。
-        for (int32 Index = 0; Index < Players.Num(); ++Index)
-        {
-            if (AFableCharacter* Hero = Players[Index] ? Players[Index]->GetPawn<AFableCharacter>() : nullptr)
-            {
-                Hero->SetActorTransform(OriginalTransforms[Index], false, nullptr, ETeleportType::TeleportPhysics);
-                Hero->SetCheckpoint(OriginalTransforms[Index].GetLocation(), OriginalTransforms[Index].Rotator(),
-                                    false);
-                Players[Index]->SetControlRotation(OriginalViews[Index]);
-                Players[Index]->ClientSetRotation(OriginalViews[Index], true);
-            }
-        }
-    }
-
-    return bAllArrived;
-}
-
-/** 귀환 완료 뒤 원정 binding을 해제하고 다음 동의를 새로 받는다. */
-void AFableGameMode::FinishExpedition()
-{
-    if (!ActiveExpedition.IsValid())
-    {
-        return;
-    }
-
-    // 인증 종료 중인 연결까지 같은 증서의 임시 binding만 지운다.
-    const FGuid PartyId = ActiveExpedition.PartyId;
-    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-    {
-        APlayerController* Player = It->Get();
-        AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (Profile && Profile->ActiveExpeditionId == ActiveExpedition.ExpeditionId &&
-            ActiveExpedition.Contains(Profile->PartyPlayerKey))
-        {
-            Profile->ActiveExpeditionId.Invalidate();
-            Profile->ForceNetUpdate();
-        }
-    }
-
-    // 다음 원정은 새 리비전에 대한 각자의 준비를 다시 받아야 한다.
-    ActiveExpedition = FFableExpeditionTicket();
-    if (AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld()))
-    {
-        Parties->InvalidatePreparation(PartyId);
-    }
-}
-
-/** 살아 있는 요청자가 마을 서비스 범위 안에 있는지 확인한다. */
+/** CanUseTownService는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 bool AFableGameMode::CanUseTownService(APlayerController* Requester, FVector Location, float Radius) const
 {
     // HTTP 요청·응답과 연결 상태 조건 검사
@@ -699,16 +444,7 @@ bool AFableGameMode::CanUseTownService(APlayerController* Requester, FVector Loc
            FMath::Abs(PawnLocation.Z - Location.Z) < 300.0f;
 }
 
-/** 던전 진행 중 여부를 확인한다. */
-bool AFableGameMode::IsDungeonRunning() const
-{
-    const AFableGameState* State = GetGameState<AFableGameState>();
-    return State && !State->bPartyRecoveryPending &&
-           (State->AdventureStage == EFableAdventureStage::Dungeon ||
-            State->AdventureStage == EFableAdventureStage::Boss);
-}
-
-/** 접속한 파티원들에게 같은 진행 안내를 전달한다. */
+/** NotifyParty는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::NotifyParty(const FString& Notice) const
 {
     for (APlayerController* PC : GetEncounterPlayers())
@@ -720,7 +456,7 @@ void AFableGameMode::NotifyParty(const FString& Notice) const
     }
 }
 
-/** 현재 전투가 소유한 적과 진행 상태를 정리한다. */
+/** ClearEncounter는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::ClearEncounter()
 {
     GetWorldTimerManager().ClearTimer(EncounterTimer);
@@ -743,16 +479,20 @@ void AFableGameMode::ClearEncounter()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
     {
-        It->Destroy();
+        if (!It->GetExpeditionId().IsValid())
+        {
+            It->Destroy();
+        }
     }
 }
 
-/** 현재 지역과 난이도에 맞는 적 전투를 생성한다. */
+/** SpawnEncounter는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::SpawnEncounter()
 {
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (const AFableGameState* State = GetGameState<AFableGameState>())
+    if (const AFableGameState* RootState = GetGameState<AFableGameState>())
     {
+        const FFableAdventureProgress* State = &RootState->FieldProgress;
         if (State->bPartyRecoveryPending)
         {
             return;
@@ -776,8 +516,10 @@ void AFableGameMode::SpawnEncounter()
     }
 
     // 생존 상태와 부활 진행 처리
-    if (AFableGameState* State = GetGameState<AFableGameState>())
+    if (AFableGameState* RootState = GetGameState<AFableGameState>())
     {
+        FFableAdventureProgress* State = &RootState->FieldProgress;
+
         // 지역·적·전투 진행 처리
         State->AdventureStage = EFableAdventureStage::Forest;
         State->EncounterSerial = State->EncounterSerial < MAX_int32 ? State->EncounterSerial + 1 : 1;
@@ -792,13 +534,13 @@ void AFableGameMode::SpawnEncounter()
         State->bObjectiveComplete = false;
         State->DungeonWave = 0;
         State->BossHealth = State->BossMaxHealth = 0;
-        State->ForceNetUpdate();
+        RootState->ForceNetUpdate();
     }
 
     UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_ENCOUNTER_STARTED enemies=%d"), ActiveEnemies.Num());
 }
 
-/** 숲 전투 요청의 조건을 확인하고 해당 동작을 진행한다. */
+/** RequestForestEncounter는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
 {
     // HTTP 요청·응답과 연결 상태 조건 검사
@@ -810,7 +552,7 @@ void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
     AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
 
     // 퀘스트와 이야기 진행 조건 검사
-    if (!Profile || Profile->ForestQuest != EFableQuestStage::Active)
+    if (!Profile || Profile->ActiveExpeditionId.IsValid() || Profile->ForestQuest != EFableQuestStage::Active)
     {
         return;
     }
@@ -820,11 +562,10 @@ void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
         return;
     }
 
-    const AFableGameState* Adventure = GetGameState<AFableGameState>();
+    const auto Adventure = FableAdventure::Field(GetWorld());
 
     // 지역·적·전투 진행 조건 검사
-    if (ActiveExpedition.IsValid() || bAdmissionPending || IsDungeonRunning() ||
-        (Adventure && Adventure->ActiveRegion != EFableRegion::Village))
+    if ((Adventure && Adventure->ActiveRegion != EFableRegion::Village))
     {
         Profile->SetNotice(TEXT("숲 순찰을 시작하려면 진행 중인 던전 탐험을 마치고 귀환해야 합니다."));
         return;
@@ -840,7 +581,7 @@ void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
     NotifyParty(TEXT("숲의 수호자 세 마리를 함께 처치하세요."));
 }
 
-/** 연결된 모든 파티원이 선택 지역의 입장 조건을 만족하는지 확인한다. */
+/** AllPlayersRegionEligible는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 bool AFableGameMode::AllPlayersRegionEligible(EFableRegion Region) const
 {
     int32 Count = 0;
@@ -869,7 +610,7 @@ bool AFableGameMode::AllPlayersRegionEligible(EFableRegion Region) const
     return Count > 0;
 }
 
-/** 플레이어를 서버가 정한 지역 체크포인트로 이동시킨다. */
+/** MovePlayerToCheckpoint는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 bool AFableGameMode::MovePlayerToCheckpoint(AController* Player, EFableRegion Region, int32 Slot)
 {
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
@@ -936,7 +677,7 @@ bool AFableGameMode::MovePlayerToCheckpoint(AController* Player, EFableRegion Re
     return false;
 }
 
-/** 파티 구성원을 해당 지역의 서버 체크포인트로 이동시킨다. */
+/** MoveParty는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 bool AFableGameMode::MoveParty(EFableRegion Region)
 {
     bool bAllMoved = true;
@@ -956,11 +697,8 @@ bool AFableGameMode::MoveParty(EFableRegion Region)
         const AFableCharacter* Hero = Cast<AFableCharacter>(PC->GetPawn());
         const bool bAlreadyReturned = Region == EFableRegion::Village && bReturnPending && Hero && Hero->IsAlive() &&
                                       FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation());
-        const AFablePlayerState* Profile = PC->GetPlayerState<AFablePlayerState>();
-        const int32 Slot = ActiveExpedition.IsValid() && Profile
-                               ? ActiveExpedition.MemberKeys.IndexOfByKey(Profile->PartyPlayerKey)
-                               : (bDedicatedMode ? GetConnectionSlot(PC) : Index);
-        const bool bMoved = bAlreadyReturned || MovePlayerToCheckpoint(PC, Region, Slot);
+        const bool bMoved =
+            bAlreadyReturned || MovePlayerToCheckpoint(PC, Region, bDedicatedMode ? GetConnectionSlot(PC) : Index);
         ++Index;
         bAllMoved = bMoved && bAllMoved;
     }
@@ -968,555 +706,7 @@ bool AFableGameMode::MoveParty(EFableRegion Region)
     return bAllMoved;
 }
 
-/** 던전 입장 요청의 조건을 확인하고 해당 동작을 진행한다. */
-void AFableGameMode::RequestEnterDungeon(APlayerController* Requester)
-{
-    RequestEnterRegion(Requester, EFableRegion::RootRuins);
-}
-
-/** 지역 입장 요청의 조건을 확인하고 해당 동작을 진행한다. */
-void AFableGameMode::RequestEnterRegion(APlayerController* Requester, EFableRegion Region, EFableDifficulty Difficulty)
-{
-    if (bLegacyMode || !IsRequesterAlive(Requester))
-    {
-        return;
-    }
-
-    AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
-    if (!Profile || !CanUseTownService(Requester, FableRPG::PortalLocation(), 330.0f))
-    {
-        if (Profile)
-        {
-            Profile->SetNotice(TEXT("마을의 파란 포털 근처에서 입장을 요청하세요."));
-        }
-        return;
-    }
-
-    // 기존 합류 요청도 같은 불변 증서의 참가자만 자신의 원정으로 돌아간다.
-    if (ActiveExpedition.IsValid())
-    {
-        const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-        if (!IsExpeditionParticipant(Profile) || !Parties ||
-            Parties->GetConnectedPlayer(Profile->PartyPlayerKey) != Requester || Region != ActiveExpedition.Region)
-        {
-            Profile->SetNotice(TEXT("현재 원정의 참가자만 같은 던전에 다시 합류할 수 있습니다."));
-            return;
-        }
-        if (bReturnPending)
-        {
-            ReturnPartyToVillage(bReturnAfterWipe);
-            return;
-        }
-
-        const AFableGameState* State = GetGameState<AFableGameState>();
-        if (State && !State->bPartyRecoveryPending && State->ActiveRegion == ActiveExpedition.Region)
-        {
-            const int32 Slot = ActiveExpedition.MemberKeys.IndexOfByKey(Profile->PartyPlayerKey);
-            const bool bJoined = MovePlayerToCheckpoint(Requester, ActiveExpedition.Region, Slot);
-            Profile->SetNotice(bJoined ? TEXT("자신의 원정에 다시 합류했습니다.")
-                                       : TEXT("입구가 막혀 있습니다. 잠시 후 다시 시도하세요."));
-        }
-        return;
-    }
-
-    // 구 RPC·포털·재도전도 현재 선택과 전원 준비를 확인하는 동일 경로만 사용한다.
-    AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-    const FFablePartyRecord* Party = Parties ? Parties->GetPartyForMember(Profile->PartyPlayerKey) : nullptr;
-    if (!Party || Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty)
-    {
-        Profile->SetNotice(TEXT("G 파티 창에서 목적지와 난이도를 선택하고 모두 준비하세요."));
-        return;
-    }
-
-    RequestStartExpedition(Requester, Party->PartyId, Party->PreparationRevision);
-}
-
-/** 실제 이동 직전 명부를 고정하고 전원 도착 뒤에만 전투 진행을 시작한다. */
-bool AFableGameMode::RequestStartExpedition(APlayerController* Requester, FGuid PartyId,
-                                            int32 ExpectedPreparationRevision)
-{
-    // 소유한 현재 연결만 입장을 요청하며 이미 진행 중인 증서는 덮어쓰지 않는다.
-    AFablePlayerState* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
-    if (!HasAuthority() || bLegacyMode || bFrontEnd || !IsValid(Requester) || Requester->GetWorld() != GetWorld() ||
-        !Profile || Profile->GetOwner() != Requester || !IsRequesterAlive(Requester))
-    {
-        return false;
-    }
-
-    if (bAdmissionPending || ActiveExpedition.IsValid())
-    {
-        Profile->SetNotice(TEXT("다른 파티의 원정이 진행 중입니다. 잠시 후 다시 시도하세요."));
-        return false;
-    }
-
-    // 필드 전투와 귀환 처리가 끝난 상태에서만 새 원정의 참가 증서를 만든다.
-    AFableGameState* State = GetGameState<AFableGameState>();
-    AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-    if (!State || !Parties || State->ActiveRegion != EFableRegion::Village || State->bPartyRecoveryPending ||
-        bReturnPending || !ActiveEnemies.IsEmpty())
-    {
-        Profile->SetNotice(TEXT("현재 전투와 귀환이 끝난 뒤 원정을 시작할 수 있습니다."));
-        return false;
-    }
-
-    FFableExpeditionTicket Ticket;
-    if (!Parties->BuildReadySnapshot(Requester, PartyId, ExpectedPreparationRevision, Ticket))
-    {
-        return false;
-    }
-    if (!CanUseTownService(Requester, FableRPG::PortalLocation(), 330.0f))
-    {
-        Profile->SetNotice(TEXT("파티장이 마을의 파란 포털 근처에서 입장을 요청해야 합니다."));
-        return false;
-    }
-
-    TArray<APlayerController*> Players;
-    if (!ValidateAdmission(Ticket, Players))
-    {
-        Profile->SetNotice(TEXT("입장 조건이 바뀌었습니다. 파티 준비를 다시 확인하세요."));
-        return false;
-    }
-
-    // 재진입 호출도 이 증서가 잠근 원정을 중복 생성할 수 없다.
-    TGuardValue<bool> AdmissionGuard(bAdmissionPending, true);
-    ActiveExpedition = Ticket;
-    if (!MoveAdmissionParticipants(Ticket, Players))
-    {
-        ActiveExpedition = FFableExpeditionTicket();
-        Parties->InvalidatePreparation(Ticket.PartyId);
-        Profile->SetNotice(TEXT("던전 도착 지점을 확보하지 못해 원래 위치로 돌아왔습니다. 다시 준비하세요."));
-        return false;
-    }
-
-    // 명부와 이동의 성공을 확인하기 전에는 HP/MP 회복·보상·웨이브를 확정하지 않는다.
-    for (APlayerController* Player : Players)
-    {
-        AFablePlayerState* Member = Player->GetPlayerState<AFablePlayerState>();
-        Member->ActiveExpeditionId = Ticket.ExpeditionId;
-        Member->ForceNetUpdate();
-    }
-
-    // 전원이 도착한 이후에만 공유 진행과 첫 적 무리를 확정한다.
-    LastRestartTime = GetWorld()->GetTimeSeconds();
-    ClearEncounter();
-    State->ActiveRegion = Ticket.Region;
-    State->ActiveDifficulty = Ticket.Difficulty;
-    ++State->Round;
-    State->EncounterSerial = State->EncounterSerial < MAX_int32 ? State->EncounterSerial + 1 : 1;
-    State->bRetryAvailable = false;
-    bRetryAfterRecovery = false;
-    State->AdventureStage = EFableAdventureStage::Dungeon;
-    State->DungeonWave = 1;
-    State->MoonSealMask = 0;
-    State->ActiveSealIndex = -1;
-    State->bObjectiveComplete = false;
-    State->BossHealth = State->BossMaxHealth = 0;
-    State->ForceNetUpdate();
-
-    if (Ticket.Region == EFableRegion::Moonwell)
-    {
-        NotifyParty(TEXT("달빛 수원: 봉인을 지키는 적을 처치하고 세 봉인 가까이에서 E로 정화하세요."));
-        SpawnMoonSealGroup(0);
-    }
-    else
-    {
-        NotifyParty(TEXT("뿌리 유적: 두 차례의 습격을 막고 고대 수호자를 처치하세요."));
-        SpawnDungeonWave(1);
-    }
-
-    return ActiveExpedition.ExpeditionId == Ticket.ExpeditionId && State->ActiveRegion == Ticket.Region;
-}
-
-/** 선택한 달샘 봉인에 대응하는 수호 적 무리를 생성한다. */
-void AFableGameMode::SpawnMoonSealGroup(int32 SealIndex)
-{
-    AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 지역·적·전투 진행 조건 검사
-    if (!State || State->ActiveRegion != EFableRegion::Moonwell || !IsDungeonRunning() || SealIndex < 0 ||
-        SealIndex > 2)
-    {
-        return;
-    }
-
-    // 지역·적·전투 진행 처리
-    ClearEncounter();
-    State->AdventureStage = EFableAdventureStage::Dungeon;
-    State->ActiveSealIndex = SealIndex;
-    State->DungeonWave = SealIndex + 1;
-    const FVector Offsets[] = {FVector(-320, 250, 110), FVector(320, 250, 110), FVector(0, 510, 110),
-                               FVector(0, -430, 110)};
-    const int32 Count = SealIndex == 2 ? 4 : 3;
-
-    // 지역·적·전투 진행 순회
-    for (int32 I = 0; I < Count; ++I)
-    {
-        FActorSpawnParameters Params;
-        Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-        AFableEnemy* Enemy = GetWorld()->SpawnActor<AFableEnemy>(FableRPG::MoonSealLocation(SealIndex) + Offsets[I],
-                                                                 FRotator(0, -90, 0), Params);
-        if (Enemy)
-        {
-            Enemy->ConfigureMoonwell(false, I == 2 || (SealIndex == 1 && I == 1), State->ActiveDifficulty);
-            ActiveEnemies.Add(Enemy);
-            SpawnedEncounterEnemies.Add(Enemy);
-        }
-    }
-
-    // 생존 상태와 부활 진행 처리
-    State->RequiredEnemies = ActiveEnemies.Num();
-    State->DefeatedEnemies = 0;
-    State->bObjectiveComplete = false;
-    State->ForceNetUpdate();
-
-    // 지역·적·전투 진행 처리
-    if (ActiveEnemies.Num() != Count)
-    {
-        ReturnPartyToVillage(true);
-        NotifyParty(TEXT("봉인을 준비하지 못했습니다. 의뢰를 유지한 채 마을로 귀환합니다."));
-    }
-
-    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_MOON_SEAL_STARTED seal=%d enemies=%d"), SealIndex, ActiveEnemies.Num());
-}
-
-/** 봉인 정화 요청의 조건을 확인하고 해당 동작을 진행한다. */
-void AFableGameMode::RequestCleanseSeal(APlayerController* Requester, int32 SealIndex)
-{
-    AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 지역·적·전투 진행 조건 검사
-    if (bLegacyMode || !State || State->bPartyRecoveryPending || !IsRequesterAlive(Requester) || SealIndex < 0 ||
-        SealIndex > 2 || State->ActiveRegion != EFableRegion::Moonwell ||
-        !CanUseTownService(Requester, FableRPG::MoonSealLocation(SealIndex), 330.0f))
-    {
-        return;
-    }
-
-    AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
-
-    // 프로필과 저장 스냅숏 조건 검사
-    if (!Profile || !Profile->bProfileLoaded || !IsExpeditionParticipant(Profile))
-    {
-        return;
-    }
-
-    // A later arrival can inspect an actually cleansed seal independently, including
-    // after the boss has fallen. This never starts another wave or grants boss loot.
-
-    // 퀘스트와 이야기 진행 처리
-    if ((State->MoonSealMask & (1 << SealIndex)) != 0)
-    {
-        if (State->AdventureStage == EFableAdventureStage::Dungeon ||
-            State->AdventureStage == EFableAdventureStage::Boss ||
-            State->AdventureStage == EFableAdventureStage::Cleared)
-        {
-            Profile->RecordStorySeal(SealIndex);
-        }
-        return;
-    }
-
-    // 생존 상태와 부활 진행 조건 검사
-    if (State->AdventureStage != EFableAdventureStage::Dungeon || State->ActiveSealIndex != SealIndex ||
-        !Profile->IsRegionEligible(EFableRegion::Moonwell))
-    {
-        return;
-    }
-    if (!ActiveEnemies.IsEmpty() || State->RequiredEnemies <= 0 || State->DefeatedEnemies < State->RequiredEnemies)
-    {
-        Profile->SetNotice(TEXT("봉인을 지키는 적을 먼저 처치하세요."));
-        return;
-    }
-
-    // 퀘스트와 이야기 진행 처리
-    State->MoonSealMask |= 1 << SealIndex;
-    State->ForceNetUpdate();
-    // Commit the shared seal first; the profile independently verifies this bit,
-    // chapter, life state and proximity before recording its personal investigation.
-    Profile->RecordStorySeal(SealIndex);
-    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_MOON_SEAL_CLEANSED seal=%d mask=%d"), SealIndex, State->MoonSealMask);
-
-    // 지역·적·전투 진행 처리
-    if (SealIndex < 2)
-    {
-        NotifyParty(TEXT("봉인이 정화되었습니다. 다음 빛의 기둥으로 이동하세요."));
-        SpawnMoonSealGroup(SealIndex + 1);
-    }
-    else
-    {
-        State->ActiveSealIndex = -1;
-        NotifyParty(TEXT("세 봉인이 열렸습니다. 수원의 달빛 수호자가 깨어납니다."));
-        SpawnBoss();
-    }
-}
-
-/** 던전의 현재 웨이브에 맞는 적 무리를 생성한다. */
-void AFableGameMode::SpawnDungeonWave(int32 Wave)
-{
-    AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 지역·적·전투 진행 조건 검사
-    if (!State || !IsDungeonRunning() || State->ActiveRegion != EFableRegion::RootRuins)
-    {
-        return;
-    }
-
-    // 지역·적·전투 진행 처리
-    ClearEncounter();
-    State->AdventureStage = EFableAdventureStage::Dungeon;
-    State->DungeonWave = Wave;
-    const FVector Positions[] = {FVector(7350, 250, 110), FVector(8650, 250, 110), FVector(8000, 850, 110)};
-
-    // 지역·적·전투 진행 순회
-    for (const FVector& Position : Positions)
-    {
-        FActorSpawnParameters Params;
-        Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-        if (AFableEnemy* Enemy = GetWorld()->SpawnActor<AFableEnemy>(Position, FRotator(0, -90, 0), Params))
-        {
-            Enemy->ConfigureEncounter(false, true, State->ActiveDifficulty);
-            ActiveEnemies.Add(Enemy);
-            SpawnedEncounterEnemies.Add(Enemy);
-        }
-    }
-
-    // 생존 상태와 부활 진행 처리
-    State->RequiredEnemies = ActiveEnemies.Num();
-    State->DefeatedEnemies = 0;
-    State->bObjectiveComplete = false;
-    State->ForceNetUpdate();
-
-    // 지역·적·전투 진행 처리
-    if (ActiveEnemies.IsEmpty())
-    {
-        ReturnPartyToVillage(true);
-        if (!bReturnPending)
-        {
-            NotifyParty(TEXT("유적을 준비하지 못했습니다. 마을 포털에서 다시 시도하세요."));
-        }
-    }
-
-    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_DUNGEON_WAVE wave=%d enemies=%d"), Wave, ActiveEnemies.Num());
-}
-
-/** 던전 보스를 생성하고 파티 전투 진행에 연결한다. */
-void AFableGameMode::SpawnBoss()
-{
-    AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!State || !IsDungeonRunning())
-    {
-        return;
-    }
-
-    // 지역·적·전투 진행 처리
-    ClearEncounter();
-    FActorSpawnParameters Params;
-    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-    const bool bMoonwell = State->ActiveRegion == EFableRegion::Moonwell;
-    AFableEnemy* Boss = GetWorld()->SpawnActor<AFableEnemy>(
-        FableRPG::RegionCenter(State->ActiveRegion) + FVector(0, 650, 190), FRotator(0, -90, 0), Params);
-
-    // 지역·적·전투 진행 처리
-    if (!Boss)
-    {
-        ReturnPartyToVillage(true);
-        if (!bReturnPending)
-        {
-            NotifyParty(TEXT("수호자를 불러오지 못했습니다. 마을 포털에서 다시 시도하세요."));
-        }
-        return;
-    }
-
-    // 지역·적·전투 진행 처리
-    if (bMoonwell)
-    {
-        Boss->ConfigureMoonwell(true, false, State->ActiveDifficulty);
-    }
-    else
-    {
-        Boss->ConfigureEncounter(true, true, State->ActiveDifficulty);
-    }
-
-    // 지역·적·전투 진행 처리
-    ActiveEnemies.Add(Boss);
-    SpawnedEncounterEnemies.Add(Boss);
-    ActiveBoss = Boss;
-    State->AdventureStage = EFableAdventureStage::Boss;
-    State->DungeonWave = 3;
-    State->RequiredEnemies = 1;
-    State->DefeatedEnemies = 0;
-    State->BossHealth = Boss->GetHealth();
-    State->BossMaxHealth = Boss->GetMaxHealth();
-    State->ForceNetUpdate();
-    NotifyParty(bMoonwell ? TEXT("달빛 수호자: 파문 안쪽 안전지대로 들어가고, 낙하 예고 원에서 벗어나세요.")
-                          : TEXT("고대 수호자: 주황색 원과 전방의 뿌리 공격 예고를 피하세요."));
-    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_BOSS_STARTED health=%.0f"), Boss->GetHealth());
-}
-
-/** 보스 체력 상태를 갱신한다. */
-void AFableGameMode::UpdateBossHealth(AFableEnemy* Enemy)
-{
-    if (!HasAuthority() || !Enemy || ActiveBoss.Get() != Enemy)
-    {
-        return;
-    }
-    if (AFableGameState* State = GetGameState<AFableGameState>())
-    {
-        State->BossHealth = Enemy->GetHealth();
-        State->BossMaxHealth = Enemy->GetMaxHealth();
-        State->ForceNetUpdate();
-    }
-}
-
-/** 적 처치에 따른 보상·웨이브·보스 완료 상태를 처리한다. */
-void AFableGameMode::HandleEnemyDefeated(AFableEnemy* Enemy)
-{
-    // Only a committed death of a member of this encounter can award once.
-    // 서버 권한과 실행 위치 조건 검사
-    if (!HasAuthority() || !IsValid(Enemy) || Enemy->IsAlive() ||
-        ActiveEnemies.Remove(TWeakObjectPtr<AFableEnemy>(Enemy)) == 0)
-    {
-        return;
-    }
-
-    AFableGameState* State = GetGameState<AFableGameState>();
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!State)
-    {
-        return;
-    }
-
-    const bool bBoss = Enemy->IsBoss();
-
-    // 생존 상태와 부활 진행 처리
-    if (!bLegacyMode)
-    {
-        for (APlayerController* PC : GetEncounterPlayers())
-        {
-            // 현재 월드와 플레이어 참조에 필요한 값 준비
-            AFablePlayerState* Profile = PC ? PC->GetPlayerState<AFablePlayerState>() : nullptr;
-            APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-
-            // 프로필과 저장 스냅숏 처리
-            if (!Profile || !Profile->bProfileLoaded || !Pawn)
-            {
-                continue;
-            }
-            // A connected eligible participant still in the encounter shares personal
-            // rewards even while Downed/Defeated. A member already rescued to town,
-            // a failed arrival or an ineligible late join receives no remote loot.
-
-            // 퀘스트와 이야기 진행에 필요한 값 준비
-            const FVector PawnLocation = Pawn->GetActorLocation();
-            const bool bForestCredit = State->AdventureStage == EFableAdventureStage::Forest &&
-                                       FableRPG::IsInRegion(EFableRegion::Village, PawnLocation) &&
-                                       Profile->ForestQuest == EFableQuestStage::Active;
-            const bool bDungeonCredit = IsExpeditionParticipant(Profile) && IsDungeonRunning() &&
-                                        FableRPG::IsInRegion(State->ActiveRegion, PawnLocation) &&
-                                        Profile->IsRegionEligible(State->ActiveRegion);
-
-            // 지역·적·전투 진행 처리
-            if (bForestCredit)
-            {
-                Profile->RecordKill(bBoss);
-            }
-            else if (bDungeonCredit)
-            {
-                Profile->RecordRegionKill(State->ActiveRegion, bBoss, State->ActiveDifficulty);
-            }
-        }
-    }
-
-    State->DefeatedEnemies = FMath::Min(State->DefeatedEnemies + 1, State->RequiredEnemies);
-
-    // 지역·적·전투 진행 처리
-    if (bBoss)
-    {
-        State->BossHealth = 0;
-        ActiveBoss.Reset();
-    }
-
-    // 지역·적·전투 진행 처리
-    if (ActiveEnemies.IsEmpty())
-    {
-        for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
-        {
-            It->Destroy();
-        }
-        if (bLegacyMode)
-        {
-            State->bObjectiveComplete = State->RequiredEnemies > 0;
-        }
-        else if (State->AdventureStage == EFableAdventureStage::Forest)
-        {
-            State->AdventureStage = EFableAdventureStage::ForestCleared;
-            State->bObjectiveComplete = true;
-            NotifyParty(TEXT("숲이 평온해졌습니다. 안내인에게 돌아가 의뢰 보상을 받으세요."));
-        }
-        else if (State->AdventureStage == EFableAdventureStage::Dungeon &&
-                 State->ActiveRegion == EFableRegion::Moonwell)
-        {
-            NotifyParty(TEXT("봉인을 지키는 적이 사라졌습니다. 빛의 봉인 가까이에서 E를 누르세요."));
-        }
-        else if (State->AdventureStage == EFableAdventureStage::Dungeon)
-        {
-            const int32 NextWave = State->DungeonWave + 1;
-            const FGuid ExpeditionId = ActiveExpedition.ExpeditionId;
-            NotifyParty(NextWave <= 2 ? TEXT("3초 뒤 다음 수호자 무리가 나타납니다.")
-                                      : TEXT("고대 수호자가 깨어나고 있습니다."));
-            GetWorldTimerManager().SetTimer(
-                EncounterTimer,
-                [this, NextWave, ExpeditionId]()
-                {
-                    if (!IsDungeonRunning() || ActiveExpedition.ExpeditionId != ExpeditionId)
-                    {
-                        return;
-                    }
-                    if (NextWave <= 2)
-                    {
-                        SpawnDungeonWave(NextWave);
-                    }
-                    else
-                    {
-                        SpawnBoss();
-                    }
-                },
-                3.0f, false);
-        }
-        else if (State->AdventureStage == EFableAdventureStage::Boss)
-        {
-            State->AdventureStage = EFableAdventureStage::Cleared;
-            State->bObjectiveComplete = true;
-            NotifyParty(TEXT("수호자를 처치했습니다! 귀환 포털에서 E를 누르고 안내인에게 해당 의뢰 보상을 받으세요."));
-        }
-    }
-
-    // 생존 상태와 부활 진행 처리
-    State->ForceNetUpdate();
-    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_OBJECTIVE progress=%d/%d complete=%d"), State->DefeatedEnemies,
-           State->RequiredEnemies, State->bObjectiveComplete);
-}
-
-/** 복구 전투 상태를 해제한다. */
-void AFableGameMode::ClearRecoveryCombat()
-{
-    ClearEncounter();
-    // 원정 외 모험가의 마을 투사체는 구조 처리로 제거하지 않는다.
-    for (TActorIterator<AFableProjectile> It(GetWorld()); It; ++It)
-    {
-        const AFableCharacter* ProjectileOwner = Cast<AFableCharacter>(It->GetOwner());
-        const AFablePlayerState* Profile =
-            ProjectileOwner ? ProjectileOwner->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (!ActiveExpedition.IsValid() || IsExpeditionParticipant(Profile))
-        {
-            It->Destroy();
-        }
-    }
-}
-
-/** 재도전 퀘스트의 존재 여부를 확인한다. */
+/** HasRetryQuest는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 bool AFableGameMode::HasRetryQuest(EFableRegion Region) const
 {
     for (APlayerController* PC : GetEncounterPlayers())
@@ -1535,10 +725,11 @@ bool AFableGameMode::HasRetryQuest(EFableRegion Region) const
     return false;
 }
 
-/** 파티 전멸 뒤 전투를 정리하고 복구 대기를 시작한다. */
+/** BeginPartyRecovery는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::BeginPartyRecovery()
 {
-    AFableGameState* State = GetGameState<AFableGameState>();
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (bLegacyMode || bFrontEnd || !State || State->bPartyRecoveryPending)
@@ -1547,7 +738,7 @@ void AFableGameMode::BeginPartyRecovery()
     }
 
     // 지역·적·전투 진행에 필요한 값 준비
-    const bool bUnfinishedEncounter = State->AdventureStage == EFableAdventureStage::Forest || IsDungeonRunning();
+    const bool bUnfinishedEncounter = State->AdventureStage == EFableAdventureStage::Forest;
     bRetryAfterRecovery = State->bRetryAvailable;
 
     // 퀘스트와 이야기 진행 처리
@@ -1572,16 +763,17 @@ void AFableGameMode::BeginPartyRecovery()
     State->MoonSealMask = 0;
     State->ActiveSealIndex = -1;
     State->bObjectiveComplete = false;
-    State->ForceNetUpdate();
+    RootState->ForceNetUpdate();
     NotifyParty(TEXT("활동 가능한 동료가 없습니다. 3초 뒤 모두 마을로 구조됩니다. 의뢰 진행과 장비는 보존됩니다."));
     UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_PARTY_RECOVERY_STARTED region=%d retry=%d serial=%d end=%.2f"),
            int32(State->RetryRegion), bRetryAfterRecovery, State->EncounterSerial, State->PartyRecoveryEndServerTime);
 }
 
-/** 복구 시간이 끝난 파티를 안전 지점으로 되돌린다. */
+/** FinishPartyRecovery는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::FinishPartyRecovery()
 {
-    AFableGameState* State = GetGameState<AFableGameState>();
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!State || !State->bPartyRecoveryPending)
@@ -1605,7 +797,7 @@ void AFableGameMode::FinishPartyRecovery()
     State->PartyRecoveryEndServerTime = 0;
     State->bRetryAvailable = bRetryAfterRecovery && HasRetryQuest(State->RetryRegion);
     State->PartyRecoveryCount = State->PartyRecoveryCount < MAX_int32 ? State->PartyRecoveryCount + 1 : 1;
-    State->ForceNetUpdate();
+    RootState->ForceNetUpdate();
     NotifyParty(
         State->bRetryAvailable
             ? (State->RetryRegion == EFableRegion::Village
@@ -1616,19 +808,19 @@ void AFableGameMode::FinishPartyRecovery()
             : TEXT("모두 마을로 구조되었습니다. 의뢰 진행과 장비, 획득한 보상은 그대로 유지됩니다."));
     UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_PARTY_RECOVERY_COMPLETE count=%d retry=%d region=%d serial=%d"),
            State->PartyRecoveryCount, State->bRetryAvailable, int32(State->RetryRegion), State->EncounterSerial);
-    FinishExpedition();
 }
 
-/** 동료들의 생존·지역 상태를 확인해 파티 복구를 판단한다. */
+/** CheckPartyState는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::CheckPartyState()
 {
     // 서버 권한과 실행 위치 조건 검사
-    if (bLegacyMode || bFrontEnd || !HasAuthority() || bAdmissionPending)
+    if (bLegacyMode || bFrontEnd || !HasAuthority())
     {
         return;
     }
 
-    AFableGameState* State = GetGameState<AFableGameState>();
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!State)
@@ -1674,19 +866,6 @@ void AFableGameMode::CheckPartyState()
     // 지역·적·전투 진행 처리
     if (ConnectedPlayers == 0)
     {
-        // 유예 중인 전원 오프라인 원정은 새 접속자가 가로채거나 즉시 폐기하지 않는다.
-        const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
-        if (ActiveExpedition.IsValid() && Parties &&
-            ActiveExpedition.MemberKeys.ContainsByPredicate(
-                [&](const FString& Key)
-                {
-                    const FFablePartyRecord* Party = Parties->GetPartyForMember(Key);
-                    return Party && Party->PartyId == ActiveExpedition.PartyId;
-                }))
-        {
-            return;
-        }
-
         if (State->bPartyRecoveryPending || State->ActiveRegion != EFableRegion::Village || !ActiveEnemies.IsEmpty())
         {
             ClearRecoveryCombat();
@@ -1695,9 +874,9 @@ void AFableGameMode::CheckPartyState()
             State->PartyRecoveryEndServerTime = 0;
             State->bRetryAvailable = false;
             bRetryAfterRecovery = false;
-            State->ForceNetUpdate();
+            RootState->ForceNetUpdate();
         }
-        FinishExpedition();
+
         return;
     }
 
@@ -1750,19 +929,11 @@ void AFableGameMode::CheckPartyState()
         NextIndividualRescueTime = Now + 0.5;
 
         // 지역·적·전투 진행 처리
-        const AFablePlayerState* RescuedProfile = PC->GetPlayerState<AFablePlayerState>();
-        const int32 Slot = ActiveExpedition.IsValid() && RescuedProfile
-                               ? ActiveExpedition.MemberKeys.IndexOfByKey(RescuedProfile->PartyPlayerKey)
-                               : GetConnectionSlot(PC);
-        if (MovePlayerToCheckpoint(PC, EFableRegion::Village, Slot))
+        if (MovePlayerToCheckpoint(PC, EFableRegion::Village, GetConnectionSlot(PC)))
         {
             if (AFablePlayerState* Profile = PC->GetPlayerState<AFablePlayerState>())
             {
-                Profile->SetNotice(
-                    IsDungeonRunning()
-                        ? TEXT(
-                              "마을로 구조되었습니다. 동료의 전투는 계속됩니다. 차원문에서 같은 지역을 선택해 합류하세요.")
-                        : TEXT("마을로 구조되었습니다. 동료의 의뢰와 전투 진행은 유지됩니다."));
+                Profile->SetNotice(TEXT("마을로 구조되었습니다. 동료의 의뢰와 전투 진행은 유지됩니다."));
             }
             UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_INDIVIDUAL_RESCUED player=%s serial=%d"), *GetNameSafe(PC),
                    State->EncounterSerial);
@@ -1774,10 +945,11 @@ void AFableGameMode::CheckPartyState()
     }
 }
 
-/** 전투 재도전 요청의 조건을 확인하고 해당 동작을 진행한다. */
+/** RequestRetryEncounter는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::RequestRetryEncounter(APlayerController* Requester)
 {
-    AFableGameState* State = GetGameState<AFableGameState>();
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
 
     // 지역·적·전투 진행 조건 검사
     if (bLegacyMode || !State || !IsRequesterAlive(Requester) || !State->bRetryAvailable ||
@@ -1834,7 +1006,7 @@ void AFableGameMode::RequestRetryEncounter(APlayerController* Requester)
     }
 }
 
-/** 현재 전투를 마무리하고 파티를 마을로 복귀시킨다. */
+/** ReturnPartyToVillage는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::ReturnPartyToVillage(bool bWipe)
 {
     // 지역·적·전투 진행 처리
@@ -1843,8 +1015,10 @@ void AFableGameMode::ReturnPartyToVillage(bool bWipe)
     bReturnPending = !MoveParty(EFableRegion::Village);
 
     // 생존 상태와 부활 진행 처리
-    if (AFableGameState* State = GetGameState<AFableGameState>())
+    if (AFableGameState* RootState = GetGameState<AFableGameState>())
     {
+        FFableAdventureProgress* State = &RootState->FieldProgress;
+
         State->AdventureStage =
             bReturnPending && !bWipe ? EFableAdventureStage::Cleared : EFableAdventureStage::Village;
 
@@ -1863,13 +1037,14 @@ void AFableGameMode::ReturnPartyToVillage(bool bWipe)
         State->RequiredEnemies = 0;
         State->DefeatedEnemies = 0;
         State->bObjectiveComplete = !bWipe;
-        State->ForceNetUpdate();
+        RootState->ForceNetUpdate();
     }
 
     // 이 단계에서 현재 전투를 마무리하고 파티를 마을로 복귀시킨다.
     if (bReturnPending)
     {
-        const AFableGameState* State = GetGameState<AFableGameState>();
+        const AFableGameState* RootState = GetGameState<AFableGameState>();
+        const FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
         NotifyParty(State && State->bPartyRecoveryPending
                         ? TEXT("마을 구조 위치를 확보하고 있습니다. 자동으로 다시 시도합니다.")
                         : TEXT("전투가 끝났지만 귀환 지점이 막혀 있습니다. 포털에서 E로 귀환을 다시 시도하세요."));
@@ -1878,83 +1053,18 @@ void AFableGameMode::ReturnPartyToVillage(bool bWipe)
 
     NotifyParty(bWipe ? TEXT("모두 구조되어 마을로 돌아왔습니다. 의뢰는 유지됩니다. 포털에서 다시 도전하세요.")
                       : TEXT("마을로 돌아왔습니다. 안내인에게 완료한 의뢰 보상을 받으세요."));
-
-    const AFableGameState* State = GetGameState<AFableGameState>();
-    if (!State || !State->bPartyRecoveryPending)
-    {
-        FinishExpedition();
-    }
 }
 
-/** 마을 복귀 요청의 조건을 확인하고 해당 동작을 진행한다. */
-void AFableGameMode::RequestReturnVillage(APlayerController* Requester)
-{
-    // HTTP 요청·응답과 연결 상태 조건 검사
-    if (bLegacyMode || !IsRequesterAlive(Requester))
-    {
-        return;
-    }
-
-    // HTTP 요청·응답과 연결 상태에 필요한 값 준비
-    AFableGameState* State = GetGameState<AFableGameState>();
-    AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
-
-    // 지역·적·전투 진행 조건 검사
-    if (!State || !IsExpeditionParticipant(Profile) || State->ActiveRegion == EFableRegion::Village)
-    {
-        return;
-    }
-
-    const bool bNearPortal = CanUseTownService(Requester, FableRPG::RegionEntrance(State->ActiveRegion), 350) ||
-                             CanUseTownService(Requester, FableRPG::RegionReturnPortal(State->ActiveRegion), 350);
-
-    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!bNearPortal)
-    {
-        return;
-    }
-
-    // 프로필과 저장 스냅숏 처리
-    if (State->AdventureStage != EFableAdventureStage::Cleared && !bReturnPending)
-    {
-        if (Profile)
-        {
-            Profile->SetNotice(TEXT("수호자를 처치하면 귀환 포털이 열립니다. 모두 쓰러지면 마을로 구조됩니다."));
-        }
-        return;
-    }
-
-    // 퀘스트와 이야기 진행 처리
-    if (State->ActiveRegion == EFableRegion::Moonwell && State->AdventureStage == EFableAdventureStage::Cleared)
-    {
-        // Keep the completed encounter available until living participants have
-        // personally inspected its seals. Older/completed stories and rescued
-        // players outside this region never hold the expedition at the exit.
-        for (APlayerController* Member : GetEncounterPlayers())
-        {
-            const AFablePlayerState* MemberProfile = Member ? Member->GetPlayerState<AFablePlayerState>() : nullptr;
-            const AFableCharacter* MemberHero = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
-            if (MemberProfile && MemberProfile->bProfileLoaded && MemberProfile->StoryChapter == 4 &&
-                MemberProfile->StorySealMask != 7 && MemberHero && MemberHero->IsAlive() &&
-                FableRPG::IsInRegion(EFableRegion::Moonwell, MemberHero->GetActorLocation()))
-            {
-                NotifyParty(TEXT("동료가 정화된 봉인을 E로 확인 중입니다. 세 봉인 조사를 마친 뒤 함께 귀환하세요."));
-                return;
-            }
-        }
-    }
-
-    ReturnPartyToVillage(bReturnPending ? bReturnAfterWipe : false);
-}
-
-/** 새 전투 요청의 조건을 확인하고 해당 동작을 진행한다. */
+/** RequestNewRound는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::RequestNewRound(APlayerController* Requester)
 {
     // 지역·적·전투 진행 처리
     if (!bLegacyMode)
     {
-        if (const AFableGameState* State = GetGameState<AFableGameState>())
+        if (const AFableGameState* RootState = GetGameState<AFableGameState>())
         {
+            const FFableAdventureProgress* State = &RootState->FieldProgress;
+
             if (State->bRetryAvailable)
             {
                 RequestRetryEncounter(Requester);
@@ -1965,7 +1075,8 @@ void AFableGameMode::RequestNewRound(APlayerController* Requester)
         return;
     }
 
-    AFableGameState* State = GetGameState<AFableGameState>();
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
 
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !IsValid(Requester) || Requester->GetWorld() != GetWorld() || !State ||
@@ -2010,4 +1121,429 @@ void AFableGameMode::RequestNewRound(APlayerController* Requester)
     }
 
     SpawnEncounter();
+}
+
+/** UUID가 정확히 일치하는 유효한 원정만 반환한다. */
+AFablePartyEncounter* AFableGameMode::FindExpedition(FGuid Id) const
+{
+    const TObjectPtr<AFablePartyEncounter>* Found = Expeditions.Find(Id);
+    return Found && IsValid(Found->Get()) && (*Found)->IsCommitted() ? Found->Get() : nullptr;
+}
+
+/** 단일 전역 원정 대신 실제 프로필의 증서 또는 예약된 명부를 조회한다. */
+AFablePartyEncounter* AFableGameMode::GetExpeditionFor(const AFablePlayerState* Profile) const
+{
+    if (!IsValid(Profile) || Profile->GetWorld() != GetWorld() || !Profile->PartyId.IsValid() ||
+        Profile->PartyPlayerKey.IsEmpty())
+    {
+        return nullptr;
+    }
+    for (AFablePartyEncounter* Encounter : GetExpeditions())
+    {
+        const FFableExpeditionTicket& Entry = Encounter->GetTicket();
+        if (Entry.PartyId == Profile->PartyId && Entry.Contains(Profile->PartyPlayerKey) &&
+            (!Profile->ActiveExpeditionId.IsValid() || Profile->ActiveExpeditionId == Entry.ExpeditionId))
+        {
+            return Encounter;
+        }
+    }
+    return nullptr;
+}
+
+/** 확정된 원정 목록은 검증과 요청 라우팅에만 제공한다. */
+TArray<AFablePartyEncounter*> AFableGameMode::GetExpeditions() const
+{
+    TArray<AFablePartyEncounter*> Result;
+    for (const auto& Entry : Expeditions)
+    {
+        if (IsValid(Entry.Value) && Entry.Value->IsCommitted())
+        {
+            Result.Add(Entry.Value);
+        }
+    }
+    return Result;
+}
+
+/** 해당 파티가 이미 소유한 원정만 구성 변경을 잠근다. */
+bool AFableGameMode::IsPartyExpeditionActive(FGuid PartyId) const
+{
+    for (AFablePartyEncounter* Encounter : GetExpeditions())
+    {
+        if (Encounter->GetTicket().PartyId == PartyId)
+        {
+            return true;
+        }
+    }
+    return PendingAdmissions.Contains(PartyId);
+}
+
+/** 현재 연결과 원정 증서가 일치하는 참가자를 확인한다. */
+bool AFableGameMode::IsExpeditionParticipant(const AFablePlayerState* Profile) const
+{
+    const AFablePartyEncounter* Encounter = Profile ? FindExpedition(Profile->ActiveExpeditionId) : nullptr;
+    return Encounter && Encounter->IsParticipant(Profile);
+}
+
+/** 공유 필드 처리에는 원정에 속하지 않은 현재 연결만 포함한다. */
+TArray<APlayerController*> AFableGameMode::GetEncounterPlayers() const
+{
+    TArray<APlayerController*> Result;
+    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+    {
+        APlayerController* Player = It->Get();
+        const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        if (IsValid(Player) && (!Profile || !Profile->ActiveExpeditionId.IsValid()))
+        {
+            Result.Add(Player);
+        }
+    }
+    return Result;
+}
+
+/** 요청자는 자기 진행의 복구 상태만 검사한다. */
+bool AFableGameMode::IsRequesterAlive(APlayerController* Requester) const
+{
+    if (bFrontEnd || !HasAuthority() || !IsValid(Requester) || Requester->GetWorld() != GetWorld())
+    {
+        return false;
+    }
+    const auto Adventure = FableAdventure::For(Requester);
+    const auto* Hero = Requester->GetPawn<AFableCharacter>();
+    return Adventure && !Adventure->bPartyRecoveryPending && Hero && Hero->IsAlive();
+}
+
+/** 현재 프로필의 불변 증서를 복구한 뒤 올바른 체크포인트에 생성한다. */
+void AFableGameMode::RestartPlayer(AController* NewPlayer)
+{
+    AFablePlayerState* Profile = NewPlayer ? NewPlayer->GetPlayerState<AFablePlayerState>() : nullptr;
+    if (bDedicatedMode && (!Profile || !Profile->IsBackendReady()))
+    {
+        return;
+    }
+    Super::RestartPlayer(NewPlayer);
+    if (bLegacyMode || bFrontEnd || !NewPlayer || !NewPlayer->GetPawn<AFableCharacter>())
+    {
+        return;
+    }
+    AFablePartyEncounter* Encounter = GetExpeditionFor(Profile);
+    if (Profile)
+    {
+        Profile->ActiveExpeditionId = Encounter ? Encounter->GetExpeditionId() : FGuid();
+        Profile->ForceNetUpdate();
+    }
+    const bool bDungeon = Encounter && !Encounter->GetProgress().bPartyRecoveryPending && !Encounter->IsReturning();
+    AFableCharacter* Hero = NewPlayer->GetPawn<AFableCharacter>();
+    const int32 Slot = Encounter ? Encounter->GetTicket().MemberKeys.IndexOfByKey(Profile->PartyPlayerKey)
+                                 : GetConnectionSlot(NewPlayer);
+    if (bDungeon)
+    {
+        Hero->SetCheckpoint(FableRPG::RegionEntrance(Encounter->GetTicket().Region) + Encounter->GetWorldOrigin() +
+                                FVector(Slot * 240, 0, 10),
+                            FRotator(0, 90, 0));
+    }
+    else
+    {
+        MovePlayerToCheckpoint(NewPlayer, EFableRegion::Village, Slot);
+    }
+}
+
+/** 기존 포털 진입점도 같은 준비와 원정 소유권을 따른다. */
+void AFableGameMode::RequestEnterDungeon(APlayerController* Requester)
+{
+    RequestEnterRegion(Requester, EFableRegion::RootRuins);
+}
+
+/** 새 입장은 전원 동의를 요구하고 기존 참가자는 자기 증서로만 복귀한다. */
+void AFableGameMode::RequestEnterRegion(APlayerController* Requester, EFableRegion Region, EFableDifficulty Difficulty)
+{
+    if (bLegacyMode || !IsRequesterAlive(Requester))
+    {
+        return;
+    }
+    AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
+    if (!Profile || !CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    {
+        return;
+    }
+    if (AFablePartyEncounter* Encounter = GetExpeditionFor(Profile))
+    {
+        if (Region == Encounter->GetTicket().Region)
+        {
+            Encounter->Resume(Requester);
+        }
+        return;
+    }
+    const auto* Parties = AFablePartyManager::Find(GetWorld());
+    const auto* Party = Parties ? Parties->GetPartyForMember(Profile->PartyPlayerKey) : nullptr;
+    if (!Party || Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty)
+    {
+        Profile->SetNotice(TEXT("G 파티 창에서 목적지와 난이도를 선택하고 모두 준비하세요."));
+        return;
+    }
+    RequestStartExpedition(Requester, Party->PartyId, Party->PreparationRevision);
+}
+
+/** 전원 동의와 배치 성공을 확인한 뒤 원정별 진행을 시작한다. */
+bool AFableGameMode::RequestStartExpedition(APlayerController* Requester, FGuid PartyId,
+                                            int32 ExpectedPreparationRevision)
+{
+    auto* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    if (!Profile || Profile->GetOwner() != Requester || !IsRequesterAlive(Requester) || bLegacyMode)
+    {
+        return false;
+    }
+    if (IsPartyExpeditionActive(PartyId))
+    {
+        Profile->SetNotice(TEXT("해당 파티의 원정이 이미 진행 중입니다."));
+        return false;
+    }
+    auto* Parties = AFablePartyManager::Find(GetWorld());
+    FFableExpeditionTicket Ticket;
+    if (!Parties || !Parties->BuildReadySnapshot(Requester, PartyId, ExpectedPreparationRevision, Ticket))
+    {
+        return false;
+    }
+    if (!CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    {
+        Profile->SetNotice(TEXT("파티장이 마을의 파란 포털 근처에서 입장을 요청해야 합니다."));
+        return false;
+    }
+    TArray<APlayerController*> Players;
+    if (!ValidateAdmission(Ticket, Players))
+    {
+        return false;
+    }
+
+    // 파괴된 슬롯만 재사용하며 미확정 Actor를 다른 입장 요청에서 보이지 않게 한다.
+    TSet<int32> UsedSlots;
+    for (auto It = Expeditions.CreateIterator(); It; ++It)
+    {
+        if (!IsValid(It.Value()) || !It.Value()->IsCommitted())
+        {
+            It.RemoveCurrent();
+        }
+        else
+        {
+            UsedSlots.Add(FMath::RoundToInt(It.Value()->GetWorldOrigin().Y / 30000));
+        }
+    }
+    int32 Slot = 1;
+    while (UsedSlots.Contains(Slot) && Slot <= 16)
+    {
+        ++Slot;
+    }
+    if (Slot > 16)
+    {
+        Profile->SetNotice(TEXT("원정 공간이 가득 찼습니다. 잠시 후 다시 시도하세요."));
+        return false;
+    }
+    PendingAdmissions.Add(PartyId);
+    AFablePartyEncounter* Encounter = GetWorld()->SpawnActor<AFablePartyEncounter>();
+    const bool bPrepared = Encounter && Encounter->InitializeExpedition(Ticket, FVector(0, Slot * 30000, 0));
+    if (bPrepared)
+    {
+        Expeditions.Add(Ticket.ExpeditionId, Encounter);
+    }
+    const bool bAdmitted = bPrepared && Encounter->Admit(Players);
+    PendingAdmissions.Remove(PartyId);
+    if (!bAdmitted)
+    {
+        if (IsValid(Encounter))
+        {
+            Encounter->Destroy();
+        }
+        Expeditions.Remove(Ticket.ExpeditionId);
+        Parties->InvalidatePreparation(PartyId);
+        Profile->SetNotice(TEXT("던전 도착 지점을 확보하지 못해 원래 위치로 돌아왔습니다. 다시 준비하세요."));
+        return false;
+    }
+    return true;
+}
+
+/** 봉인 요청을 요청자 소유 원정에만 전달한다. */
+void AFableGameMode::RequestCleanseSeal(APlayerController* Requester, int32 SealIndex)
+{
+    if (auto* Encounter =
+            GetExpeditionFor(IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr))
+    {
+        Encounter->RequestCleanseSeal(Requester, SealIndex);
+    }
+}
+
+/** 귀환 요청은 다른 파티의 진행에 영향을 주지 않는다. */
+void AFableGameMode::RequestReturnVillage(APlayerController* Requester)
+{
+    if (auto* Encounter =
+            GetExpeditionFor(IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr))
+    {
+        Encounter->RequestReturnVillage(Requester);
+    }
+}
+
+/** 이동 직전 명부와 현재 소유 연결을 다시 확인한다. */
+bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket,
+                                       TArray<APlayerController*>& OutPlayers) const
+{
+    // 확정 직전의 명부·선택을 다시 읽어 준비 단계와 이동 단계의 경계를 닫는다.
+    OutPlayers.Reset();
+    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
+    const FFablePartyRecord* Party =
+        Parties && !Ticket.MemberKeys.IsEmpty() ? Parties->GetPartyForMember(Ticket.MemberKeys[0]) : nullptr;
+    if (!Ticket.IsValid() || !Party || Party->PartyId != Ticket.PartyId ||
+        Party->PreparationRevision != Ticket.PreparationRevision || Party->Members.Num() != Ticket.MemberKeys.Num() ||
+        Party->SelectedRegion != Ticket.Region || Party->SelectedDifficulty != Ticket.Difficulty)
+    {
+        return false;
+    }
+
+    // 전원 검사를 마치기 전에는 이동이나 프로필 binding을 변경하지 않는다.
+    for (const FString& Key : Ticket.MemberKeys)
+    {
+        APlayerController* Player = Parties->GetConnectedPlayer(Key);
+        const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        const AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
+        const FFablePartyMember* Member = Party->Members.FindByPredicate(
+            [&](const FFablePartyMember& Entry)
+            {
+                return Entry.PlayerKey == Key;
+            });
+        if (!Player || !Profile || Profile->GetOwner() != Player || !Profile->bProfileLoaded ||
+            (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) || Profile->IsBackendSavePending() ||
+            Profile->ActiveExpeditionId.IsValid() || Profile->PartyId != Ticket.PartyId || !Hero || !Hero->IsAlive() ||
+            Hero->GetController() != Player || Hero->GetPlayerState<AFablePlayerState>() != Profile ||
+            !Profile->IsRegionEligible(Ticket.Region) ||
+            !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) || !Member || !Member->bConnected ||
+            Member->ReadyRevision != Ticket.PreparationRevision)
+        {
+            return false;
+        }
+
+        OutPlayers.Add(Player);
+    }
+
+    return OutPlayers.Num() == Ticket.MemberKeys.Num();
+}
+
+/** 적 UUID에 따라 독립 원정과 공유 필드의 처치 경로를 구분한다. */
+void AFableGameMode::HandleEnemyDefeated(AFableEnemy* Enemy)
+{
+    if (Enemy && Enemy->GetExpeditionId().IsValid())
+    {
+        if (auto* Encounter = FindExpedition(Enemy->GetExpeditionId()))
+        {
+            Encounter->HandleEnemyDefeated(Enemy);
+        }
+        return;
+    }
+    // Only a committed death of a member of this encounter can award once.
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !IsValid(Enemy) || Enemy->IsAlive() ||
+        ActiveEnemies.Remove(TWeakObjectPtr<AFableEnemy>(Enemy)) == 0)
+    {
+        return;
+    }
+
+    AFableGameState* RootState = GetGameState<AFableGameState>();
+    FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (!State)
+    {
+        return;
+    }
+
+    const bool bBoss = Enemy->IsBoss();
+
+    // 생존 상태와 부활 진행 처리
+    if (!bLegacyMode)
+    {
+        for (APlayerController* PC : GetEncounterPlayers())
+        {
+            // 현재 월드와 플레이어 참조에 필요한 값 준비
+            AFablePlayerState* Profile = PC ? PC->GetPlayerState<AFablePlayerState>() : nullptr;
+            APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+
+            // 프로필과 저장 스냅숏 처리
+            if (!Profile || !Profile->bProfileLoaded || !Pawn)
+            {
+                continue;
+            }
+            // A connected eligible participant still in the encounter shares personal
+            // rewards even while Downed/Defeated. A member already rescued to town,
+            // a failed arrival or an ineligible late join receives no remote loot.
+
+            // 퀘스트와 이야기 진행에 필요한 값 준비
+            const FVector PawnLocation = Pawn->GetActorLocation();
+            const bool bForestCredit = State->AdventureStage == EFableAdventureStage::Forest &&
+                                       FableRPG::IsInRegion(EFableRegion::Village, PawnLocation) &&
+                                       Profile->ForestQuest == EFableQuestStage::Active;
+
+            // 지역·적·전투 진행 처리
+            if (bForestCredit)
+            {
+                Profile->RecordKill(bBoss);
+            }
+        }
+    }
+
+    State->DefeatedEnemies = FMath::Min(State->DefeatedEnemies + 1, State->RequiredEnemies);
+
+    // 지역·적·전투 진행 처리
+    if (bBoss)
+    {
+        State->BossHealth = 0;
+        ActiveBoss.Reset();
+    }
+
+    // 지역·적·전투 진행 처리
+    if (ActiveEnemies.IsEmpty())
+    {
+        for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
+        {
+            if (!It->GetExpeditionId().IsValid())
+            {
+                It->Destroy();
+            }
+        }
+        if (bLegacyMode)
+        {
+            State->bObjectiveComplete = State->RequiredEnemies > 0;
+        }
+        else if (State->AdventureStage == EFableAdventureStage::Forest)
+        {
+            State->AdventureStage = EFableAdventureStage::ForestCleared;
+            State->bObjectiveComplete = true;
+            NotifyParty(TEXT("숲이 평온해졌습니다. 안내인에게 돌아가 의뢰 보상을 받으세요."));
+        }
+    }
+
+    // 생존 상태와 부활 진행 처리
+    RootState->ForceNetUpdate();
+    UE_LOG(LogTemp, Display, TEXT("FABLEWOOD_OBJECTIVE progress=%d/%d complete=%d"), State->DefeatedEnemies,
+           State->RequiredEnemies, State->bObjectiveComplete);
+}
+
+/** 보스 체력도 해당 보스의 원정 UUID로만 전달한다. */
+void AFableGameMode::UpdateBossHealth(AFableEnemy* Enemy)
+{
+    if (Enemy && Enemy->GetExpeditionId().IsValid())
+    {
+        if (auto* Encounter = FindExpedition(Enemy->GetExpeditionId()))
+        {
+            Encounter->UpdateBossHealth(Enemy);
+        }
+    }
+}
+
+/** 필드 구조에서는 빈 원정 UUID인 투사체만 제거한다. */
+void AFableGameMode::ClearRecoveryCombat()
+{
+    ClearEncounter();
+    for (TActorIterator<AFableProjectile> It(GetWorld()); It; ++It)
+    {
+        if (!It->GetExpeditionId().IsValid())
+        {
+            It->Destroy();
+        }
+    }
 }

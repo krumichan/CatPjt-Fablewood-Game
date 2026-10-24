@@ -1,6 +1,8 @@
 #include "FableCharacter.h"
 
 #include "FableEnemy.h"
+#include "FableAdventure.h"
+#include "FablePartyManager.h"
 #include "FableCombatFeedback.h"
 #include "FablePlayerState.h"
 #include "FableProjectile.h"
@@ -41,6 +43,35 @@ namespace FableCharacterTuning
     constexpr float ReviveProtectionDuration = 2.0f;
     const FLinearColor TunicColor(0.135f, 0.066f, 0.029f);
     const FLinearColor BladeColor(0.71f, 0.81f, 0.79f);
+}
+
+namespace
+{
+    /** 다른 원정의 전투 개체가 공격·부활 시야를 가로막지 않도록 제외한다. */
+    void IgnoreOtherExpeditions(const AActor* Source, FCollisionQueryParams& Params)
+    {
+        UWorld* World = Source ? Source->GetWorld() : nullptr;
+        if (!World)
+        {
+            return;
+        }
+
+        for (TActorIterator<AFableEnemy> It(World); It; ++It)
+        {
+            if (!FableAdventure::SameScope(Source, *It))
+            {
+                Params.AddIgnoredActor(*It);
+            }
+        }
+
+        for (TActorIterator<AFableCharacter> It(World); It; ++It)
+        {
+            if (*It != Source && !FableAdventure::SameScope(Source, *It))
+            {
+                Params.AddIgnoredActor(*It);
+            }
+        }
+    }
 }
 
 /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
@@ -715,6 +746,7 @@ void AFableCharacter::ApplySkillArea(float Damage, float Range, bool bFrontal, b
     // 직업·스킬·특성 빌드에 필요한 값 준비
     const FVector Origin = GetActorLocation();
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableAdvancedSkill), false, this);
+    IgnoreOtherExpeditions(this, Params);
 
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
@@ -730,7 +762,8 @@ void AFableCharacter::ApplySkillArea(float Damage, float Range, bool bFrontal, b
         const FVector Delta = Enemy->GetActorLocation() - Origin;
 
         // 지역·적·전투 진행 처리
-        if (!Enemy->IsAlive() || Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 180.0f)
+        if (!Enemy->IsAlive() || !FableAdventure::CanAffect(this, Enemy) ||
+            Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 180.0f)
         {
             continue;
         }
@@ -756,8 +789,8 @@ void AFableCharacter::ApplySkillArea(float Damage, float Range, bool bFrontal, b
         const float PreviousHealth = Enemy->GetHealth();
         Enemy->ReceiveHit(Damage, Controller);
         const int32 FrostRank = GetHeroClass() == EFableClass::Mage ? GetCombatTalentRank(EFableTalentPath::Second) : 0;
-        const bool bAppliedSlow =
-            bSlow && Enemy->IsAlive() && Enemy->ApplySlow(0.65f - 0.05f * FrostRank, 4.0f + 0.5f * FrostRank);
+        const bool bAppliedSlow = bSlow && Enemy->IsAlive() &&
+                                  Enemy->ApplySlow(0.65f - 0.05f * FrostRank, 4.0f + 0.5f * FrostRank, Controller);
 
         // 직업·스킬·특성 빌드 처리
         if (bAppliedSlow && FrostRank > 0 && Enemy->GetHealth() < PreviousHealth)
@@ -868,6 +901,7 @@ void AFableCharacter::PerformAttack(bool bSkill)
     const FVector Forward = GetActorForwardVector().GetSafeNormal2D();
     TSet<AFableEnemy*> HitEnemies;
     FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(FableMeleeVisibility), false, this);
+    IgnoreOtherExpeditions(this, TraceParams);
 
     // 직업·스킬·특성 빌드 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
@@ -875,7 +909,8 @@ void AFableCharacter::PerformAttack(bool bSkill)
         AFableEnemy* Enemy = *It;
 
         // 지역·적·전투 진행 처리
-        if (!IsValid(Enemy) || !Enemy->IsAlive() || HitEnemies.Contains(Enemy))
+        if (!IsValid(Enemy) || !Enemy->IsAlive() || !FableAdventure::CanAffect(this, Enemy) ||
+            HitEnemies.Contains(Enemy))
         {
             continue;
         }
@@ -941,6 +976,7 @@ void AFableCharacter::PerformRangedAttack(EFableClass HeroClass, bool bSkill, fl
     FVector Direction = FRotator(Pitch, GetActorRotation().Yaw, 0).Vector();
     float BestScore = -1.0f;
     FCollisionQueryParams AimParams(SCENE_QUERY_STAT(FableProjectileAim), false, this);
+    IgnoreOtherExpeditions(this, AimParams);
 
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
@@ -956,7 +992,7 @@ void AFableCharacter::PerformRangedAttack(EFableClass HeroClass, bool bSkill, fl
         AFableEnemy* Enemy = *It;
 
         // 지역·적·전투 진행 처리
-        if (!IsValid(Enemy) || !Enemy->IsAlive())
+        if (!IsValid(Enemy) || !Enemy->IsAlive() || !FableAdventure::CanAffect(this, Enemy))
         {
             continue;
         }
@@ -1249,6 +1285,7 @@ void AFableCharacter::ShareGuardianShield(int32 Rank)
     // 위치·방향·거리 계산에 필요한 값 준비
     const FVector Origin = GetActorLocation();
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableGuardianShare), false, this);
+    IgnoreOtherExpeditions(this, Params);
 
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
@@ -1264,7 +1301,10 @@ void AFableCharacter::ShareGuardianShield(int32 Rank)
         AFableCharacter* Ally = *It;
 
         // 현재 월드와 플레이어 참조 처리
+        const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
         if (Ally == this || !Ally->IsAlive() || !Ally->Controller || Ally->Controller == Controller ||
+            !FableAdventure::SameScope(this, Ally) || !Parties ||
+            !Parties->ArePartyMembers(GetPlayerState<AFablePlayerState>(), Ally->GetPlayerState<AFablePlayerState>()) ||
             !Ally->GetPlayerState<AFablePlayerState>())
         {
             continue;
@@ -1279,12 +1319,13 @@ void AFableCharacter::ShareGuardianShield(int32 Rank)
         }
 
         bool bSameRegion = false;
+        const auto Adventure = FableAdventure::For(this);
 
         // 지역·적·전투 진행 순회
         for (EFableRegion Region : {EFableRegion::Village, EFableRegion::RootRuins, EFableRegion::Moonwell})
         {
-            bSameRegion |=
-                FableRPG::IsInRegion(Region, Origin) && FableRPG::IsInRegion(Region, Ally->GetActorLocation());
+            bSameRegion |= Adventure && Adventure.IsInRegion(Region, Origin) &&
+                           Adventure.IsInRegion(Region, Ally->GetActorLocation());
         }
 
         // 지역·적·전투 진행 처리
@@ -1497,10 +1538,17 @@ bool AFableCharacter::RestoreResource(bool bMana, float Amount)
 }
 
 /** 권한과 생존 상태를 확인하고 보호막·방어력을 반영해 피해를 적용한다. */
-void AFableCharacter::ReceiveHit(float Damage)
+void AFableCharacter::ReceiveHit(float Damage, const AActor* Source)
 {
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !GetWorld() || !IsAlive() || !FMath::IsFinite(Damage) || Damage <= 0.0f)
+    {
+        return;
+    }
+
+    // private 전투의 출처 없는 피해와 다른 파티의 피해는 자원 변경 전에 거절한다.
+    const auto Adventure = FableAdventure::For(this);
+    if (!Adventure || (Source ? !FableAdventure::CanAffect(Source, this) : Adventure.ExpeditionId().IsValid()))
     {
         return;
     }
@@ -1633,12 +1681,21 @@ bool AFableCharacter::CanMaintainRevive(const AFableCharacter* Target) const
         return false;
     }
 
+    // 시전 중에도 파티와 원정이 같아야 하며 연결·원정 변경은 즉시 부활을 중단한다.
+    const auto Adventure = FableAdventure::For(this);
+    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
+    if (!Adventure || !FableAdventure::SameScope(this, Target) || !Parties ||
+        !Parties->ArePartyMembers(GetPlayerState<AFablePlayerState>(), Target->GetPlayerState<AFablePlayerState>()))
+    {
+        return false;
+    }
+
     bool bSameRegion = false;
 
     // 지역·적·전투 진행 순회
     for (const EFableRegion Region : {EFableRegion::Village, EFableRegion::RootRuins, EFableRegion::Moonwell})
     {
-        if (FableRPG::IsInRegion(Region, Origin) && FableRPG::IsInRegion(Region, Destination))
+        if (Adventure.IsInRegion(Region, Origin) && Adventure.IsInRegion(Region, Destination))
         {
             bSameRegion = true;
             break;
@@ -1653,6 +1710,7 @@ bool AFableCharacter::CanMaintainRevive(const AFableCharacter* Target) const
 
     // 생존 상태와 부활 진행에 필요한 값 준비
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableReviveVisibility), false, this);
+    IgnoreOtherExpeditions(this, Params);
     Params.AddIgnoredActor(Target);
     FHitResult Hit;
 
@@ -1980,6 +2038,9 @@ void AFableCharacter::SetCheckpoint(const FVector& Location, const FRotator& Rot
         UE_LOG(LogTemp, Warning, TEXT("%s의 이동 지점이 막혀 있어 기존 부활 지점을 유지합니다."), *GetName());
         return;
     }
+
+    // 귀환 직후 폐기되는 이전 원정 지형을 이동 기반으로 계속 참조하지 않는다.
+    SetBase(static_cast<FMovementBaseInterfaceData*>(nullptr));
 
     // 생존 상태와 부활 진행 처리
     CancelReviveInternal(TEXT("안전 지점 이동"));

@@ -1,4 +1,5 @@
 #include "FableEnemy.h"
+#include "FableAdventure.h"
 
 #include "FableCharacter.h"
 #include "FableEnemyBolt.h"
@@ -19,6 +20,35 @@
 #include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
+
+namespace
+{
+    /** 다른 원정의 개체가 적의 시야와 공격 판정을 가로막지 않게 한다. */
+    void IgnoreOtherExpeditions(const AActor* Source, FCollisionQueryParams& Params)
+    {
+        UWorld* World = Source ? Source->GetWorld() : nullptr;
+        if (!World)
+        {
+            return;
+        }
+
+        for (TActorIterator<AFableEnemy> It(World); It; ++It)
+        {
+            if (*It != Source && !FableAdventure::SameScope(Source, *It))
+            {
+                Params.AddIgnoredActor(*It);
+            }
+        }
+
+        for (TActorIterator<AFableCharacter> It(World); It; ++It)
+        {
+            if (!FableAdventure::SameScope(Source, *It))
+            {
+                Params.AddIgnoredActor(*It);
+            }
+        }
+    }
+}
 
 /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
 AFableEnemy::AFableEnemy()
@@ -189,6 +219,12 @@ void AFableEnemy::BeginPlay()
 {
     Super::BeginPlay();
 
+    // 필드와 private 원정 모두 실제 서버 개체마다 한 번만 UUID를 부여한다.
+    if (HasAuthority() && !SpawnId.IsValid())
+    {
+        SpawnId = FGuid::NewGuid();
+    }
+
     // 이 단계에서 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다.
     if (UMaterialInterface* Base = Body->GetMaterial(0))
     {
@@ -314,6 +350,8 @@ void AFableEnemy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 {
     // 복제 속성과 소유자별 수신 조건 처리
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFableEnemy, ExpeditionId);
+    DOREPLIFETIME(AFableEnemy, SpawnId);
     DOREPLIFETIME(AFableEnemy, Health);
     DOREPLIFETIME(AFableEnemy, MaxHealth);
     DOREPLIFETIME(AFableEnemy, State);
@@ -333,6 +371,30 @@ void AFableEnemy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
     DOREPLIFETIME(AFableEnemy, TotalBurnDamage);
 }
 
+/** 적을 생성한 원정을 최초 한 번 고정한다. */
+void AFableEnemy::BindExpedition(FGuid InExpeditionId)
+{
+    if (!HasAuthority() || bExpeditionBound)
+    {
+        return;
+    }
+
+    ExpeditionId = InExpeditionId;
+    bExpeditionBound = true;
+    if (!SpawnId.IsValid())
+    {
+        SpawnId = FGuid::NewGuid();
+    }
+    ForceNetUpdate();
+}
+
+/** 원정 복제 전이나 이미 사라진 원정은 어떤 지역으로도 대체하지 않는다. */
+bool AFableEnemy::IsInsideEncounter(const FVector& Location) const
+{
+    const auto Adventure = FableAdventure::For(this);
+    return Adventure && Adventure.IsInRegion(EncounterRegion, Location);
+}
+
 /** 공격 가능한 플레이어 중 적의 추적 대상을 선택한다. */
 void AFableEnemy::FindTarget()
 {
@@ -343,7 +405,7 @@ void AFableEnemy::FindTarget()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
-        if (!It->IsAlive() || !FableRPG::IsInRegion(EncounterRegion, It->GetActorLocation()))
+        if (!It->IsAlive() || !FableAdventure::CanAffect(this, *It) || !IsInsideEncounter(It->GetActorLocation()))
         {
             continue;
         }
@@ -390,11 +452,18 @@ float AFableEnemy::GetSlowMultiplier() const
 }
 
 /** 효과 조건을 확인하고 적의 둔화 배율과 만료 시각을 갱신한다. */
-bool AFableEnemy::ApplySlow(float Multiplier, float Duration)
+bool AFableEnemy::ApplySlow(float Multiplier, float Duration, AController* InstigatorController)
 {
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !IsAlive() || !GetWorld() || !FMath::IsFinite(Multiplier) || !FMath::IsFinite(Duration) ||
         Multiplier <= 0.0f || Multiplier >= 1.0f || Duration <= 0.0f)
+    {
+        return false;
+    }
+
+    // 둔화도 최종 적용점에서 원정 소유권을 검사한다.
+    if (!FableAdventure::For(this) ||
+        (InstigatorController ? !FableAdventure::CanAffect(InstigatorController, this) : ExpeditionId.IsValid()))
     {
         return false;
     }
@@ -435,6 +504,7 @@ void AFableEnemy::ClearBurn()
     BurnTicksRemaining = 0;
     BurnInstigator.Reset();
     BurnSourcePawn.Reset();
+    BurnExpeditionId.Invalidate();
 }
 
 /** 유효한 화상 피해의 출처·지속 시간·주기를 설정한다. */
@@ -445,8 +515,9 @@ bool AFableEnemy::ApplyBurn(float DamagePerTick, int32 TickCount, AController* I
 
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !GetWorld() || !IsAlive() || !IsValid(Source) || !Source->IsAlive() ||
-        !FableRPG::IsInRegion(EncounterRegion, Source->GetActorLocation()) || !FMath::IsFinite(DamagePerTick) ||
-        DamagePerTick <= 0.0f || DamagePerTick > 10000.0f || TickCount < 1 || TickCount > 3)
+        !FableAdventure::CanAffect(Source, this) || !IsInsideEncounter(Source->GetActorLocation()) ||
+        !FMath::IsFinite(DamagePerTick) || DamagePerTick <= 0.0f || DamagePerTick > 10000.0f || TickCount < 1 ||
+        TickCount > 3)
     {
         return false;
     }
@@ -465,6 +536,7 @@ bool AFableEnemy::ApplyBurn(float DamagePerTick, int32 TickCount, AController* I
     BurnEndServerTime = NextBurnServerTime + TickCount - 1.0f;
     BurnInstigator = InstigatorController;
     BurnSourcePawn = Source;
+    BurnExpeditionId = ExpeditionId;
     ForceNetUpdate();
 
     return true;
@@ -484,7 +556,8 @@ void AFableEnemy::TickBurn()
 
     // 지역·적·전투 진행 조건 검사
     if (!IsAlive() || !IsValid(Source) || !Source->IsAlive() || !IsValid(InstigatorController) ||
-        InstigatorController->GetPawn() != Source || !FableRPG::IsInRegion(EncounterRegion, Source->GetActorLocation()))
+        InstigatorController->GetPawn() != Source || BurnExpeditionId != ExpeditionId ||
+        !FableAdventure::CanAffect(Source, this) || !IsInsideEncounter(Source->GetActorLocation()))
     {
         ClearBurn();
         ForceNetUpdate();
@@ -555,7 +628,7 @@ void AFableEnemy::BeginAttack()
         {
             for (TActorIterator<AFableCharacter> It(GetWorld()); It && TelegraphLocations.Num() < 2; ++It)
             {
-                if (It->IsAlive() && FableRPG::IsInRegion(EncounterRegion, It->GetActorLocation()))
+                if (It->IsAlive() && FableAdventure::CanAffect(this, *It) && IsInsideEncounter(It->GetActorLocation()))
                 {
                     TelegraphLocations.Add(FVector(It->GetActorLocation().X, It->GetActorLocation().Y, 4));
                 }
@@ -850,7 +923,8 @@ void AFableEnemy::Tick(float DeltaSeconds)
     AFableCharacter* Victim = Target.Get();
 
     // 지역·적·전투 진행 조건 검사
-    if (!Victim || !Victim->IsAlive() || !FableRPG::IsInRegion(EncounterRegion, Victim->GetActorLocation()))
+    if (!Victim || !Victim->IsAlive() || !FableAdventure::CanAffect(this, Victim) ||
+        !IsInsideEncounter(Victim->GetActorLocation()))
     {
         SetState(EFableEnemyState::Idle);
         return;
@@ -868,6 +942,7 @@ void AFableEnemy::Tick(float DeltaSeconds)
                    ? 1100.0f
                    : (bBoss ? (bNextLine ? RootLineLength - 80.0f : BossStompRadius - 55.0f) : AttackRadius - 40.0f));
     FCollisionQueryParams SightParams(SCENE_QUERY_STAT(FableEnemySight), false, this);
+    IgnoreOtherExpeditions(this, SightParams);
     FHitResult SightHit;
     const bool bVisible = !bRanged ||
                           !GetWorld()->LineTraceSingleByChannel(
@@ -1060,11 +1135,12 @@ void AFableEnemy::ApplyAreaAttack()
         int32 Shots = 0;
         for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
         {
-            ++Shots;
+            Shots += It->GetExpeditionId() == ExpeditionId ? 1 : 0;
         }
         if (Shots < 12)
         {
             FActorSpawnParameters Params;
+            Params.Owner = this;
             Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
             if (AFableEnemyBolt* Shot = GetWorld()->SpawnActor<AFableEnemyBolt>(
                     GetActorLocation() + GetActorForwardVector() * 65, GetActorRotation(), Params))
@@ -1091,7 +1167,7 @@ void AFableEnemy::ApplyAreaAttack()
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
         // 지역·적·전투 진행 처리
-        if (!It->IsAlive() || !FableRPG::IsInRegion(EncounterRegion, It->GetActorLocation()))
+        if (!It->IsAlive() || !FableAdventure::CanAffect(this, *It) || !IsInsideEncounter(It->GetActorLocation()))
         {
             continue;
         }
@@ -1128,6 +1204,7 @@ void AFableEnemy::ApplyAreaAttack()
 
         // 지역·적·전투 진행에 필요한 값 준비
         FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(FableEnemyAttack), false, this);
+        IgnoreOtherExpeditions(this, TraceParams);
         FHitResult Obstruction;
         const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Obstruction, GetActorLocation(),
                                                                    It->GetActorLocation(), ECC_Visibility, TraceParams);
@@ -1135,7 +1212,7 @@ void AFableEnemy::ApplyAreaAttack()
         // 체력·마나·보호막·피해량 처리
         if (!bBlocked || Obstruction.GetActor() == *It)
         {
-            It->ReceiveHit(Damage);
+            It->ReceiveHit(Damage, this);
         }
     }
 }
@@ -1188,6 +1265,13 @@ void AFableEnemy::ReceiveHit(float Damage, AController* InstigatorController)
 {
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !IsAlive() || !FMath::IsFinite(Damage) || Damage <= 0)
+    {
+        return;
+    }
+
+    // 원거리·광역·화상 모두 같은 최종 판정을 거치고 출처 없는 private 피해는 거절한다.
+    if (!FableAdventure::For(this) ||
+        (InstigatorController ? !FableAdventure::CanAffect(InstigatorController, this) : ExpeditionId.IsValid()))
     {
         return;
     }

@@ -250,7 +250,7 @@ public:
     /** Only authoritative enemy/environment code may apply damage. */
 
     /** 권한과 생존 상태를 확인하고 보호막·방어력을 반영해 피해를 적용한다. */
-    void ReceiveHit(float Damage);
+    void ReceiveHit(float Damage, const AActor* Source = nullptr);
 
 protected:
     /** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
@@ -260,6 +260,8 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+    friend struct FFableExpeditionCombatTestAccess;
+
     UPROPERTY(VisibleAnywhere, Category = "Camera")
     TObjectPtr<USpringArmComponent> CameraBoom;
     UPROPERTY(VisibleAnywhere, Category = "Camera")

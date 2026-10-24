@@ -2,6 +2,7 @@
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -87,7 +88,7 @@ bool AFablePlayerState::CanRecordStoryAt(EFableRegion Region, const FVector& Loc
 
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const AFableCharacter* Hero = StoryHero(this);
-    const AFableGameState* Adventure = GetWorld()->GetGameState<AFableGameState>();
+    const auto Adventure = FableAdventure::For(this);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!Hero || !Hero->IsAlive() || (Adventure && Adventure->bPartyRecoveryPending))
@@ -97,9 +98,11 @@ bool AFablePlayerState::CanRecordStoryAt(EFableRegion Region, const FVector& Loc
 
     const FVector Position = Hero->GetActorLocation();
 
-    return FableRPG::IsInRegion(Region, Position) &&
-           FVector::DistSquared2D(Position, Location) <= FMath::Square(330.0f) &&
-           FMath::Abs(Position.Z - Location.Z) < 300.0f;
+    const auto View = FableAdventure::For(this);
+    const FVector Target = View.ToWorld(Region, Location);
+    return View && View.IsInRegion(Region, Position) &&
+           FVector::DistSquared2D(Position, Target) <= FMath::Square(330.0f) &&
+           FMath::Abs(Position.Z - Target.Z) < 300.0f;
 }
 
 /** 위치와 진행 조건이 맞는 이야기 오브젝트 상호작용을 기록한다. */
@@ -132,7 +135,7 @@ void AFablePlayerState::RecordStorySeal(int32 Index)
     }
     // Only a completed server encounter seal can be observed, including a personal reinspection.
 
-    const AFableGameState* Adventure = GetWorld()->GetGameState<AFableGameState>();
+    const auto Adventure = FableAdventure::For(this);
 
     // 지역·적·전투 진행 조건 검사
     if (!Adventure || Adventure->ActiveRegion != EFableRegion::Moonwell ||
@@ -284,11 +287,15 @@ FString AFablePlayerState::GetStoryRewardText() const
 }
 
 /** 이야기 목표의 위치 값을 반환한다. */
-bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel) const
+bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion) const
 {
     // 화면 표시와 사용자 안내 처리
     OutLocation = FableRPG::BoardLocation();
     OutLabel = TEXT("안내인 로완");
+    if (OutRegion)
+    {
+        *OutRegion = EFableRegion::Village;
+    }
 
     // 퀘스트와 이야기 진행 조건 검사
     if (!bProfileLoaded || StoryChapter < 0 || StoryChapter >= 5)
@@ -298,10 +305,15 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel) 
 
     // 지역·적·전투 진행에 필요한 값 준비
     const AFableCharacter* Hero = StoryHero(this);
+    const auto View = FableAdventure::For(this);
+    if (!View)
+    {
+        return false;
+    }
     const FVector Position = Hero ? Hero->GetActorLocation() : FableRPG::BoardLocation();
-    const EFableRegion Current = FableRPG::IsInRegion(EFableRegion::Moonwell, Position)    ? EFableRegion::Moonwell
-                                 : FableRPG::IsInRegion(EFableRegion::RootRuins, Position) ? EFableRegion::RootRuins
-                                                                                           : EFableRegion::Village;
+    const EFableRegion Current = View.IsInRegion(EFableRegion::Moonwell, Position)    ? EFableRegion::Moonwell
+                                 : View.IsInRegion(EFableRegion::RootRuins, Position) ? EFableRegion::RootRuins
+                                                                                      : EFableRegion::Village;
     EFableRegion Destination = EFableRegion::Village;
     const auto SeekEnemy = [&](EFableRegion Region)
     {
@@ -316,7 +328,8 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel) 
         {
             for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
             {
-                if (!It->IsAlive() || !FableRPG::IsInRegion(Region, It->GetActorLocation()))
+                if (!It->IsAlive() || !FableAdventure::SameScope(this, *It) ||
+                    !View.IsInRegion(Region, It->GetActorLocation()))
                 {
                     continue;
                 }
@@ -324,7 +337,7 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel) 
                 if (Distance < Nearest)
                 {
                     Nearest = Distance;
-                    OutLocation = It->GetActorLocation();
+                    OutLocation = View.ToCanonical(Region, It->GetActorLocation());
                 }
             }
         }
@@ -385,20 +398,28 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel) 
         }
     }
 
+    EFableRegion TargetRegion = Destination;
+
     // 지역·적·전투 진행 처리
     if (Current != Destination)
     {
         if (Current == EFableRegion::Village)
         {
+            TargetRegion = EFableRegion::Village;
             OutLocation = FableRPG::PortalLocation();
             OutLabel = FableRPG::RegionName(Destination) + TEXT(" 입장 차원문");
         }
         else
         {
+            TargetRegion = Current;
             OutLocation = FableRPG::RegionReturnPortal(Current);
             OutLabel = TEXT("마을 귀환 차원문");
         }
     }
 
+    if (OutRegion)
+    {
+        *OutRegion = TargetRegion;
+    }
     return true;
 }

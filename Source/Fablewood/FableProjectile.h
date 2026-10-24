@@ -21,6 +21,12 @@ public:
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFableProjectile();
 
+    /** 발사 순간 고정한 원정을 사용하며 시전자 재입장으로 바꾸지 않는다. */
+    FGuid GetExpeditionId() const
+    {
+        return ExpeditionId;
+    }
+
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
     virtual void Tick(float DeltaSeconds) override;
 
@@ -59,6 +65,11 @@ protected:
     virtual void BeginPlay() override;
 
 private:
+    friend struct FFableExpeditionCombatTestAccess;
+
+    UPROPERTY(Replicated)
+    FGuid ExpeditionId;
+
     UPROPERTY()
     TObjectPtr<USceneComponent> SceneRoot;
     UPROPERTY()

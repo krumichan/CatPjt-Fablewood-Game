@@ -10,6 +10,7 @@ class AFableEnemy;
 class AFableDungeonWorld;
 class AFableMoonwellWorld;
 class AFablePlayerState;
+class AFablePartyEncounter;
 
 /** 서버의 접속·파티 이동·던전·보스·복구 진행을 관리하는 게임 규칙. */
 UCLASS()
@@ -91,11 +92,14 @@ public:
     /** 파티 UUID와 준비 리비전으로 전원 입장을 서버에서 원자적으로 확정한다. */
     bool RequestStartExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision);
 
-    /** 현재 단일 원정의 불변 참가 증서를 반환한다. */
-    const FFableExpeditionTicket& GetActiveExpedition() const
-    {
-        return ActiveExpedition;
-    }
+    /** 실제 프로필의 참가 증서에 해당하는 원정을 찾는다. */
+    AFablePartyEncounter* GetExpeditionFor(const AFablePlayerState* Profile) const;
+
+    /** 불변 UUID가 일치하는 확정 원정을 찾는다. */
+    AFablePartyEncounter* FindExpedition(FGuid Id) const;
+
+    /** 현재 살아 있는 확정 원정의 목록을 반환한다. */
+    TArray<AFablePartyEncounter*> GetExpeditions() const;
 
     /** 명부와 실제 플레이어 binding이 같은 원정 참가자를 나타내는지 확인한다. */
     bool IsExpeditionParticipant(const AFablePlayerState* Profile) const;
@@ -112,12 +116,6 @@ private:
     /** 참가 증서의 모든 플레이어와 입장 조건을 다시 검사한다. */
     bool ValidateAdmission(const FFableExpeditionTicket& Ticket, TArray<APlayerController*>& OutPlayers) const;
 
-    /** 회복 효과 없이 전원 도착을 확인하고 실패하면 기존 위치로 되돌린다. */
-    bool MoveAdmissionParticipants(const FFableExpeditionTicket& Ticket, const TArray<APlayerController*>& Players);
-
-    /** 원정이 끝난 참가자 binding과 다음 시도의 준비 상태를 초기화한다. */
-    void FinishExpedition();
-
     /** 현재 연결이 차지한 파티 슬롯 값을 반환한다. */
     int32 GetConnectionSlot(AController* Player) const;
 
@@ -132,15 +130,6 @@ private:
 
     /** 현재 전투가 소유한 적과 진행 상태를 정리한다. */
     void ClearEncounter();
-
-    /** 던전의 현재 웨이브에 맞는 적 무리를 생성한다. */
-    void SpawnDungeonWave(int32 Wave);
-
-    /** 던전 보스를 생성하고 파티 전투 진행에 연결한다. */
-    void SpawnBoss();
-
-    /** 선택한 달샘 봉인에 대응하는 수호 적 무리를 생성한다. */
-    void SpawnMoonSealGroup(int32 SealIndex);
 
     /** 동료들의 생존·지역 상태를 확인해 파티 복구를 판단한다. */
     void CheckPartyState();
@@ -165,9 +154,6 @@ private:
 
     /** 연결된 모든 파티원이 선택 지역의 입장 조건을 만족하는지 확인한다. */
     bool AllPlayersRegionEligible(EFableRegion Region) const;
-
-    /** 던전 진행 중 여부를 확인한다. */
-    bool IsDungeonRunning() const;
 
     /** 요청자 생존 여부를 확인한다. */
     bool IsRequesterAlive(APlayerController* Requester) const;
@@ -201,6 +187,8 @@ private:
     bool bRetryAfterRecovery = false;
     double NextRecoveryAttemptTime = 0.0;
     double NextIndividualRescueTime = 0.0;
-    FFableExpeditionTicket ActiveExpedition;
-    bool bAdmissionPending = false;
+    UPROPERTY()
+    TMap<FGuid, TObjectPtr<AFablePartyEncounter>> Expeditions;
+
+    TSet<FGuid> PendingAdmissions;
 };

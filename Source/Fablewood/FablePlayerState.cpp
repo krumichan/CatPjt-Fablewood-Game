@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "FableGameMode.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/PlayerController.h"
@@ -1706,7 +1707,7 @@ void AFablePlayerState::RecordRegionKill(EFableRegion Region, bool bBoss, EFable
     const APlayerController* PC = Cast<APlayerController>(GetOwner());
 
     // 지역·적·전투 진행 조건 검사
-    if (!PC || !PC->GetPawn() || !FableRPG::IsInRegion(Region, PC->GetPawn()->GetActorLocation()))
+    if (!PC || !PC->GetPawn() || !FableAdventure::For(this).IsInRegion(Region, PC->GetPawn()->GetActorLocation()))
     {
         return;
     }
@@ -1775,7 +1776,7 @@ void AFablePlayerState::RecordKill(bool bBoss)
         return;
     }
 
-    const AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
+    const auto State = FableAdventure::For(this);
 
     // 지역·적·전투 진행 조건 검사
     if (!State)

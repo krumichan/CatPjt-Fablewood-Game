@@ -17,6 +17,12 @@ public:
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFableEnemyBolt();
 
+    /** 적 발사체도 발사 당시의 원정 식별자를 유지한다. */
+    FGuid GetExpeditionId() const
+    {
+        return ExpeditionId;
+    }
+
     // Damage is the final server-scaled value; this projectile never applies difficulty twice.
 
     /** 적 투사체의 발사 위치·방향·피해 정보를 초기화한다. */
@@ -45,6 +51,11 @@ protected:
     virtual void BeginPlay() override;
 
 private:
+    friend struct FFableExpeditionCombatTestAccess;
+
+    UPROPERTY(Replicated)
+    FGuid ExpeditionId;
+
     UPROPERTY()
     TObjectPtr<USceneComponent> SceneRoot;
     UPROPERTY()

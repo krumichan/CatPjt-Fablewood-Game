@@ -244,7 +244,7 @@ public:
     FString GetStoryRewardText() const;
 
     /** 이야기 목표의 위치 값을 반환한다. */
-    bool GetStoryTarget(FVector& OutLocation, FString& OutLabel) const;
+    bool GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion = nullptr) const;
 
     /** 퀘스트의 수락·진행·보상 수령을 현재 단계에 맞게 처리한다. */
     void InteractQuest();

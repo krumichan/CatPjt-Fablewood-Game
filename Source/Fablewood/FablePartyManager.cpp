@@ -2,6 +2,7 @@
 #include "FableCharacter.h"
 #include "FableGameState.h"
 #include "FableGameMode.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -293,12 +294,13 @@ bool AFablePartyManager::CanEditMembership(const AFablePlayerState* Profile) con
     }
 
     const AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
-    if (Mode && Mode->GetActiveExpedition().IsValid())
+    if (Mode &&
+        (Mode->IsPartyExpeditionActive(Profile ? Profile->PartyId : FGuid()) || Mode->IsExpeditionParticipant(Profile)))
     {
-        return Profile && !Mode->IsPartyExpeditionActive(Profile->PartyId) && !Mode->IsExpeditionParticipant(Profile);
+        return false;
     }
 
-    const AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
+    const auto State = FableAdventure::Field(GetWorld());
     return !State || (State->ActiveRegion == EFableRegion::Village && !State->bPartyRecoveryPending &&
                       !(State->AdventureStage == EFableAdventureStage::Forest && !State->bObjectiveComplete));
 }

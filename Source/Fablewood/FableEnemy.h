@@ -45,6 +45,21 @@ public:
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFableEnemy();
 
+    /** 서버가 최초 생성 시 고정한 원정 식별자를 반환한다. */
+    FGuid GetExpeditionId() const
+    {
+        return ExpeditionId;
+    }
+
+    /** 서버의 최초 원정 바인딩만 허용하고 이후 적 재사용을 막는다. */
+    void BindExpedition(FGuid InExpeditionId);
+
+    /** 재생성된 동명 적도 구별하는 서버 발급 개체 식별자다. */
+    FGuid GetSpawnId() const
+    {
+        return SpawnId;
+    }
+
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
     virtual void Tick(float DeltaSeconds) override;
 
@@ -64,7 +79,7 @@ public:
     /** Trusted server-only movement slow; bosses resist both strength and duration. */
 
     /** 효과 조건을 확인하고 적의 둔화 배율과 만료 시각을 갱신한다. */
-    bool ApplySlow(float Multiplier, float Duration);
+    bool ApplySlow(float Multiplier, float Duration, AController* InstigatorController = nullptr);
 
     /** 둔화 효과의 남은 시간 값을 반환한다. */
     float GetSlowTimeRemaining() const;
@@ -175,6 +190,18 @@ protected:
     virtual void BeginPlay() override;
 
 private:
+    friend struct FFableExpeditionCombatTestAccess;
+
+    /** 이동된 자기 원정의 실제 지역 안에 있는 좌표만 허용한다. */
+    bool IsInsideEncounter(const FVector& Location) const;
+
+    UPROPERTY(Replicated)
+    FGuid ExpeditionId;
+    UPROPERTY(Replicated)
+    FGuid SpawnId;
+    bool bExpeditionBound = false;
+    FGuid BurnExpeditionId;
+
     /** 공격 가능한 플레이어 중 적의 추적 대상을 선택한다. */
     void FindTarget();
 

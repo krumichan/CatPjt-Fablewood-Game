@@ -1,6 +1,7 @@
 ﻿#include "FableProjectile.h"
 
 #include "FableCharacter.h"
+#include "FableAdventure.h"
 #include "FableEnemy.h"
 #include "FablePlayerState.h"
 #include "CollisionQueryParams.h"
@@ -83,6 +84,14 @@ void AFableProjectile::InitializeShot(const FVector& Direction, float Damage, AC
         return;
     }
 
+    // 발사 후 시전자가 다른 원정에 들어가도 이 식별자는 변경하지 않는다.
+    const auto SourceAdventure = FableAdventure::For(DamageInstigator);
+    if (!SourceAdventure)
+    {
+        return;
+    }
+
+    ExpeditionId = SourceAdventure.ExpeditionId();
     bInitialized = true;
     bArrow = bUseArrow;
     BlastRadius = bArrow ? 0.0f : FMath::Clamp(ExplosionRadius, 0.0f, 360.0f);
@@ -127,6 +136,7 @@ void AFableProjectile::SetBurnPayload(float DamagePerTick, int32 TickCount)
 void AFableProjectile::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFableProjectile, ExpeditionId);
     DOREPLIFETIME(AFableProjectile, bArrow);
     DOREPLIFETIME(AFableProjectile, bExplosive);
     DOREPLIFETIME(AFableProjectile, bImpacted);
@@ -181,7 +191,9 @@ void AFableProjectile::Tick(float DeltaSeconds)
     {
         return;
     }
-    if (!IsValid(GetOwner()) || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds <= 0.0f)
+    if (!IsValid(GetOwner()) || !SourceController.IsValid() ||
+        !FableAdventure::CanAffect(this, SourceController.Get()) || !FMath::IsFinite(DeltaSeconds) ||
+        DeltaSeconds <= 0.0f)
     {
         Destroy();
         return;
@@ -200,6 +212,15 @@ void AFableProjectile::Tick(float DeltaSeconds)
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
         Params.AddIgnoredActor(*It);
+    }
+
+    // 다른 원정의 적은 피해뿐 아니라 충돌 흡수와 관통 소모에서도 제외한다.
+    for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
+    {
+        if (!FableAdventure::CanAffect(this, *It))
+        {
+            Params.AddIgnoredActor(*It);
+        }
     }
 
     // 지역·적·전투 진행 순회
@@ -234,8 +255,8 @@ void AFableProjectile::Tick(float DeltaSeconds)
         for (const FHitResult& Hit : PawnHits)
         {
             AFableEnemy* Enemy = Cast<AFableEnemy>(Hit.GetActor());
-            if (IsValid(Enemy) && Enemy->IsAlive() && !HitEnemies.Contains(TWeakObjectPtr<AFableEnemy>(Enemy)) &&
-                Hit.Time < ClosestTime)
+            if (IsValid(Enemy) && Enemy->IsAlive() && FableAdventure::CanAffect(this, Enemy) &&
+                !HitEnemies.Contains(TWeakObjectPtr<AFableEnemy>(Enemy)) && Hit.Time < ClosestTime)
             {
                 ClosestHit = Hit;
                 ClosestTime = Hit.Time;
@@ -291,7 +312,8 @@ void AFableProjectile::Tick(float DeltaSeconds)
 void AFableProjectile::ApplyEnemyHit(AFableEnemy* Enemy)
 {
     // 서버 권한과 실행 위치 조건 검사
-    if (!HasAuthority() || !IsValid(Enemy) || !Enemy->IsAlive() ||
+    if (!HasAuthority() || !IsValid(Enemy) || !Enemy->IsAlive() || !SourceController.IsValid() ||
+        !FableAdventure::CanAffect(this, Enemy) || !FableAdventure::CanAffect(this, SourceController.Get()) ||
         HitEnemies.Contains(TWeakObjectPtr<AFableEnemy>(Enemy)))
     {
         return;
@@ -343,10 +365,17 @@ void AFableProjectile::ResolveImpact(const FVector& ImpactLocation, AFableEnemy*
         }
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
+            if (!FableAdventure::CanAffect(this, *It))
+            {
+                Params.AddIgnoredActor(*It);
+            }
+        }
+        for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
+        {
             AFableEnemy* Enemy = *It;
 
             // 지역·적·전투 진행 처리
-            if (!IsValid(Enemy) || !Enemy->IsAlive() ||
+            if (!IsValid(Enemy) || !Enemy->IsAlive() || !FableAdventure::CanAffect(this, Enemy) ||
                 FVector::DistSquared(ImpactLocation, Enemy->GetActorLocation()) > FMath::Square(BlastRadius))
             {
                 continue;
