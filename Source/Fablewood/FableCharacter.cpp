@@ -43,8 +43,10 @@ namespace FableCharacterTuning
     const FLinearColor BladeColor(0.71f, 0.81f, 0.79f);
 }
 
+/** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
 AFableCharacter::AFableCharacter()
 {
+    // 직업·스킬·특성 빌드 처리
     PrimaryActorTick.bCanEverTick = true;
     SkillCastCounts.Init(0, 3);
     bReplicates = true;
@@ -66,6 +68,7 @@ AFableCharacter::AFableCharacter()
     GetCharacterMovement()->BrakingDecelerationWalking = 1900.0f;
     GetCharacterMovement()->MaxStepHeight = 45.0f;
 
+    // 추적 카메라 설정 처리
     CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     CameraBoom->SetupAttachment(GetRootComponent());
     CameraBoom->TargetArmLength = 460.0f;
@@ -83,6 +86,7 @@ AFableCharacter::AFableCharacter()
     FollowCamera->bUsePawnControlRotation = false;
     FollowCamera->FieldOfView = 78.0f;
 
+    // 캐릭터 부품과 관절 구성 처리
     VisualRoot = CreateDefaultSubobject<USceneComponent>(TEXT("VisualRoot"));
     VisualRoot->SetupAttachment(GetRootComponent());
     LeftArm = CreateDefaultSubobject<USceneComponent>(TEXT("LeftArm"));
@@ -112,25 +116,37 @@ AFableCharacter::AFableCharacter()
 
     static ConstructorHelpers::FObjectFinder<UMaterial> PaintMaterial(
         TEXT("/Game/Art/Materials/M_FablePaint.M_FablePaint"));
+
+    // 이 단계에서 생성 시 필요한 기본 설정과 초기 상태를 구성한다.
     if (!PaintMaterial.Succeeded())
     {
-        UE_LOG(LogTemp, Error, TEXT("캐릭터 재질이 없습니다: /Game/Art/Materials/M_FablePaint. 아트 가져오기 도구를 실행하세요."));
+        UE_LOG(LogTemp, Error,
+               TEXT("캐릭터 재질이 없습니다: /Game/Art/Materials/M_FablePaint. 아트 가져오기 도구를 실행하세요."));
     }
     // These meshes are authored at real size around their animation pivot.
     // No engine primitives, axis conversion or compensating component scale is used.
-    const auto Part = [this](const TCHAR* Name, USceneComponent* Parent, const TCHAR* Asset,
-        const FLinearColor& Color, float Roughness = 0.83f,
-        const FVector& Location = FVector::ZeroVector) -> UStaticMeshComponent*
+
+    // 컴포넌트·메시·재질 설정에 필요한 값 준비
+    const auto Part = [this](const TCHAR* Name, USceneComponent* Parent, const TCHAR* Asset, const FLinearColor& Color,
+                             float Roughness = 0.83f,
+                             const FVector& Location = FVector::ZeroVector) -> UStaticMeshComponent*
     {
+        // 컴포넌트·메시·재질 설정에 필요한 값 준비
         const FString MeshPath = FString::Printf(TEXT("/Game/Art/Meshes/SM_Hero%s.SM_Hero%s"), Asset, Asset);
         ConstructorHelpers::FObjectFinder<UStaticMesh> MeshAsset(*MeshPath);
         UStaticMeshComponent* Component = CreateDefaultSubobject<UStaticMeshComponent>(Name);
         Component->SetupAttachment(Parent);
         Component->SetStaticMesh(MeshAsset.Object);
+
+        // 이 단계에서 생성 시 필요한 기본 설정과 초기 상태를 구성한다.
         if (!MeshAsset.Succeeded())
         {
-            UE_LOG(LogTemp, Error, TEXT("캐릭터 부품이 없습니다: %s. Tools/Art/create_character_meshes.py 실행 후 OBJ를 가져오세요."), *MeshPath);
+            UE_LOG(LogTemp, Error,
+                   TEXT("캐릭터 부품이 없습니다: %s. Tools/Art/create_character_meshes.py 실행 후 OBJ를 가져오세요."),
+                   *MeshPath);
         }
+
+        // 컴포넌트·메시·재질 설정 처리
         Component->SetMaterial(0, PaintMaterial.Object);
         Component->SetRelativeLocation(Location);
         Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -138,6 +154,7 @@ AFableCharacter::AFableCharacter()
         VisualParts.Add(Component);
         PartColors.Add(Color);
         PartRoughness.Add(Roughness);
+
         return Component;
     };
 
@@ -167,6 +184,7 @@ AFableCharacter::AFableCharacter()
     Part(TEXT("CapeEdging"), Cape, TEXT("CapeBorder"), FLinearColor(0.38f, 0.29f, 0.12f));
     Part(TEXT("ShoulderMantle"), VisualRoot, TEXT("Mantle"), Teal);
 
+    // 캐릭터 부품과 관절 구성 처리
     Part(TEXT("LeftSleeve"), LeftArm, TEXT("Sleeve"), Ivory);
     Part(TEXT("RightSleeve"), RightArm, TEXT("Sleeve"), Ivory);
     Part(TEXT("LeftRolledCuff"), LeftArm, TEXT("SleeveCuff"), Ivory * 1.05f);
@@ -193,15 +211,19 @@ AFableCharacter::AFableCharacter()
     SwordParts.Add(Part(TEXT("SwordHilt"), RightForearm, TEXT("SwordHilt"), Brass, 0.35f));
     SwordBlade = Part(TEXT("SwordBlade"), RightForearm, TEXT("SwordBlade"), FableCharacterTuning::BladeColor, 0.26f);
     SwordParts.Add(SwordBlade);
-    SwordParts.Add(Part(TEXT("SwordFuller"), RightForearm, TEXT("SwordFuller"), FLinearColor(0.24f, 0.32f, 0.32f), 0.42f));
+    SwordParts.Add(
+        Part(TEXT("SwordFuller"), RightForearm, TEXT("SwordFuller"), FLinearColor(0.24f, 0.32f, 0.32f), 0.42f));
 
     // Functional class markers reuse built-in meshes while art remains out of scope.
+
+    // 컴포넌트·메시·재질 설정에 필요한 값 준비
     static ConstructorHelpers::FObjectFinder<UStaticMesh> MarkerCylinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> MarkerSphere(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
     const auto Marker = [this](const TCHAR* Name, USceneComponent* Parent, UStaticMesh* MarkerMesh,
-        const FVector& Location, const FVector& Scale, const FLinearColor& Color,
-        const FRotator& Rotation = FRotator::ZeroRotator) -> UStaticMeshComponent*
+                               const FVector& Location, const FVector& Scale, const FLinearColor& Color,
+                               const FRotator& Rotation = FRotator::ZeroRotator) -> UStaticMeshComponent*
     {
+        // 컴포넌트·메시·재질 설정에 필요한 값 준비
         UStaticMeshComponent* Component = CreateDefaultSubobject<UStaticMeshComponent>(Name);
         Component->SetupAttachment(Parent);
         Component->SetStaticMesh(MarkerMesh);
@@ -215,31 +237,33 @@ AFableCharacter::AFableCharacter()
         VisualParts.Add(Component);
         PartColors.Add(Color);
         PartRoughness.Add(0.75f);
+
         return Component;
     };
-    StaffParts.Add(Marker(TEXT("MageStaff"), RightForearm, MarkerCylinder.Object,
-        FVector(4, 0, -20), FVector(0.045f, 0.045f, 1.30f), Leather));
-    StaffParts.Add(Marker(TEXT("MageFocus"), RightForearm, MarkerSphere.Object,
-        FVector(4, 0, 48), FVector(0.16f), FLinearColor(0.06f, 0.40f, 0.75f)));
+    StaffParts.Add(Marker(TEXT("MageStaff"), RightForearm, MarkerCylinder.Object, FVector(4, 0, -20),
+                          FVector(0.045f, 0.045f, 1.30f), Leather));
+    StaffParts.Add(Marker(TEXT("MageFocus"), RightForearm, MarkerSphere.Object, FVector(4, 0, 48), FVector(0.16f),
+                          FLinearColor(0.06f, 0.40f, 0.75f)));
     BowRoot = CreateDefaultSubobject<USceneComponent>(TEXT("BowPivot"));
     BowRoot->SetupAttachment(LeftForearm);
     BowRoot->SetRelativeLocation(FVector(1, 0, -28));
-    const FVector BowPoints[] = {
-        FVector(-4, 0, 36), FVector(2, 0, 26), FVector(6, 0, 12), FVector(7, 0, 0),
-        FVector(6, 0, -12), FVector(2, 0, -26), FVector(-4, 0, -36)
-    };
+    const FVector BowPoints[] = {FVector(-4, 0, 36), FVector(2, 0, 26),  FVector(6, 0, 12),  FVector(7, 0, 0),
+                                 FVector(6, 0, -12), FVector(2, 0, -26), FVector(-4, 0, -36)};
+
+    // 위치·방향·거리 계산 순회
     for (int32 Index = 0; Index < 6; ++Index)
     {
         const FVector Segment = BowPoints[Index + 1] - BowPoints[Index];
         const FString Name = FString::Printf(TEXT("BowLimb%d"), Index);
-        BowParts.Add(Marker(*Name, BowRoot, MarkerCylinder.Object,
-            (BowPoints[Index + 1] + BowPoints[Index]) * 0.5f,
-            FVector(0.028f, 0.028f, Segment.Size() / 100.0f), Seams,
-            FRotationMatrix::MakeFromZ(Segment).Rotator()));
+        BowParts.Add(Marker(*Name, BowRoot, MarkerCylinder.Object, (BowPoints[Index + 1] + BowPoints[Index]) * 0.5f,
+                            FVector(0.028f, 0.028f, Segment.Size() / 100.0f), Seams,
+                            FRotationMatrix::MakeFromZ(Segment).Rotator()));
     }
-    BowParts.Add(Marker(TEXT("BowString"), BowRoot, MarkerCylinder.Object,
-        FVector(-4, 0, 0), FVector(0.006f, 0.006f, 0.72f), Ivory));
 
+    BowParts.Add(Marker(TEXT("BowString"), BowRoot, MarkerCylinder.Object, FVector(-4, 0, 0),
+                        FVector(0.006f, 0.006f, 0.72f), Ivory));
+
+    // 직업·스킬·특성 빌드 순회
     for (int32 Index = 0; Index < 8; ++Index)
     {
         const FString Name = FString::Printf(TEXT("SkillPetal%d"), Index);
@@ -250,14 +274,17 @@ AFableCharacter::AFableCharacter()
     }
 }
 
-
+/** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
 void AFableCharacter::BeginPlay()
 {
+    // 체력·마나·보호막·피해량 처리
     Super::BeginPlay();
     BaseMaxHealth = MaxHealth;
     FString ValidationRole;
-    bLegacyRecovery = FParse::Value(FCommandLine::Get(), TEXT("FableValidationRole="), ValidationRole)
-        || FParse::Param(FCommandLine::Get(), TEXT("FableArtReview"));
+    bLegacyRecovery = FParse::Value(FCommandLine::Get(), TEXT("FableValidationRole="), ValidationRole) ||
+                      FParse::Param(FCommandLine::Get(), TEXT("FableArtReview"));
+
+    // 서버 권한과 실행 위치 처리
     if (HasAuthority())
     {
         SynchronizeStats();
@@ -265,6 +292,8 @@ void AFableCharacter::BeginPlay()
         SafeSpawnLocation = GetActorLocation();
         SafeSpawnRotation = GetActorRotation();
     }
+
+    // 서버 권한과 실행 위치 처리
     if (GetNetMode() != NM_DedicatedServer)
     {
         for (int32 Index = 0; Index < VisualParts.Num(); ++Index)
@@ -273,9 +302,22 @@ void AFableCharacter::BeginPlay()
             {
                 Instance->SetVectorParameterValue(TEXT("Color"), PartColors[Index]);
                 Instance->SetScalarParameterValue(TEXT("Roughness"), PartRoughness[Index]);
-                if (VisualParts[Index] == Torso) { TorsoMaterial = Instance; }
-                if (VisualParts[Index] == SwordBlade) { BladeMaterial = Instance; }
+
+                // 이 단계에서 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다.
+                if (VisualParts[Index] == Torso)
+                {
+                    TorsoMaterial = Instance;
+                }
+
+                // 이 단계에서 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다.
+                if (VisualParts[Index] == SwordBlade)
+                {
+                    BladeMaterial = Instance;
+                }
+
                 const FName PartName = VisualParts[Index]->GetFName();
+
+                // 이 단계에서 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다.
                 if (VisualParts[Index] == Cape || PartName == TEXT("ShoulderMantle") || PartName == TEXT("WaistCloth"))
                 {
                     ClassClothMaterials.Add(Instance);
@@ -283,19 +325,27 @@ void AFableCharacter::BeginPlay()
             }
         }
     }
+
+    // 체력·마나·보호막·피해량 처리
     ApplyClassAppearance();
     OnRep_Health();
 }
 
+/** 월드 이탈 시 등록한 이벤트와 진행 중인 작업을 정리한다. */
 void AFableCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    if (HasAuthority()) { CancelReviveInternal(TEXT("동료 연결 종료")); }
+    if (HasAuthority())
+    {
+        CancelReviveInternal(TEXT("동료 연결 종료"));
+    }
     GetWorldTimerManager().ClearTimer(RespawnTimer);
     Super::EndPlay(EndPlayReason);
 }
 
+/** 서버 상태를 전달할 복제 속성과 수신 조건을 등록한다. */
 void AFableCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
+    // 복제 속성과 소유자별 수신 조건 처리
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFableCharacter, Health);
     DOREPLIFETIME(AFableCharacter, MaxHealth);
@@ -328,6 +378,7 @@ void AFableCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
     DOREPLIFETIME_CONDITION(AFableCharacter, NextDodgeServerTime, COND_OwnerOnly);
 }
 
+/** 캐릭터의 이동·시점·전투 입력을 동작에 연결한다. */
 void AFableCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
     Super::SetupPlayerInputComponent(PlayerInputComponent);
@@ -345,6 +396,7 @@ void AFableCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComp
     PlayerInputComponent->BindAction(TEXT("Dodge"), IE_Pressed, this, &AFableCharacter::RequestDodge);
 }
 
+/** 앞뒤 이동 입력을 캐릭터의 이동 방향에 반영한다. */
 void AFableCharacter::MoveForward(float Value)
 {
     if (IsAlive() && Controller && FMath::IsFinite(Value))
@@ -354,6 +406,7 @@ void AFableCharacter::MoveForward(float Value)
     }
 }
 
+/** 좌우 이동 입력을 캐릭터의 이동 방향에 반영한다. */
 void AFableCharacter::MoveRight(float Value)
 {
     if (IsAlive() && Controller && FMath::IsFinite(Value))
@@ -363,97 +416,261 @@ void AFableCharacter::MoveRight(float Value)
     }
 }
 
+/** 수평 시점 회전 입력을 반영한다. */
 void AFableCharacter::Turn(float Value)
 {
-    if (FMath::IsFinite(Value)) { AddControllerYawInput(FMath::Clamp(Value, -20.0f, 20.0f)); }
+    if (FMath::IsFinite(Value))
+    {
+        AddControllerYawInput(FMath::Clamp(Value, -20.0f, 20.0f));
+    }
 }
 
+/** 수직 시점 회전 입력을 반영한다. */
 void AFableCharacter::LookUp(float Value)
 {
-    if (FMath::IsFinite(Value)) { AddControllerPitchInput(FMath::Clamp(Value, -20.0f, 20.0f)); }
+    if (FMath::IsFinite(Value))
+    {
+        AddControllerPitchInput(FMath::Clamp(Value, -20.0f, 20.0f));
+    }
 }
 
+/** 현재 행동 조건을 확인하고 점프를 시작한다. */
 void AFableCharacter::StartJump()
 {
-    if (!IsAlive() || (Controller && Controller->IsMoveInputIgnored())) { return; }
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (!IsAlive() || (Controller && Controller->IsMoveInputIgnored()))
+    {
+        return;
+    }
+
     CancelRevive();
-    if (!bDodging) { Jump(); }
+
+    // 이 단계에서 현재 행동 조건을 확인하고 점프를 시작한다.
+    if (!bDodging)
+    {
+        Jump();
+    }
 }
 
-void AFableCharacter::FinishJump() { StopJumping(); }
-void AFableCharacter::RequestAttack() { RequestAction(0); }
-void AFableCharacter::RequestSkill() { RequestActiveSkill(0); }
-void AFableCharacter::RequestSecondSkill() { RequestActiveSkill(1); }
-void AFableCharacter::RequestThirdSkill() { RequestActiveSkill(2); }
+/** 점프 입력의 유지 상태를 해제한다. */
+void AFableCharacter::FinishJump()
+{
+    StopJumping();
+}
+
+/** 기본 공격 요청의 조건을 확인하고 해당 동작을 진행한다. */
+void AFableCharacter::RequestAttack()
+{
+    RequestAction(0);
+}
+
+/** 스킬 요청의 조건을 확인하고 해당 동작을 진행한다. */
+void AFableCharacter::RequestSkill()
+{
+    RequestActiveSkill(0);
+}
+
+/** 두 번째 스킬 요청의 조건을 확인하고 해당 동작을 진행한다. */
+void AFableCharacter::RequestSecondSkill()
+{
+    RequestActiveSkill(1);
+}
+
+/** 세 번째 스킬 요청의 조건을 확인하고 해당 동작을 진행한다. */
+void AFableCharacter::RequestThirdSkill()
+{
+    RequestActiveSkill(2);
+}
+
+/** 사용형 스킬 요청의 조건을 확인하고 해당 동작을 진행한다. */
 void AFableCharacter::RequestActiveSkill(int32 Slot)
 {
-    if (Slot >= 0 && Slot <= 2) RequestAction(Slot == 0 ? 1 : uint8(Slot + 2));
+    if (Slot >= 0 && Slot <= 2)
+    {
+        RequestAction(Slot == 0 ? 1 : uint8(Slot + 2));
+    }
 }
-void AFableCharacter::RequestDodge() { RequestAction(2); }
 
+/** 회피 요청의 조건을 확인하고 해당 동작을 진행한다. */
+void AFableCharacter::RequestDodge()
+{
+    RequestAction(2);
+}
+
+/** 동작 요청의 조건을 확인하고 해당 동작을 진행한다. */
 void AFableCharacter::RequestAction(uint8 Action)
 {
-    if (!IsLocallyControlled() || !IsAlive() || !GetWorld() || (Controller && Controller->IsMoveInputIgnored())) { return; }
-    if (ReviveTarget) { CancelRevive(); }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!IsLocallyControlled() || !IsAlive() || !GetWorld() || (Controller && Controller->IsMoveInputIgnored()))
+    {
+        return;
+    }
+
+    // 생존 상태와 부활 진행 처리
+    if (ReviveTarget)
+    {
+        CancelRevive();
+    }
+
     const float Now = GetWorld()->GetTimeSeconds();
-    if (Now < NextLocalRequestTime) { return; }
+
+    // HTTP 요청·응답과 연결 상태 조건 검사
+    if (Now < NextLocalRequestTime)
+    {
+        return;
+    }
+
     NextLocalRequestTime = Now + 0.06f;
+
+    // 위치·방향·거리 계산 처리
     if (Action != 2 && Controller && FMath::IsFinite(Controller->GetControlRotation().Yaw))
     {
         // Turn the local presentation toward the camera; the server derives the same facing.
         SetActorRotation(FRotator(0.0f, Controller->GetControlRotation().Yaw, 0.0f));
     }
+
     ServerRequestAction(Action);
 }
 
+/** 전투 동작 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFableCharacter::ServerRequestAction_Implementation(uint8 Action)
 {
-    if (const AFablePlayerState* BackendState=GetPlayerState<AFablePlayerState>(); BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady()) return;
-    if (!HasAuthority() || !Controller || !IsAlive() || Action > 4 || !GetWorld()) { return; }
-    // An attack/dodge attempt ends the channel even when that action is cooling down.
-    CancelReviveInternal(TEXT("전투 행동"));
-    const float Now = GetWorld()->GetTimeSeconds();
-    if (!FMath::IsFinite(Now) || Now - LastRequestServerTime < 0.05f) { return; }
-    LastRequestServerTime = Now;
-    if (bDodging) { return; }
-    if (Action == 2)
+    // 서버 권한과 실행 위치 조건 검사
+    if (const AFablePlayerState* BackendState = GetPlayerState<AFablePlayerState>();
+        BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())
     {
-        if (Now >= NextDodgeServerTime && GetCharacterMovement()->IsMovingOnGround()) { PerformDodge(); }
         return;
     }
-    if (Now < ActionLockEndServerTime) { return; }
-    if (Action == 0 && Now >= NextAttackServerTime) { PerformAttack(false); }
-    if (Action == 1 || Action == 3 || Action == 4) { PerformActiveSkill(Action == 1 ? 0 : int32(Action) - 2); }
+    if (!HasAuthority() || !Controller || !IsAlive() || Action > 4 || !GetWorld())
+    {
+        return;
+    }
+    // An attack/dodge attempt ends the channel even when that action is cooling down.
+
+    // 생존 상태와 부활 진행 처리
+    CancelReviveInternal(TEXT("전투 행동"));
+    const float Now = GetWorld()->GetTimeSeconds();
+
+    // HTTP 요청·응답과 연결 상태 조건 검사
+    if (!FMath::IsFinite(Now) || Now - LastRequestServerTime < 0.05f)
+    {
+        return;
+    }
+
+    LastRequestServerTime = Now;
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (bDodging)
+    {
+        return;
+    }
+
+    // 이동 입력과 속도 제한 처리
+    if (Action == 2)
+    {
+        if (Now >= NextDodgeServerTime && GetCharacterMovement()->IsMovingOnGround())
+        {
+            PerformDodge();
+        }
+        return;
+    }
+
+    // 서버 시각과 재사용 대기시간 조건 검사
+    if (Now < ActionLockEndServerTime)
+    {
+        return;
+    }
+
+    // 서버 시각과 재사용 대기시간 처리
+    if (Action == 0 && Now >= NextAttackServerTime)
+    {
+        PerformAttack(false);
+    }
+
+    // 직업·스킬·특성 빌드 처리
+    if (Action == 1 || Action == 3 || Action == 4)
+    {
+        PerformActiveSkill(Action == 1 ? 0 : int32(Action) - 2);
+    }
 }
 
+/** 스킬 사용 조건을 검사하고 비용·대기시간·직업별 효과를 적용한다. */
 void AFableCharacter::PerformActiveSkill(int32 Slot)
 {
     AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
-    if (!HasAuthority() || !GetWorld() || !IsAlive() || !State || !State->bProfileLoaded || Slot < 0 || Slot > 2) return;
-    if (State->IsBackendEnabled() && !State->IsBackendReady()) return;
+
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !IsAlive() || !State || !State->bProfileLoaded || Slot < 0 || Slot > 2)
+    {
+        return;
+    }
+    if (State->IsBackendEnabled() && !State->IsBackendReady())
+    {
+        return;
+    }
+
     SynchronizeStats();
-    if (!State->IsSkillUnlocked(Slot)) { State->SetNotice(TEXT("아직 잠긴 스킬입니다. 로완에게 전직 조건을 확인하세요.")); return; }
-    if (GetSkillCooldownRemaining(Slot) > 0.0f) { State->SetNotice(TEXT("스킬을 다시 사용할 때까지 기다리세요.")); return; }
+
+    // 직업·스킬·특성 빌드 조건 검사
+    if (!State->IsSkillUnlocked(Slot))
+    {
+        State->SetNotice(TEXT("아직 잠긴 스킬입니다. 로완에게 전직 조건을 확인하세요."));
+        return;
+    }
+    if (GetSkillCooldownRemaining(Slot) > 0.0f)
+    {
+        State->SetNotice(TEXT("스킬을 다시 사용할 때까지 기다리세요."));
+        return;
+    }
+
     const float Cost = GetSkillManaCost(Slot);
-    if (Mana < Cost) { State->SetNotice(TEXT("마나가 부족합니다. 회복을 기다리거나 M으로 물약을 사용하세요.")); return; }
-    if (Slot == 0) { PerformAttack(true); return; }
+
+    // 체력·마나·보호막·피해량 조건 검사
+    if (Mana < Cost)
+    {
+        State->SetNotice(TEXT("마나가 부족합니다. 회복을 기다리거나 M으로 물약을 사용하세요."));
+        return;
+    }
+    if (Slot == 0)
+    {
+        PerformAttack(true);
+        return;
+    }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const FFableTrialCastContext TrialContext = State->CreateTrialCastContext(Slot);
     Mana = FMath::Max(0.0f, Mana - Cost);
     const float Now = GetWorld()->GetTimeSeconds();
     CombatBuildEndServerTime = Now + 5.0f;
     (Slot == 1 ? NextSecondSkillServerTime : NextThirdSkillServerTime) = Now + GetSkillCooldownDuration(Slot);
     ActionLockEndServerTime = Now + 0.55f;
-    if (SkillCastCounts.IsValidIndex(Slot)) ++SkillCastCounts[Slot];
+
+    // 직업·스킬·특성 빌드 처리
+    if (SkillCastCounts.IsValidIndex(Slot))
+    {
+        ++SkillCastCounts[Slot];
+    }
+
+    // 위치·방향·거리 계산 처리
     if (Controller && FMath::IsFinite(Controller->GetControlRotation().Yaw))
+    {
         SetActorRotation(FRotator(0, Controller->GetControlRotation().Yaw, 0));
+    }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const EFableClass Class = GetHeroClass();
     const int32 Rank = FMath::Clamp(State->GetSkillRank(Slot), 1, 3);
     const float Power = State->GetAttackPower() * (1.0f + 0.15f * (Rank - 1));
+
+    // 서버 권한과 실행 위치 처리
     if (Slot == 2 && Class != EFableClass::Archer)
     {
         ShieldAmount = GetSkillShieldCapacity(Slot);
         ShieldEndServerTime = Now + GetSkillShieldDuration(Slot);
-        if (Class == EFableClass::Warrior) ShareGuardianShield(GetCombatTalentRank(EFableTalentPath::Second));
+        if (Class == EFableClass::Warrior)
+        {
+            ShareGuardianShield(GetCombatTalentRank(EFableTalentPath::Second));
+        }
         MulticastCombatCue(7);
     }
     else if (Class == EFableClass::Mage)
@@ -464,8 +681,11 @@ void AFableCharacter::PerformActiveSkill(int32 Slot)
     else if (Class == EFableClass::Warrior)
     {
         const FVector Direction = GetActorForwardVector().GetSafeNormal2D();
-        LaunchCharacter(Direction * 950.0f + FVector(0,0,65), true, true);
-        if (!IsLocallyControlled()) ClientConfirmSkillMove(FVector_NetQuantizeNormal(Direction), 950.0f);
+        LaunchCharacter(Direction * 950.0f + FVector(0, 0, 65), true, true);
+        if (!IsLocallyControlled())
+        {
+            ClientConfirmSkillMove(FVector_NetQuantizeNormal(Direction), 950.0f);
+        }
         ApplySkillArea(Power * GetSkillDamageMultiplier(Slot), GetSkillRange(Slot), true, false, TrialContext);
         MulticastCombatCue(6);
     }
@@ -476,68 +696,146 @@ void AFableCharacter::PerformActiveSkill(int32 Slot)
         {
             const FVector Direction = -GetActorForwardVector().GetSafeNormal2D();
             const float RetreatSpeed = 720.0f + 90.0f * GetCombatTalentRank(EFableTalentPath::Second);
-            LaunchCharacter(Direction * RetreatSpeed + FVector(0,0,65), true, true);
-            if (!IsLocallyControlled()) ClientConfirmSkillMove(FVector_NetQuantizeNormal(Direction), RetreatSpeed);
+            LaunchCharacter(Direction * RetreatSpeed + FVector(0, 0, 65), true, true);
+            if (!IsLocallyControlled())
+            {
+                ClientConfirmSkillMove(FVector_NetQuantizeNormal(Direction), RetreatSpeed);
+            }
         }
         MulticastCombatCue(Slot == 2 ? 8 : 6);
     }
+
     ForceNetUpdate();
 }
 
-void AFableCharacter::ApplySkillArea(float Damage, float Range, bool bFrontal, bool bSlow, const FFableTrialCastContext& TrialContext)
+/** 스킬 범위 안의 유효한 적에게 피해와 부가 효과를 적용한다. */
+void AFableCharacter::ApplySkillArea(float Damage, float Range, bool bFrontal, bool bSlow,
+                                     const FFableTrialCastContext& TrialContext)
 {
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const FVector Origin = GetActorLocation();
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableAdvancedSkill), false, this);
-    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It) Params.AddIgnoredActor(*It);
+
+    // 현재 월드와 플레이어 참조 순회
+    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
+    {
+        Params.AddIgnoredActor(*It);
+    }
+
+    // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 지역·적·전투 진행에 필요한 값 준비
         AFableEnemy* Enemy = *It;
         const FVector Delta = Enemy->GetActorLocation() - Origin;
-        if (!Enemy->IsAlive() || Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 180.0f) continue;
-        if (bFrontal && !Delta.IsNearlyZero() && FVector::DotProduct(Delta.GetSafeNormal2D(), GetActorForwardVector()) < 0.4f) continue;
+
+        // 지역·적·전투 진행 처리
+        if (!Enemy->IsAlive() || Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 180.0f)
+        {
+            continue;
+        }
+
+        // 위치·방향·거리 계산 처리
+        if (bFrontal && !Delta.IsNearlyZero() &&
+            FVector::DotProduct(Delta.GetSafeNormal2D(), GetActorForwardVector()) < 0.4f)
+        {
+            continue;
+        }
+
         FHitResult Hit;
-        if (GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0,0,24), Enemy->GetActorLocation(), ECC_Visibility, Params) && Hit.GetActor() != Enemy) continue;
+
+        // 지역·적·전투 진행 처리
+        if (GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0, 0, 24), Enemy->GetActorLocation(),
+                                                 ECC_Visibility, Params) &&
+            Hit.GetActor() != Enemy)
+        {
+            continue;
+        }
+
+        // 직업·스킬·특성 빌드에 필요한 값 준비
         const float PreviousHealth = Enemy->GetHealth();
         Enemy->ReceiveHit(Damage, Controller);
         const int32 FrostRank = GetHeroClass() == EFableClass::Mage ? GetCombatTalentRank(EFableTalentPath::Second) : 0;
-        const bool bAppliedSlow = bSlow && Enemy->IsAlive()
-            && Enemy->ApplySlow(0.65f - 0.05f * FrostRank, 4.0f + 0.5f * FrostRank);
-        if (bAppliedSlow && FrostRank > 0 && Enemy->GetHealth() < PreviousHealth) ++TalentSlowHits;
+        const bool bAppliedSlow =
+            bSlow && Enemy->IsAlive() && Enemy->ApplySlow(0.65f - 0.05f * FrostRank, 4.0f + 0.5f * FrostRank);
+
+        // 직업·스킬·특성 빌드 처리
+        if (bAppliedSlow && FrostRank > 0 && Enemy->GetHealth() < PreviousHealth)
+        {
+            ++TalentSlowHits;
+        }
+
+        // 직업·스킬·특성 빌드 처리
         if (Enemy->GetHealth() < PreviousHealth)
+        {
             if (AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>())
+            {
                 Profile->RecordTrialSkillHit(TrialContext, bAppliedSlow);
+            }
+        }
     }
 }
 
+/** 서버가 전달한 확인 스킬 이동 결과를 소유 클라이언트에 반영한다. */
 void AFableCharacter::ClientConfirmSkillMove_Implementation(FVector_NetQuantizeNormal Direction, float Speed)
 {
     if (!HasAuthority() && IsLocallyControlled() && IsAlive() && FMath::IsFinite(Speed))
-        LaunchCharacter(FVector(Direction).GetSafeNormal2D() * FMath::Clamp(Speed, 0.0f, 950.0f) + FVector(0,0,65), true, true);
+    {
+        LaunchCharacter(FVector(Direction).GetSafeNormal2D() * FMath::Clamp(Speed, 0.0f, 950.0f) + FVector(0, 0, 65),
+                        true, true);
+    }
 }
 
+/** 기본 공격의 사용 조건과 직업에 맞는 타격을 처리한다. */
 void AFableCharacter::PerformAttack(bool bSkill)
 {
-    if (const AFablePlayerState* BackendState=GetPlayerState<AFablePlayerState>(); BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady()) return;
-    if (!HasAuthority() || !GetWorld() || !IsAlive()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (const AFablePlayerState* BackendState = GetPlayerState<AFablePlayerState>();
+        BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())
+    {
+        return;
+    }
+    if (!HasAuthority() || !GetWorld() || !IsAlive())
+    {
+        return;
+    }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const EFableClass HeroClass = GetHeroClass();
     const float ManaCost = bSkill ? GetSkillManaCost() : 0.0f;
-    if (Mana < ManaCost) { return; }
+
+    // 체력·마나·보호막·피해량 조건 검사
+    if (Mana < ManaCost)
+    {
+        return;
+    }
+
     Mana = FMath::Max(0.0f, Mana - ManaCost);
+
+    // 위치·방향·거리 계산 처리
     if (Controller && FMath::IsFinite(Controller->GetControlRotation().Yaw))
     {
         SetActorRotation(FRotator(0.0f, Controller->GetControlRotation().Yaw, 0.0f));
     }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
-    const FFableTrialCastContext TrialContext = bSkill && State ? State->CreateTrialCastContext(0) : FFableTrialCastContext();
+    const FFableTrialCastContext TrialContext =
+        bSkill && State ? State->CreateTrialCastContext(0) : FFableTrialCastContext();
     const float RawPower = State ? State->GetAttackPower() : 24.0f;
     const float RankScale = bSkill && State ? 1.0f + 0.15f * (FMath::Clamp(State->GetSkillRank(0), 1, 3) - 1) : 1.0f;
     const float AttackPower = (FMath::IsFinite(RawPower) ? FMath::Clamp(RawPower, 1.0f, 10000.0f) : 24.0f) * RankScale;
     const float Now = GetWorld()->GetTimeSeconds();
     CombatBuildEndServerTime = Now + 5.0f;
+
+    // 직업·스킬·특성 빌드 처리
     if (bSkill)
     {
         NextSkillServerTime = Now + GetSkillCooldownDuration(0);
-        if (SkillCastCounts.IsValidIndex(0)) ++SkillCastCounts[0];
+        if (SkillCastCounts.IsValidIndex(0))
+        {
+            ++SkillCastCounts[0];
+        }
         ActionLockEndServerTime = Now + 0.55f;
         MulticastCombatCue(3);
     }
@@ -545,12 +843,15 @@ void AFableCharacter::PerformAttack(bool bSkill)
     {
         ComboIndex = Now - LastAttackServerTime > 1.4f ? 0 : (ComboIndex + 1) % 3;
         LastAttackServerTime = Now;
-        const float Cooldown = HeroClass == EFableClass::Mage ? 0.72f
-            : (HeroClass == EFableClass::Archer ? 0.58f : FableCharacterTuning::AttackCooldown);
+        const float Cooldown = HeroClass == EFableClass::Mage
+                                   ? 0.72f
+                                   : (HeroClass == EFableClass::Archer ? 0.58f : FableCharacterTuning::AttackCooldown);
         NextAttackServerTime = Now + Cooldown;
         ActionLockEndServerTime = Now + 0.30f;
         MulticastCombatCue(ComboIndex);
     }
+
+    // 직업·스킬·특성 빌드 조건 검사
     if (HeroClass != EFableClass::Warrior)
     {
         PerformRangedAttack(HeroClass, bSkill, AttackPower, 0, TrialContext);
@@ -558,36 +859,79 @@ void AFableCharacter::PerformAttack(bool bSkill)
         return;
     }
 
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const float Range = bSkill ? GetSkillRange(0) : FableCharacterTuning::MeleeRange;
     // A starter sword still deals exactly 24 / 24 / 34, or 42 for the radial skill.
-    const float Damage = AttackPower * (bSkill ? GetSkillDamageMultiplier(0) : (ComboIndex == 2 ? 34.0f / 24.0f : 1.0f));
+    const float Damage =
+        AttackPower * (bSkill ? GetSkillDamageMultiplier(0) : (ComboIndex == 2 ? 34.0f / 24.0f : 1.0f));
     const FVector Origin = GetActorLocation();
     const FVector Forward = GetActorForwardVector().GetSafeNormal2D();
     TSet<AFableEnemy*> HitEnemies;
     FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(FableMeleeVisibility), false, this);
+
+    // 직업·스킬·특성 빌드 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
         AFableEnemy* Enemy = *It;
-        if (!IsValid(Enemy) || !Enemy->IsAlive() || HitEnemies.Contains(Enemy)) { continue; }
+
+        // 지역·적·전투 진행 처리
+        if (!IsValid(Enemy) || !Enemy->IsAlive() || HitEnemies.Contains(Enemy))
+        {
+            continue;
+        }
+
         const FVector Delta = Enemy->GetActorLocation() - Origin;
-        if (Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 170.0f) { continue; }
-        if (!bSkill && !Delta.IsNearlyZero() && FVector::DotProduct(Forward, Delta.GetSafeNormal2D()) < 0.25f) { continue; }
+
+        // 이 단계에서 기본 공격의 사용 조건과 직업에 맞는 타격을 처리한다.
+        if (Delta.SizeSquared2D() > FMath::Square(Range) || FMath::Abs(Delta.Z) > 170.0f)
+        {
+            continue;
+        }
+
+        // 직업·스킬·특성 빌드 처리
+        if (!bSkill && !Delta.IsNearlyZero() && FVector::DotProduct(Forward, Delta.GetSafeNormal2D()) < 0.25f)
+        {
+            continue;
+        }
+
+        // 지역·적·전투 진행에 필요한 값 준비
         FHitResult Obstruction;
         const FVector EyeHeight(0.0f, 0.0f, 24.0f);
-        const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Obstruction,
-            Origin + EyeHeight, Enemy->GetActorLocation() + EyeHeight, ECC_Visibility, TraceParams);
-        if (bBlocked && Obstruction.GetActor() != Enemy) { continue; }
+        const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+            Obstruction, Origin + EyeHeight, Enemy->GetActorLocation() + EyeHeight, ECC_Visibility, TraceParams);
+
+        // 지역·적·전투 진행 처리
+        if (bBlocked && Obstruction.GetActor() != Enemy)
+        {
+            continue;
+        }
+
+        // 지역·적·전투 진행 처리
         HitEnemies.Add(Enemy);
         const float PreviousHealth = Enemy->GetHealth();
         Enemy->ReceiveHit(Damage, Controller);
-        if (State && Enemy->GetHealth() < PreviousHealth) State->RecordTrialSkillHit(TrialContext);
+
+        // 직업·스킬·특성 빌드 처리
+        if (State && Enemy->GetHealth() < PreviousHealth)
+        {
+            State->RecordTrialSkillHit(TrialContext);
+        }
     }
+
     ForceNetUpdate();
 }
 
-void AFableCharacter::PerformRangedAttack(EFableClass HeroClass, bool bSkill, float AttackPower, int32 SkillSlot, const FFableTrialCastContext& TrialContext)
+/** 현재 직업의 원거리 공격 투사체를 생성한다. */
+void AFableCharacter::PerformRangedAttack(EFableClass HeroClass, bool bSkill, float AttackPower, int32 SkillSlot,
+                                          const FFableTrialCastContext& TrialContext)
 {
-    if (!HasAuthority() || !GetWorld() || !Controller) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !Controller)
+    {
+        return;
+    }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const bool bUseArrow = HeroClass == EFableClass::Archer;
     const float MaximumRange = bUseArrow ? 2200.0f + 200.0f * GetCombatTalentRank(EFableTalentPath::First) : 1800.0f;
     // Start inside our own capsule (ignored by the shot), not beyond a nearby wall.
@@ -597,53 +941,102 @@ void AFableCharacter::PerformRangedAttack(EFableClass HeroClass, bool bSkill, fl
     FVector Direction = FRotator(Pitch, GetActorRotation().Yaw, 0).Vector();
     float BestScore = -1.0f;
     FCollisionQueryParams AimParams(SCENE_QUERY_STAT(FableProjectileAim), false, this);
-    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It) { AimParams.AddIgnoredActor(*It); }
+
+    // 현재 월드와 플레이어 참조 순회
+    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
+    {
+        AimParams.AddIgnoredActor(*It);
+    }
     // A small server-side aim assist makes the third-person camera usable.
     // It supplies direction only; the moving projectile still performs every hit test.
+
+    // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
         AFableEnemy* Enemy = *It;
-        if (!IsValid(Enemy) || !Enemy->IsAlive()) { continue; }
+
+        // 지역·적·전투 진행 처리
+        if (!IsValid(Enemy) || !Enemy->IsAlive())
+        {
+            continue;
+        }
+
+        // 지역·적·전투 진행에 필요한 값 준비
         const FVector ToTarget = Enemy->GetActorLocation() - Origin;
         const float Distance = ToTarget.Size();
-        if (Distance > MaximumRange || Distance < KINDA_SMALL_NUMBER) { continue; }
+
+        // 위치·방향·거리 계산 처리
+        if (Distance > MaximumRange || Distance < KINDA_SMALL_NUMBER)
+        {
+            continue;
+        }
+
+        // 위치·방향·거리 계산에 필요한 값 준비
         const FVector Candidate = ToTarget / Distance;
         const float Alignment = FVector::DotProduct(FRotator(Pitch, GetActorRotation().Yaw, 0).Vector(), Candidate);
-        if (Alignment < 0.94f) { continue; }
+
+        // 이 단계에서 현재 직업의 원거리 공격 투사체를 생성한다.
+        if (Alignment < 0.94f)
+        {
+            continue;
+        }
+
         const float Score = Alignment - Distance * 0.00002f;
-        if (Score <= BestScore) { continue; }
+
+        // 이 단계에서 현재 직업의 원거리 공격 투사체를 생성한다.
+        if (Score <= BestScore)
+        {
+            continue;
+        }
+
+        // 지역·적·전투 진행에 필요한 값 준비
         FHitResult Obstruction;
-        const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Obstruction, Origin,
-            Enemy->GetActorLocation(), ECC_Visibility, AimParams);
+        const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Obstruction, Origin, Enemy->GetActorLocation(),
+                                                                   ECC_Visibility, AimParams);
+
+        // 지역·적·전투 진행 처리
         if (!bBlocked || Obstruction.GetActor() == Enemy)
         {
             Direction = Candidate;
             BestScore = Score;
         }
     }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const int32 Count = bUseArrow && bSkill && SkillSlot != 1 ? 3 : 1;
     const float ShotDamage = AttackPower * (bSkill ? GetSkillDamageMultiplier(SkillSlot) : 1.0f);
+
+    // 직업·스킬·특성 빌드 순회
     for (int32 Index = 0; Index < Count; ++Index)
     {
-        const float SpreadAngle = bUseArrow && SkillSlot == 0 ? 11.0f - 3.0f * GetCombatTalentRank(EFableTalentPath::First) : 11.0f;
+        // 직업·스킬·특성 빌드에 필요한 값 준비
+        const float SpreadAngle =
+            bUseArrow && SkillSlot == 0 ? 11.0f - 3.0f * GetCombatTalentRank(EFableTalentPath::First) : 11.0f;
         const float Spread = Count == 3 ? (Index - 1) * SpreadAngle : 0.0f;
         const FVector ShotDirection = Direction.RotateAngleAxis(Spread, FVector::UpVector);
         const FTransform SpawnTransform(ShotDirection.Rotation(), Origin);
-        AFableProjectile* Shot = GetWorld()->SpawnActorDeferred<AFableProjectile>(
-            AFableProjectile::StaticClass(), SpawnTransform, this, this, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+        AFableProjectile* Shot =
+            GetWorld()->SpawnActorDeferred<AFableProjectile>(AFableProjectile::StaticClass(), SpawnTransform, this,
+                                                             this, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+
+        // 직업·스킬·특성 빌드 처리
         if (Shot)
         {
             Shot->InitializeShot(ShotDirection, ShotDamage, Controller, bUseArrow,
-                !bUseArrow && bSkill ? GetSkillRange(0) : 0.0f, bUseArrow ? 2100.0f : 1250.0f, MaximumRange,
-                bUseArrow && bSkill && SkillSlot == 1 ? 2 : 0);
+                                 !bUseArrow && bSkill ? GetSkillRange(0) : 0.0f, bUseArrow ? 2100.0f : 1250.0f,
+                                 MaximumRange, bUseArrow && bSkill && SkillSlot == 1 ? 2 : 0);
             Shot->SetTrialCastContext(TrialContext);
             const int32 FireRank = !bUseArrow && bSkill ? GetCombatTalentRank(EFableTalentPath::First) : 0;
-            if (FireRank > 0) Shot->SetBurnPayload(AttackPower * 0.10f * FireRank, 3);
+            if (FireRank > 0)
+            {
+                Shot->SetBurnPayload(AttackPower * 0.10f * FireRank, 3);
+            }
             Shot->FinishSpawning(SpawnTransform);
         }
     }
 }
 
+/** 현재 직업 값을 반환한다. */
 EFableClass AFableCharacter::GetHeroClass() const
 {
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
@@ -654,133 +1047,274 @@ EFableClass AFableCharacter::GetHeroClass() const
     return EFableClass::Warrior;
 }
 
+/** 선택한 스킬의 마나 소모량 값을 반환한다. */
 float AFableCharacter::GetSkillManaCost(int32 Slot) const
 {
-    if (Slot < 0 || Slot > 2 || GetHeroClass() == EFableClass::Warrior) return 0.0f;
-    if (GetHeroClass() == EFableClass::Mage) return Slot == 0 ? 30.0f : 35.0f;
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Slot < 0 || Slot > 2 || GetHeroClass() == EFableClass::Warrior)
+    {
+        return 0.0f;
+    }
+    if (GetHeroClass() == EFableClass::Mage)
+    {
+        return Slot == 0 ? 30.0f : 35.0f;
+    }
+
     return Slot == 1 ? 30.0f : 25.0f;
 }
+
+/** 선택한 스킬의 전체 재사용 대기시간 값을 반환한다. */
 float AFableCharacter::GetSkillCooldownDuration(int32 Slot) const
 {
-    if (Slot < 0 || Slot > 2) return 0.0f;
-    if (Slot == 0) return GetHeroClass() == EFableClass::Mage ? 6.0f : FableCharacterTuning::SkillCooldown;
+    // 직업·스킬·특성 빌드 조건 검사
+    if (Slot < 0 || Slot > 2)
+    {
+        return 0.0f;
+    }
+    if (Slot == 0)
+    {
+        return GetHeroClass() == EFableClass::Mage ? 6.0f : FableCharacterTuning::SkillCooldown;
+    }
     if (Slot == 1)
-        return GetHeroClass() == EFableClass::Mage ? 9.0f
-            : (GetHeroClass() == EFableClass::Warrior ? 8.0f - GetCombatTalentRank(EFableTalentPath::First) : 8.0f);
+    {
+        return GetHeroClass() == EFableClass::Mage
+                   ? 9.0f
+                   : (GetHeroClass() == EFableClass::Warrior ? 8.0f - GetCombatTalentRank(EFableTalentPath::First)
+                                                             : 8.0f);
+    }
+
     return GetHeroClass() == EFableClass::Archer ? 10.0f - GetCombatTalentRank(EFableTalentPath::Second) : 14.0f;
 }
+
+/** 남은 보호막 흡수량 값을 반환한다. */
 float AFableCharacter::GetShieldAmount() const
 {
     return IsAlive() && GetShieldTimeRemaining() > 0 ? ShieldAmount : 0.0f;
 }
+
+/** 보호막의 남은 지속 시간 값을 반환한다. */
 float AFableCharacter::GetShieldTimeRemaining() const
 {
     return ShieldAmount > 0 ? FMath::Max(0.0f, ShieldEndServerTime - GetSynchronizedServerTime()) : 0.0f;
 }
+
+/** 해당 스킬의 시전 횟수 값을 반환한다. */
 int32 AFableCharacter::GetSkillCastCount(int32 Slot) const
 {
     return SkillCastCounts.IsValidIndex(Slot) ? SkillCastCounts[Slot] : 0;
 }
 
+/** 전투에 적용할 특성 단계 값을 반환한다. */
 int32 AFableCharacter::GetCombatTalentRank(EFableTalentPath Path) const
 {
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     return Profile ? FMath::Clamp(Profile->GetTalentRank(Path), 0, 2) : 0;
 }
 
+/** 현재 상태에서 허용되는 이동 속도 값을 반환한다. */
 float AFableCharacter::GetMovementSpeedLimit() const
 {
     const int32 Rank = GetHeroClass() == EFableClass::Archer ? GetCombatTalentRank(EFableTalentPath::Second) : 0;
     return FableCharacterTuning::WalkSpeed * (1.0f + 0.05f * Rank);
 }
 
+/** 회피의 전체 재사용 대기시간 값을 반환한다. */
 float AFableCharacter::GetDodgeCooldownDuration() const
 {
     const int32 Rank = GetHeroClass() == EFableClass::Archer ? GetCombatTalentRank(EFableTalentPath::Second) : 0;
     return FableCharacterTuning::DodgeCooldown - 0.15f * Rank;
 }
 
+/** 스킬 피해 배율 값을 반환한다. */
 float AFableCharacter::GetSkillDamageMultiplier(int32 Slot) const
 {
-    if (Slot < 0 || Slot > 2) return 0.0f;
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Slot < 0 || Slot > 2)
+    {
+        return 0.0f;
+    }
+
     const int32 First = GetCombatTalentRank(EFableTalentPath::First);
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (GetHeroClass() == EFableClass::Warrior)
+    {
         return Slot == 0 ? (42.0f / 24.0f) * (1.0f + 0.10f * First)
-            : (Slot == 1 ? 1.45f * (1.0f + 0.15f * First) : 0.0f);
+                         : (Slot == 1 ? 1.45f * (1.0f + 0.15f * First) : 0.0f);
+    }
     if (GetHeroClass() == EFableClass::Mage)
+    {
         return Slot == 0 ? 1.75f * (1.0f + 0.10f * First) : (Slot == 1 ? 0.9f : 0.0f);
+    }
+
     return Slot == 1 ? 1.6f * (1.0f + 0.15f * First) : 0.85f;
 }
 
+/** 스킬 적용 거리 값을 반환한다. */
 float AFableCharacter::GetSkillRange(int32 Slot) const
 {
-    if (Slot < 0 || Slot > 2) return 0.0f;
-    if (GetHeroClass() == EFableClass::Archer) return 2200.0f + 200.0f * GetCombatTalentRank(EFableTalentPath::First);
+    // 직업·스킬·특성 빌드 조건 검사
+    if (Slot < 0 || Slot > 2)
+    {
+        return 0.0f;
+    }
+    if (GetHeroClass() == EFableClass::Archer)
+    {
+        return 2200.0f + 200.0f * GetCombatTalentRank(EFableTalentPath::First);
+    }
     if (GetHeroClass() == EFableClass::Mage)
+    {
         return Slot == 0 ? 300.0f + 30.0f * GetCombatTalentRank(EFableTalentPath::First) : (Slot == 1 ? 650.0f : 0.0f);
+    }
+
     return Slot == 0 ? FableCharacterTuning::SkillRange + 40.0f * GetCombatTalentRank(EFableTalentPath::Second)
-        : (Slot == 1 ? 550.0f + 50.0f * GetCombatTalentRank(EFableTalentPath::First) : 0.0f);
+                     : (Slot == 1 ? 550.0f + 50.0f * GetCombatTalentRank(EFableTalentPath::First) : 0.0f);
 }
 
+/** 스킬 보호막의 최대 흡수량 값을 반환한다. */
 float AFableCharacter::GetSkillShieldCapacity(int32 Slot) const
 {
-    if (Slot != 2 || GetHeroClass() == EFableClass::Archer) return 0.0f;
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Slot != 2 || GetHeroClass() == EFableClass::Archer)
+    {
+        return 0.0f;
+    }
+
+    // 직업·스킬·특성 빌드에 필요한 값 준비
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const int32 Rank = Profile ? FMath::Clamp(Profile->GetSkillRank(Slot), 1, 3) : 1;
     const int32 Guardian = GetCombatTalentRank(EFableTalentPath::Second);
+
     return GetHeroClass() == EFableClass::Mage ? 60.0f + 20.0f * (Rank - 1) + 15.0f * Guardian
-        : 45.0f + 15.0f * (Rank - 1) + 20.0f * Guardian;
+                                               : 45.0f + 15.0f * (Rank - 1) + 20.0f * Guardian;
 }
 
+/** 스킬 보호막의 지속 시간 값을 반환한다. */
 float AFableCharacter::GetSkillShieldDuration(int32 Slot) const
 {
-    return Slot == 2 && GetHeroClass() != EFableClass::Archer ? 6.0f + GetCombatTalentRank(EFableTalentPath::Second) : 0.0f;
+    return Slot == 2 && GetHeroClass() != EFableClass::Archer ? 6.0f + GetCombatTalentRank(EFableTalentPath::Second)
+                                                              : 0.0f;
 }
 
+/** 빌드 변경 후 남은 대기시간 값을 반환한다. */
 float AFableCharacter::GetBuildChangeCooldownRemaining() const
 {
-    if (!GetWorld()) return 0.0f;
+    // 현재 월드와 플레이어 참조 조건 검사
+    if (!GetWorld())
+    {
+        return 0.0f;
+    }
+
+    // 서버 시각과 재사용 대기시간에 필요한 값 준비
     float Remaining = FMath::Max(0.0f, CombatBuildEndServerTime - GetSynchronizedServerTime());
     Remaining = FMath::Max(Remaining, GetAttackCooldownRemaining());
-    for (int32 Slot = 0; Slot < 3; ++Slot) Remaining = FMath::Max(Remaining, GetSkillCooldownRemaining(Slot));
+
+    // 직업·스킬·특성 빌드 순회
+    for (int32 Slot = 0; Slot < 3; ++Slot)
+    {
+        Remaining = FMath::Max(Remaining, GetSkillCooldownRemaining(Slot));
+    }
+
+    // 체력·마나·보호막·피해량 처리
     Remaining = FMath::Max(Remaining, GetDodgeCooldownRemaining());
     Remaining = FMath::Max(Remaining, GetShieldTimeRemaining());
+
     return Remaining;
 }
 
+/** 서버에서 실제로 적용한 특성 화상 피해를 누적한다. */
 void AFableCharacter::RecordTalentBurnDamage(float ActualDamage)
 {
-    if (!HasAuthority() || !IsAlive() || !GetWorld() || !FMath::IsFinite(ActualDamage) || ActualDamage <= 0.0f) return;
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !IsAlive() || !GetWorld() || !FMath::IsFinite(ActualDamage) || ActualDamage <= 0.0f)
+    {
+        return;
+    }
+
+    // 직업·스킬·특성 빌드 처리
     TalentBurnDamageDealt += ActualDamage;
     CombatBuildEndServerTime = GetWorld()->GetTimeSeconds() + 5.0f;
     ForceNetUpdate();
 }
 
+/** 수호 특성의 조건을 만족하는 주변 동료에게 보호막을 나눈다. */
 void AFableCharacter::ShareGuardianShield(int32 Rank)
 {
-    if (!HasAuthority() || !GetWorld() || !IsAlive() || !Controller || Rank <= 0) return;
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !IsAlive() || !Controller || Rank <= 0)
+    {
+        return;
+    }
+
+    // 위치·방향·거리 계산에 필요한 값 준비
     const FVector Origin = GetActorLocation();
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableGuardianShare), false, this);
-    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It) Params.AddIgnoredActor(*It);
+
+    // 현재 월드와 플레이어 참조 순회
+    for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
+    {
+        Params.AddIgnoredActor(*It);
+    }
+
     const float Now = GetWorld()->GetTimeSeconds();
+
+    // 지역·적·전투 진행 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
         AFableCharacter* Ally = *It;
-        if (Ally == this || !Ally->IsAlive() || !Ally->Controller || Ally->Controller == Controller
-            || !Ally->GetPlayerState<AFablePlayerState>()) continue;
+
+        // 현재 월드와 플레이어 참조 처리
+        if (Ally == this || !Ally->IsAlive() || !Ally->Controller || Ally->Controller == Controller ||
+            !Ally->GetPlayerState<AFablePlayerState>())
+        {
+            continue;
+        }
+
         const FVector Delta = Ally->GetActorLocation() - Origin;
-        if (Delta.SizeSquared2D() > FMath::Square(600.0f) || FMath::Abs(Delta.Z) > 180.0f) continue;
+
+        // 이 단계에서 수호 특성의 조건을 만족하는 주변 동료에게 보호막을 나눈다.
+        if (Delta.SizeSquared2D() > FMath::Square(600.0f) || FMath::Abs(Delta.Z) > 180.0f)
+        {
+            continue;
+        }
+
         bool bSameRegion = false;
-        for (EFableRegion Region : { EFableRegion::Village, EFableRegion::RootRuins, EFableRegion::Moonwell })
-            bSameRegion |= FableRPG::IsInRegion(Region, Origin) && FableRPG::IsInRegion(Region, Ally->GetActorLocation());
-        if (!bSameRegion) continue;
+
+        // 지역·적·전투 진행 순회
+        for (EFableRegion Region : {EFableRegion::Village, EFableRegion::RootRuins, EFableRegion::Moonwell})
+        {
+            bSameRegion |=
+                FableRPG::IsInRegion(Region, Origin) && FableRPG::IsInRegion(Region, Ally->GetActorLocation());
+        }
+
+        // 지역·적·전투 진행 처리
+        if (!bSameRegion)
+        {
+            continue;
+        }
+
         FHitResult Hit;
-        if (GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0,0,24), Ally->GetActorLocation() + FVector(0,0,24), ECC_Visibility, Params)) continue;
+
+        // 현재 월드와 플레이어 참조 처리
+        if (GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0, 0, 24),
+                                                 Ally->GetActorLocation() + FVector(0, 0, 24), ECC_Visibility, Params))
+        {
+            continue;
+        }
+
+        // 체력·마나·보호막·피해량에 필요한 값 준비
         const float OldAmount = Ally->GetShieldAmount();
         const float OldEnd = OldAmount > 0.0f ? Ally->ShieldEndServerTime : 0.0f;
         const float NewAmount = FMath::Max(OldAmount, 20.0f * Rank);
         const float NewEnd = FMath::Max(OldEnd, Now + 6.0f + Rank);
-        if (FMath::IsNearlyEqual(OldAmount, NewAmount) && FMath::IsNearlyEqual(OldEnd, NewEnd)) continue;
+
+        // 이 단계에서 수호 특성의 조건을 만족하는 주변 동료에게 보호막을 나눈다.
+        if (FMath::IsNearlyEqual(OldAmount, NewAmount) && FMath::IsNearlyEqual(OldEnd, NewEnd))
+        {
+            continue;
+        }
+
+        // 체력·마나·보호막·피해량 처리
         Ally->ShieldAmount = NewAmount;
         Ally->ShieldEndServerTime = NewEnd;
         Ally->CombatBuildEndServerTime = FMath::Max(Ally->CombatBuildEndServerTime, Now + 5.0f);
@@ -790,69 +1324,132 @@ void AFableCharacter::ShareGuardianShield(int32 Rank)
     }
 }
 
+/** 직업·장비·빌드 변경을 캐릭터의 전투 수치에 반영한다. */
 void AFableCharacter::SynchronizeStats()
 {
-    if (!HasAuthority()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    // 체력·마나·보호막·피해량 처리
     if (LastServerClass != GetHeroClass())
     {
-        LastServerClass = GetHeroClass(); ShieldAmount = ShieldEndServerTime = 0.0f;
+        LastServerClass = GetHeroClass();
+        ShieldAmount = ShieldEndServerTime = 0.0f;
         // Keep slot cooldowns when switching class so swapping cannot reset skills.
         ForceNetUpdate();
     }
+
+    // 체력·마나·보호막·피해량에 필요한 값 준비
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
     const float Bonus = State ? State->GetMaxHealthBonus() : 0.0f;
     const float DesiredMaximum = BaseMaxHealth + (FMath::IsFinite(Bonus) ? FMath::Clamp(Bonus, 0.0f, 10000.0f) : 0.0f);
+
+    // 체력·마나·보호막·피해량 처리
     if (!FMath::IsNearlyEqual(MaxHealth, DesiredMaximum))
     {
         const float PreviousMaximum = MaxHealth;
         MaxHealth = DesiredMaximum;
         // Preserve health percentage so equipping armor repeatedly cannot generate healing.
-        Health = IsAlive() ? FMath::Clamp((Health / FMath::Max(1.0f, PreviousMaximum)) * MaxHealth, 0.0f, MaxHealth) : 0.0f;
+        Health =
+            IsAlive() ? FMath::Clamp((Health / FMath::Max(1.0f, PreviousMaximum)) * MaxHealth, 0.0f, MaxHealth) : 0.0f;
         ForceNetUpdate();
     }
 }
 
+/** 현재 직업에 맞는 무기와 의상 표시를 갱신한다. */
 void AFableCharacter::ApplyClassAppearance()
 {
-    if (GetNetMode() == NM_DedicatedServer) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (GetNetMode() == NM_DedicatedServer)
+    {
+        return;
+    }
+
+    // 현재 월드와 플레이어 참조에 필요한 값 준비
     const EFableClass HeroClass = GetHeroClass();
     const AFablePlayerState* Progress = GetPlayerState<AFablePlayerState>();
     const int32 Tier = Progress ? Progress->GetAdvancementTier() : 1;
+
+    // 직업·스킬·특성 빌드 처리
     if (bClassAppearanceInitialized && LastVisualClass == HeroClass && LastVisualTier > 0 && Tier > LastVisualTier)
     {
-        SkillVisualRemaining = 0.55f; SkillVisualCue = 7;
+        SkillVisualRemaining = 0.55f;
+        SkillVisualCue = 7;
         FableCombatFeedback::PlayCue(this, GetActorLocation(), 3);
     }
+
     LastVisualTier = Tier;
     LastVisualClass = HeroClass;
     bClassAppearanceInitialized = true;
-    for (UStaticMeshComponent* Part : SwordParts) { Part->SetVisibility(HeroClass == EFableClass::Warrior); }
-    for (UStaticMeshComponent* Part : StaffParts) { Part->SetVisibility(HeroClass == EFableClass::Mage); }
-    for (UStaticMeshComponent* Part : BowParts) { Part->SetVisibility(HeroClass == EFableClass::Archer); }
-    const FLinearColor Tint = HeroClass == EFableClass::Mage ? FLinearColor(0.16f, 0.065f, 0.30f)
-        : (HeroClass == EFableClass::Archer ? FLinearColor(0.075f, 0.24f, 0.055f) : FLinearColor(0.026f, 0.20f, 0.19f));
+
+    // 같은 규칙을 적용할 대상을 순회한다.
+    for (UStaticMeshComponent* Part : SwordParts)
+    {
+        Part->SetVisibility(HeroClass == EFableClass::Warrior);
+    }
+
+    // 같은 규칙을 적용할 대상을 순회한다.
+    for (UStaticMeshComponent* Part : StaffParts)
+    {
+        Part->SetVisibility(HeroClass == EFableClass::Mage);
+    }
+
+    // 같은 규칙을 적용할 대상을 순회한다.
+    for (UStaticMeshComponent* Part : BowParts)
+    {
+        Part->SetVisibility(HeroClass == EFableClass::Archer);
+    }
+
+    const FLinearColor Tint = HeroClass == EFableClass::Mage
+                                  ? FLinearColor(0.16f, 0.065f, 0.30f)
+                                  : (HeroClass == EFableClass::Archer ? FLinearColor(0.075f, 0.24f, 0.055f)
+                                                                      : FLinearColor(0.026f, 0.20f, 0.19f));
+
+    // 같은 규칙을 적용할 대상을 순회한다.
     for (UMaterialInstanceDynamic* Material : ClassClothMaterials)
     {
-        if (Material) { Material->SetVectorParameterValue(TEXT("Color"), Tint * (1.0f + 0.16f * (Tier - 1))); }
+        if (Material)
+        {
+            Material->SetVectorParameterValue(TEXT("Color"), Tint * (1.0f + 0.16f * (Tier - 1)));
+        }
     }
 }
 
+/** 회피 사용 조건을 확인하고 이동과 재사용 대기시간을 적용한다. */
 void AFableCharacter::PerformDodge()
 {
+    // 이동 입력과 속도 제한에 필요한 값 준비
     const float Now = GetWorld()->GetTimeSeconds();
     FVector Direction = GetVelocity().GetSafeNormal2D();
-    if (Direction.IsNearlyZero()) { Direction = GetActorForwardVector().GetSafeNormal2D(); }
+
+    // 위치·방향·거리 계산 처리
+    if (Direction.IsNearlyZero())
+    {
+        Direction = GetActorForwardVector().GetSafeNormal2D();
+    }
+
+    // 위치·방향·거리 계산 처리
     bDodging = true;
     DodgeEndServerTime = Now + FableCharacterTuning::DodgeDuration;
     NextDodgeServerTime = Now + GetDodgeCooldownDuration();
     LaunchCharacter(Direction * FableCharacterTuning::DodgeSpeed + FVector(0, 0, 70.0f), true, true);
     // The server sets velocity and invulnerability. This only mirrors its launch for a remote owner;
     // if the cue is lost, CharacterMovement still corrects the owner to the server's movement.
-    if (!IsLocallyControlled()) { ClientConfirmDodge(FVector_NetQuantizeNormal(Direction)); }
+
+    // 서버 권한과 실행 위치 처리
+    if (!IsLocallyControlled())
+    {
+        ClientConfirmDodge(FVector_NetQuantizeNormal(Direction));
+    }
+
     MulticastCombatCue(4);
     ForceNetUpdate();
 }
 
+/** 서버가 전달한 확인 회피 결과를 소유 클라이언트에 반영한다. */
 void AFableCharacter::ClientConfirmDodge_Implementation(FVector_NetQuantizeNormal Direction)
 {
     if (!HasAuthority() && IsLocallyControlled() && IsAlive())
@@ -865,45 +1462,87 @@ void AFableCharacter::ClientConfirmDodge_Implementation(FVector_NetQuantizeNorma
     }
 }
 
+/** 살아 있는 캐릭터의 체력 또는 마나를 허용량만큼 회복한다. */
 bool AFableCharacter::RestoreResource(bool bMana, float Amount)
 {
-    if (!HasAuthority() || !IsAlive() || !FMath::IsFinite(Amount) || Amount <= 0.0f) return false;
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !IsAlive() || !FMath::IsFinite(Amount) || Amount <= 0.0f)
+    {
+        return false;
+    }
+
+    // 체력·마나·보호막·피해량 처리
     SynchronizeStats();
     float& Resource = bMana ? Mana : Health;
     const float Maximum = bMana ? GetMaxMana() : MaxHealth;
-    if (Resource >= Maximum) return false;
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Resource >= Maximum)
+    {
+        return false;
+    }
+
     const float Restored = FMath::Min(Amount, Maximum - Resource);
-    if (Restored <= 0.0f) return false;
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Restored <= 0.0f)
+    {
+        return false;
+    }
+
     Resource += Restored;
     ForceNetUpdate();
+
     return true;
 }
 
+/** 권한과 생존 상태를 확인하고 보호막·방어력을 반영해 피해를 적용한다. */
 void AFableCharacter::ReceiveHit(float Damage)
 {
-    if (!HasAuthority() || !GetWorld() || !IsAlive() || !FMath::IsFinite(Damage) || Damage <= 0.0f) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !IsAlive() || !FMath::IsFinite(Damage) || Damage <= 0.0f)
+    {
+        return;
+    }
+
     CombatBuildEndServerTime = GetWorld()->GetTimeSeconds() + 5.0f;
-    if (bDodging) { ForceNetUpdate(); return; }
+
+    // 생존 상태와 부활 진행 조건 검사
+    if (bDodging)
+    {
+        ForceNetUpdate();
+        return;
+    }
     if (GetReviveProtectionRemaining() > 0.0f)
     {
         ++ReviveProtectionBlockedHits;
         ForceNetUpdate();
         return;
     }
+
+    // 생존 상태와 부활 진행 처리
     CancelReviveInternal(TEXT("피해 받음"));
     AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
     const float RawDefense = State ? State->GetDefense() : 0.0f;
     const float Defense = FMath::IsFinite(RawDefense) ? FMath::Clamp(RawDefense, 0.0f, 1000.0f) : 0.0f;
     // Diminishing returns avoid complete immunity while making every armor point useful.
     float EffectiveDamage = Damage * (100.0f / (100.0f + Defense));
+
+    // 체력·마나·보호막·피해량 처리
     if (GetShieldAmount() > 0.0f)
     {
         const float Absorbed = FMath::Min(ShieldAmount, EffectiveDamage);
-        ShieldAmount -= Absorbed; EffectiveDamage -= Absorbed; TotalShieldAbsorbed += Absorbed;
+        ShieldAmount -= Absorbed;
+        EffectiveDamage -= Absorbed;
+        TotalShieldAbsorbed += Absorbed;
         MulticastCombatCue(9);
     }
+
+    // 체력·마나·보호막·피해량에 필요한 값 준비
     const float PreviousHealth = Health;
     Health = FMath::Max(0.0f, Health - FMath::Min(EffectiveDamage, MaxHealth));
+
+    // 체력·마나·보호막·피해량 처리
     if (State && Health < PreviousHealth)
     {
         // Shield-only absorption, dodges and protection never wear armor.
@@ -911,113 +1550,218 @@ void AFableCharacter::ReceiveHit(float Damage)
         State->WearEquipment(EFableEquipmentSlot::Armor, 1);
         SynchronizeStats();
     }
+
     MulticastCombatCue(5);
-    if (Health <= 0.0f) { EnterDowned(); }
-    else { OnRep_Health(); }
+
+    // 생존 상태와 부활 진행 처리
+    if (Health <= 0.0f)
+    {
+        EnterDowned();
+    }
+    else
+    {
+        OnRep_Health();
+    }
+
     ForceNetUpdate();
 }
 
+/** 행동 불능 상태의 남은 구조 시간 값을 반환한다. */
 float AFableCharacter::GetDownedTimeRemaining() const
 {
     return IsDowned() ? FMath::Max(0.0f, DownedEndServerTime - GetSynchronizedServerTime()) : 0.0f;
 }
 
+/** 부활 보호 효과의 남은 시간 값을 반환한다. */
 float AFableCharacter::GetReviveProtectionRemaining() const
 {
     return IsAlive() ? FMath::Max(0.0f, ReviveProtectionEndServerTime - GetSynchronizedServerTime()) : 0.0f;
 }
 
+/** 동료 부활의 진행률 값을 반환한다. */
 float AFableCharacter::GetReviveProgress() const
 {
-    if (ReviveStartServerTime < 0.0f) { return 0.0f; }
+    // 생존 상태와 부활 진행 조건 검사
+    if (ReviveStartServerTime < 0.0f)
+    {
+        return 0.0f;
+    }
+
+    // 생존 상태와 부활 진행에 필요한 값 준비
     const bool bHelping = IsAlive() && IsValid(ReviveTarget.Get()) && ReviveTarget->IsDowned();
     const bool bReceiving = IsDowned() && IsValid(Reviver.Get()) && Reviver->IsAlive();
-    if (!bHelping && !bReceiving) { return 0.0f; }
-    return FMath::Clamp((GetSynchronizedServerTime() - ReviveStartServerTime) / FableCharacterTuning::ReviveDuration, 0.0f, 1.0f);
+
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (!bHelping && !bReceiving)
+    {
+        return 0.0f;
+    }
+
+    return FMath::Clamp((GetSynchronizedServerTime() - ReviveStartServerTime) / FableCharacterTuning::ReviveDuration,
+                        0.0f, 1.0f);
 }
 
+/** 거리·생존 상태·시전자를 확인해 부활 시전 유지 여부를 판단한다. */
 bool AFableCharacter::CanMaintainRevive(const AFableCharacter* Target) const
 {
-    if (!HasAuthority() || !GetWorld() || !IsAlive() || !IsValid(Target) || Target == this
-        || Target->GetWorld() != GetWorld() || !Target->HasAuthority() || !Target->IsDowned() || bLegacyRecovery || Target->bLegacyRecovery
-        || !Controller || !Target->Controller || Controller == Target->Controller
-        || !Controller->IsPlayerController() || !Target->Controller->IsPlayerController()
-        || Controller->GetPawn() != this || Target->Controller->GetPawn() != Target
-        || !GetPlayerState<AFablePlayerState>() || !Target->GetPlayerState<AFablePlayerState>()
-        || GetPlayerState<AFablePlayerState>() == Target->GetPlayerState<AFablePlayerState>()
-        || Controller->IsMoveInputIgnored() || bDodging || bPressedJump
-        || !GetCharacterMovement()->IsMovingOnGround() || GetVelocity().ContainsNaN()
-        || GetVelocity().SizeSquared() > FMath::Square(15.0f)
-        || GetWorld()->GetTimeSeconds() >= Target->DownedEndServerTime
-        || GetWorld()->GetTimeSeconds() < ActionLockEndServerTime
-        || (Target->Reviver && Target->Reviver.Get() != this)) { return false; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !IsAlive() || !IsValid(Target) || Target == this ||
+        Target->GetWorld() != GetWorld() || !Target->HasAuthority() || !Target->IsDowned() || bLegacyRecovery ||
+        Target->bLegacyRecovery || !Controller || !Target->Controller || Controller == Target->Controller ||
+        !Controller->IsPlayerController() || !Target->Controller->IsPlayerController() ||
+        Controller->GetPawn() != this || Target->Controller->GetPawn() != Target ||
+        !GetPlayerState<AFablePlayerState>() || !Target->GetPlayerState<AFablePlayerState>() ||
+        GetPlayerState<AFablePlayerState>() == Target->GetPlayerState<AFablePlayerState>() ||
+        Controller->IsMoveInputIgnored() || bDodging || bPressedJump || !GetCharacterMovement()->IsMovingOnGround() ||
+        GetVelocity().ContainsNaN() || GetVelocity().SizeSquared() > FMath::Square(15.0f) ||
+        GetWorld()->GetTimeSeconds() >= Target->DownedEndServerTime ||
+        GetWorld()->GetTimeSeconds() < ActionLockEndServerTime || (Target->Reviver && Target->Reviver.Get() != this))
+    {
+        return false;
+    }
+
+    // 위치·방향·거리 계산에 필요한 값 준비
     const FVector Origin = GetActorLocation();
     const FVector Destination = Target->GetActorLocation();
     const FVector Delta = Destination - Origin;
-    if (Origin.ContainsNaN() || Destination.ContainsNaN()
-        || Delta.SizeSquared2D() > FMath::Square(FableCharacterTuning::ReviveDistance)
-        || FMath::Abs(Delta.Z) > FableCharacterTuning::ReviveHeight) { return false; }
+
+    // 생존 상태와 부활 진행 조건 검사
+    if (Origin.ContainsNaN() || Destination.ContainsNaN() ||
+        Delta.SizeSquared2D() > FMath::Square(FableCharacterTuning::ReviveDistance) ||
+        FMath::Abs(Delta.Z) > FableCharacterTuning::ReviveHeight)
+    {
+        return false;
+    }
+
     bool bSameRegion = false;
+
+    // 지역·적·전투 진행 순회
     for (const EFableRegion Region : {EFableRegion::Village, EFableRegion::RootRuins, EFableRegion::Moonwell})
     {
         if (FableRPG::IsInRegion(Region, Origin) && FableRPG::IsInRegion(Region, Destination))
-        { bSameRegion = true; break; }
+        {
+            bSameRegion = true;
+            break;
+        }
     }
-    if (!bSameRegion) { return false; }
+
+    // 지역·적·전투 진행 조건 검사
+    if (!bSameRegion)
+    {
+        return false;
+    }
+
+    // 생존 상태와 부활 진행에 필요한 값 준비
     FCollisionQueryParams Params(SCENE_QUERY_STAT(FableReviveVisibility), false, this);
     Params.AddIgnoredActor(Target);
     FHitResult Hit;
-    return !GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0,0,24), Destination + FVector(0,0,24), ECC_Visibility, Params);
+
+    return !GetWorld()->LineTraceSingleByChannel(Hit, Origin + FVector(0, 0, 24), Destination + FVector(0, 0, 24),
+                                                 ECC_Visibility, Params);
 }
 
+/** 서버에서 동료 부활 조건을 검사하고 중복 없이 시전을 시작한다. */
 bool AFableCharacter::BeginRevive(AFableCharacter* Target)
 {
-    if (!HasAuthority() || !GetWorld()) { return false; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld())
+    {
+        return false;
+    }
+
+    // 생존 상태와 부활 진행 처리
     if (ReviveTarget)
     {
         // Repeated E/start packets must not restart or speed up an existing channel.
-        if (ReviveTarget.Get() != Target) { return false; }
-        if (CanMaintainRevive(Target)) { return true; }
+        if (ReviveTarget.Get() != Target)
+        {
+            return false;
+        }
+        if (CanMaintainRevive(Target))
+        {
+            return true;
+        }
         CancelReviveInternal(TEXT("부활 조건 변경"));
         return false;
     }
+
     const float Now = GetWorld()->GetTimeSeconds();
-    if (Now - LastReviveRequestServerTime < 0.15f) { return false; }
+
+    // 생존 상태와 부활 진행 조건 검사
+    if (Now - LastReviveRequestServerTime < 0.15f)
+    {
+        return false;
+    }
+
     LastReviveRequestServerTime = Now;
-    if (!CanMaintainRevive(Target) || Reviver || Target->ReviveTarget) { return false; }
+
+    // 생존 상태와 부활 진행 조건 검사
+    if (!CanMaintainRevive(Target) || Reviver || Target->ReviveTarget)
+    {
+        return false;
+    }
+
+    // 생존 상태와 부활 진행 처리
     ReviveTarget = Target;
     Target->Reviver = this;
     ReviveStartServerTime = Target->ReviveStartServerTime = Now;
     ReviveStartLocation = GetActorLocation();
     const FVector Facing = (Target->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
-    if (!Facing.IsNearlyZero()) { SetActorRotation(Facing.Rotation()); }
+
+    // 위치·방향·거리 계산 처리
+    if (!Facing.IsNearlyZero())
+    {
+        SetActorRotation(Facing.Rotation());
+    }
+
     ForceNetUpdate();
     Target->ForceNetUpdate();
     UE_LOG(LogTemp, Display, TEXT("동료 부활 시작: %s -> %s (3초)"), *GetName(), *Target->GetName());
+
     return true;
 }
 
+/** 진행 중인 동료 부활의 취소를 처리하거나 서버에 요청한다. */
 void AFableCharacter::CancelRevive()
 {
-    if (HasAuthority()) { CancelReviveInternal(TEXT("입력 해제 또는 화면 전환")); }
-    else if (IsLocallyControlled()) { ServerCancelRevive(); }
+    if (HasAuthority())
+    {
+        CancelReviveInternal(TEXT("입력 해제 또는 화면 전환"));
+    }
+    else if (IsLocallyControlled())
+    {
+        ServerCancelRevive();
+    }
 }
 
+/** 동료 부활 취소 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFableCharacter::ServerCancelRevive_Implementation()
 {
     // A delayed jump/release from before being downed cannot cancel help now being received.
-    if (ReviveTarget) { CancelReviveInternal(TEXT("입력 해제 또는 다른 행동")); }
+    if (ReviveTarget)
+    {
+        CancelReviveInternal(TEXT("입력 해제 또는 다른 행동"));
+    }
 }
 
+/** 시전자와 대상에 연결된 부활 진행 상태를 함께 해제한다. */
 void AFableCharacter::CancelReviveInternal(const TCHAR* Reason)
 {
-    if (!HasAuthority()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    // 생존 상태와 부활 진행에 필요한 값 준비
     AFableCharacter* Target = ReviveTarget.Get();
     AFableCharacter* Helper = Reviver.Get();
     const bool bHadChannel = Target || Helper || ReviveStartServerTime >= 0.0f;
     ReviveTarget = nullptr;
     Reviver = nullptr;
     ReviveStartServerTime = -1.0f;
+
+    // 생존 상태와 부활 진행 처리
     if (Target)
     {
         ++ReviveCancelCount;
@@ -1028,6 +1772,8 @@ void AFableCharacter::CancelReviveInternal(const TCHAR* Reason)
             Target->ForceNetUpdate();
         }
     }
+
+    // 생존 상태와 부활 진행 처리
     if (IsValid(Helper) && Helper->ReviveTarget.Get() == this)
     {
         Helper->ReviveTarget = nullptr;
@@ -1035,6 +1781,8 @@ void AFableCharacter::CancelReviveInternal(const TCHAR* Reason)
         ++Helper->ReviveCancelCount;
         Helper->ForceNetUpdate();
     }
+
+    // 이 단계에서 시전자와 대상에 연결된 부활 진행 상태를 함께 해제한다.
     if (bHadChannel)
     {
         ForceNetUpdate();
@@ -1042,12 +1790,20 @@ void AFableCharacter::CancelReviveInternal(const TCHAR* Reason)
     }
 }
 
+/** 동료 부활을 완료하고 체력과 잠시 유지되는 보호 효과를 부여한다. */
 void AFableCharacter::CompleteRevive()
 {
     AFableCharacter* Target = ReviveTarget.Get();
-    if (!CanMaintainRevive(Target) || Target->Reviver.Get() != this || ReviveStartServerTime < 0.0f
-        || GetWorld()->GetTimeSeconds() - ReviveStartServerTime < FableCharacterTuning::ReviveDuration) { return; }
+
+    // 생존 상태와 부활 진행 조건 검사
+    if (!CanMaintainRevive(Target) || Target->Reviver.Get() != this || ReviveStartServerTime < 0.0f ||
+        GetWorld()->GetTimeSeconds() - ReviveStartServerTime < FableCharacterTuning::ReviveDuration)
+    {
+        return;
+    }
     // No checkpoint teleport, cooldown reset, reward, inventory or save mutation occurs here.
+
+    // 생존 상태와 부활 진행 처리
     ReviveTarget = nullptr;
     ReviveStartServerTime = -1.0f;
     Target->Reviver = nullptr;
@@ -1058,7 +1814,8 @@ void AFableCharacter::CompleteRevive()
     Target->Mana = FMath::Clamp(FMath::Max(Target->Mana, 30.0f), 0.0f, Target->GetMaxMana());
     Target->DownedEndServerTime = 0.0f;
     Target->DefeatedServerTime = -1.0f;
-    Target->ReviveProtectionEndServerTime = GetWorld()->GetTimeSeconds() + FableCharacterTuning::ReviveProtectionDuration;
+    Target->ReviveProtectionEndServerTime =
+        GetWorld()->GetTimeSeconds() + FableCharacterTuning::ReviveProtectionDuration;
     Target->GetWorldTimerManager().ClearTimer(Target->RespawnTimer);
     Target->GetCharacterMovement()->ClearAccumulatedForces();
     Target->GetCharacterMovement()->StopMovementImmediately();
@@ -1069,14 +1826,25 @@ void AFableCharacter::CompleteRevive()
     ++Target->TimesRevivedCount;
     ForceNetUpdate();
     Target->ForceNetUpdate();
-    UE_LOG(LogTemp, Display, TEXT("동료 부활 완료: %s -> %s 체력 %.1f/%.1f, 보호 2초"),
-        *GetName(), *Target->GetName(), Target->Health, Target->MaxHealth);
+    UE_LOG(LogTemp, Display, TEXT("동료 부활 완료: %s -> %s 체력 %.1f/%.1f, 보호 2초"), *GetName(), *Target->GetName(),
+           Target->Health, Target->MaxHealth);
 }
 
+/** 구조 가능한 행동 불능 상태로 전환하고 시전을 정리한다. */
 void AFableCharacter::EnterDowned()
 {
-    if (!HasAuthority() || !GetWorld() || LifeState != EFableLifeState::Active) { return; }
-    if (bLegacyRecovery) { EnterDefeated(TEXT("기존 시제품 복구")); return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || LifeState != EFableLifeState::Active)
+    {
+        return;
+    }
+    if (bLegacyRecovery)
+    {
+        EnterDefeated(TEXT("기존 시제품 복구"));
+        return;
+    }
+
+    // 생존 상태와 부활 진행 처리
     CancelReviveInternal(TEXT("쓰러짐"));
     Health = 0.0f;
     LifeState = EFableLifeState::Downed;
@@ -1093,9 +1861,16 @@ void AFableCharacter::EnterDowned()
     UE_LOG(LogTemp, Display, TEXT("동료 쓰러짐: %s, 구조 가능 25초"), *GetName());
 }
 
+/** 구조 시간이 끝난 캐릭터의 쓰러짐을 확정한다. */
 void AFableCharacter::EnterDefeated(const TCHAR* Reason)
 {
-    if (!HasAuthority() || !GetWorld() || IsDefeated()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || IsDefeated())
+    {
+        return;
+    }
+
+    // 생존 상태와 부활 진행 처리
     CancelReviveInternal(Reason);
     Health = 0.0f;
     LifeState = EFableLifeState::Defeated;
@@ -1107,35 +1882,69 @@ void AFableCharacter::EnterDefeated(const TCHAR* Reason)
     DodgeEndServerTime = ActionLockEndServerTime = 0.0f;
     GetWorldTimerManager().ClearTimer(RespawnTimer);
     OnRep_Health();
+
+    // 체력·마나·보호막·피해량 처리
     if (bLegacyRecovery)
+    {
         GetWorldTimerManager().SetTimer(RespawnTimer, this, &AFableCharacter::RespawnAtSafePoint, 3.0f, false);
+    }
+
     ForceNetUpdate();
     UE_LOG(LogTemp, Display, TEXT("동료 구조 대기: %s (%s)"), *GetName(), Reason);
 }
 
+/** 행동 불능 제한 시간과 부활 시전의 완료·취소를 갱신한다. */
 void AFableCharacter::TickLifeState()
 {
-    if (!HasAuthority() || !GetWorld()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld())
+    {
+        return;
+    }
+
     const float Now = GetWorld()->GetTimeSeconds();
     // Falling out of the world bypasses dodge, shields and revival protection.
+
+    // 생존 상태와 부활 진행 조건 검사
     if (!IsDefeated() && GetActorLocation().Z < -800.0f)
-    { EnterDefeated(TEXT("낙하 구조")); return; }
+    {
+        EnterDefeated(TEXT("낙하 구조"));
+        return;
+    }
     if (IsDowned() && Now >= DownedEndServerTime)
-    { EnterDefeated(TEXT("구조 시간 만료")); return; }
+    {
+        EnterDefeated(TEXT("구조 시간 만료"));
+        return;
+    }
+
+    // 생존 상태와 부활 진행 처리
     if (ReviveTarget)
     {
-        if (!CanMaintainRevive(ReviveTarget.Get()) || ReviveTarget->Reviver.Get() != this
-            || FVector::DistSquared(GetActorLocation(), ReviveStartLocation) > FMath::Square(25.0f))
+        if (!CanMaintainRevive(ReviveTarget.Get()) || ReviveTarget->Reviver.Get() != this ||
+            FVector::DistSquared(GetActorLocation(), ReviveStartLocation) > FMath::Square(25.0f))
+        {
             CancelReviveInternal(TEXT("이동·거리·시야 또는 동료 상태 변경"));
+        }
         else if (Now - ReviveStartServerTime >= FableCharacterTuning::ReviveDuration)
+        {
             CompleteRevive();
+        }
     }
+
+    // 생존 상태와 부활 진행 처리
     if (Reviver && (!IsValid(Reviver.Get()) || Reviver->ReviveTarget.Get() != this || !IsDowned()))
+    {
         CancelReviveInternal(TEXT("부활 연결 종료"));
+    }
+
+    // 생존 상태와 부활 진행 처리
     if (ReviveStartServerTime >= 0.0f && !ReviveTarget && !Reviver)
+    {
         CancelReviveInternal(TEXT("동료 연결 종료"));
+    }
 }
 
+/** 복제된 현재 체력 변경을 화면과 관련 상태에 반영한다. */
 void AFableCharacter::OnRep_Health()
 {
     if (!IsAlive())
@@ -1153,16 +1962,26 @@ void AFableCharacter::OnRep_Health()
     }
 }
 
+/** 서버에서 안전 복귀 위치와 회전·자원 회복 여부를 설정한다. */
 void AFableCharacter::SetCheckpoint(const FVector& Location, const FRotator& Rotation, bool bRestore)
 {
-    if (!HasAuthority() || !GetWorld() || Location.ContainsNaN() || Rotation.ContainsNaN()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || Location.ContainsNaN() || Rotation.ContainsNaN())
+    {
+        return;
+    }
+
     FVector SafeLocation = Location;
-    if (!GetWorld()->FindTeleportSpot(this, SafeLocation, Rotation)
-        || !TeleportTo(SafeLocation, Rotation, false, false))
+
+    // 현재 월드와 플레이어 참조 조건 검사
+    if (!GetWorld()->FindTeleportSpot(this, SafeLocation, Rotation) ||
+        !TeleportTo(SafeLocation, Rotation, false, false))
     {
         UE_LOG(LogTemp, Warning, TEXT("%s의 이동 지점이 막혀 있어 기존 부활 지점을 유지합니다."), *GetName());
         return;
     }
+
+    // 생존 상태와 부활 진행 처리
     CancelReviveInternal(TEXT("안전 지점 이동"));
     SafeSpawnLocation = GetActorLocation();
     SafeSpawnRotation = Rotation;
@@ -1182,6 +2001,8 @@ void AFableCharacter::SetCheckpoint(const FVector& Location, const FRotator& Rot
     GetCharacterMovement()->ClearAccumulatedForces();
     GetCharacterMovement()->StopMovementImmediately();
     SynchronizeStats();
+
+    // 생존 상태와 부활 진행 처리
     if (bRestore)
     {
         LifeState = EFableLifeState::Active;
@@ -1194,62 +2015,105 @@ void AFableCharacter::SetCheckpoint(const FVector& Location, const FRotator& Rot
         SetActorHiddenInGame(false);
         GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     }
+
     OnRep_Health();
-    if (IsAlive()) { GetCharacterMovement()->SetMovementMode(MOVE_Walking); }
-    else if (bLegacyRecovery) { GetWorldTimerManager().SetTimer(RespawnTimer, this, &AFableCharacter::RespawnAtSafePoint, 3.0f, false); }
+
+    // 이동 입력과 속도 제한 처리
+    if (IsAlive())
+    {
+        GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+    }
+    else if (bLegacyRecovery)
+    {
+        GetWorldTimerManager().SetTimer(RespawnTimer, this, &AFableCharacter::RespawnAtSafePoint, 3.0f, false);
+    }
+
+    // 위치·방향·거리 계산 처리
     if (Controller)
     {
         Controller->SetControlRotation(Rotation);
         Controller->ClientSetRotation(Rotation, true);
     }
     // A shot from the previous encounter must not damage enemies after party travel.
+
+    // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableProjectile> It(GetWorld()); It; ++It)
     {
-        if (It->GetOwner() == this) { It->Destroy(); }
+        if (It->GetOwner() == this)
+        {
+            It->Destroy();
+        }
     }
+
     ForceNetUpdate();
 }
 
+/** 서버가 관리하는 안전 지점으로 캐릭터를 복귀시킨다. */
 void AFableCharacter::RespawnAtSafePoint()
 {
-    if (!HasAuthority() || !GetWorld() || !bLegacyRecovery || IsAlive()) { return; }
+    // 서버 권한과 실행 위치 조건 검사
+    if (!HasAuthority() || !GetWorld() || !bLegacyRecovery || IsAlive())
+    {
+        return;
+    }
+
     SetCheckpoint(SafeSpawnLocation, SafeSpawnRotation, true);
+
+    // 체력·마나·보호막·피해량 처리
     if (!IsAlive())
     {
         GetWorldTimerManager().SetTimer(RespawnTimer, this, &AFableCharacter::RespawnAtSafePoint, 0.5f, false);
     }
 }
 
+/** 복제된 시간 기준으로 보정한 서버 시각 값을 반환한다. */
 float AFableCharacter::GetSynchronizedServerTime() const
 {
     if (const UWorld* World = GetWorld())
     {
-        if (const AGameStateBase* State = World->GetGameState()) { return State->GetServerWorldTimeSeconds(); }
+        if (const AGameStateBase* State = World->GetGameState())
+        {
+            return State->GetServerWorldTimeSeconds();
+        }
         return World->GetTimeSeconds();
     }
     return 0.0f;
 }
 
+/** 기본 공격의 남은 재사용 대기시간 값을 반환한다. */
 float AFableCharacter::GetAttackCooldownRemaining() const
 {
     return FMath::Max(0.0f, NextAttackServerTime - GetSynchronizedServerTime());
 }
 
+/** 선택한 스킬의 남은 재사용 대기시간 값을 반환한다. */
 float AFableCharacter::GetSkillCooldownRemaining(int32 Slot) const
 {
-    if (Slot < 0 || Slot > 2) return 0.0f;
-    const float End = Slot == 0 ? NextSkillServerTime : (Slot == 1 ? NextSecondSkillServerTime : NextThirdSkillServerTime);
+    // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
+    if (Slot < 0 || Slot > 2)
+    {
+        return 0.0f;
+    }
+
+    const float End =
+        Slot == 0 ? NextSkillServerTime : (Slot == 1 ? NextSecondSkillServerTime : NextThirdSkillServerTime);
+
     return FMath::Max(0.0f, End - GetSynchronizedServerTime());
 }
 
+/** 회피의 남은 재사용 대기시간 값을 반환한다. */
 float AFableCharacter::GetDodgeCooldownRemaining() const
 {
     return FMath::Max(0.0f, NextDodgeServerTime - GetSynchronizedServerTime());
 }
 
+/** 전투 피드백를 수신한 클라이언트에서 재생한다. */
 void AFableCharacter::MulticastCombatCue_Implementation(uint8 Cue)
 {
-    if (GetNetMode() == NM_DedicatedServer) { return; }
+    if (GetNetMode() == NM_DedicatedServer)
+    {
+        return;
+    }
     if (Cue <= 2)
     {
         VisualComboIndex = Cue;
@@ -1263,41 +2127,78 @@ void AFableCharacter::MulticastCombatCue_Implementation(uint8 Cue)
         SkillVisualRemaining = 0.55f;
         AttackVisualRemaining = 0.0f;
     }
-    else if (Cue == 4) { AttackVisualRemaining = 0.0f; }
-    else if (Cue == 5) { HurtVisualRemaining = 0.20f; FableCombatFeedback::PlayCue(this, GetActorLocation(), 0); }
-    else if (Cue == 9) { FableCombatFeedback::PlayCue(this, GetActorLocation(), 2); }
+    else if (Cue == 4)
+    {
+        AttackVisualRemaining = 0.0f;
+    }
+    else if (Cue == 5)
+    {
+        HurtVisualRemaining = 0.20f;
+        FableCombatFeedback::PlayCue(this, GetActorLocation(), 0);
+    }
+    else if (Cue == 9)
+    {
+        FableCombatFeedback::PlayCue(this, GetActorLocation(), 2);
+    }
 }
 
+/** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
 void AFableCharacter::Tick(float DeltaSeconds)
 {
+    // 이동 입력과 속도 제한 처리
     Super::Tick(DeltaSeconds);
     // Use the replicated profile on both server and owning client for movement prediction.
     GetCharacterMovement()->MaxWalkSpeed = GetMovementSpeedLimit();
+
+    // 서버 권한과 실행 위치 처리
     if (HasAuthority())
     {
+        // 생존 상태와 부활 진행 처리
         SynchronizeStats();
         TickLifeState();
+
+        // 체력·마나·보호막·피해량 처리
         if (ShieldAmount > 0.0f && GetWorld()->GetTimeSeconds() >= ShieldEndServerTime)
-        { ShieldAmount = ShieldEndServerTime = 0.0f; ForceNetUpdate(); }
+        {
+            ShieldAmount = ShieldEndServerTime = 0.0f;
+            ForceNetUpdate();
+        }
+
+        // 체력·마나·보호막·피해량에 필요한 값 준비
         const AFablePlayerState* Progress = GetPlayerState<AFablePlayerState>();
         const float Regen = Progress ? Progress->GetManaRegenRate() : 8.0f;
-        if (IsAlive()) { Mana = FMath::Min(GetMaxMana(), Mana + FMath::Max(0.0f, DeltaSeconds) * Regen); }
+
+        // 체력·마나·보호막·피해량 처리
+        if (IsAlive())
+        {
+            Mana = FMath::Min(GetMaxMana(), Mana + FMath::Max(0.0f, DeltaSeconds) * Regen);
+        }
+
+        // 현재 월드와 플레이어 참조 처리
         if (bDodging && GetWorld()->GetTimeSeconds() >= DodgeEndServerTime)
         {
             bDodging = false;
             ForceNetUpdate();
         }
     }
+
+    // 서버 권한과 실행 위치 처리
     if (GetNetMode() != NM_DedicatedServer)
     {
         const AFablePlayerState* Progress = GetPlayerState<AFablePlayerState>();
-        if (!bClassAppearanceInitialized || LastVisualClass != GetHeroClass() || (Progress && LastVisualTier != Progress->GetAdvancementTier())) { ApplyClassAppearance(); }
+        if (!bClassAppearanceInitialized || LastVisualClass != GetHeroClass() ||
+            (Progress && LastVisualTier != Progress->GetAdvancementTier()))
+        {
+            ApplyClassAppearance();
+        }
         AnimateBody(DeltaSeconds);
     }
 }
 
+/** 이동·공격 상태를 캐릭터 부품의 자세에 반영한다. */
 void AFableCharacter::AnimateBody(float DeltaSeconds)
 {
+    // 이동 입력과 속도 제한에 필요한 값 준비
     const EFableClass HeroClass = GetHeroClass();
     BowRoot->SetRelativeRotation(FRotator::ZeroRotator);
     VisualSpeed = FMath::FInterpTo(VisualSpeed, IsAlive() ? GetVelocity().Size2D() : 0.0f, DeltaSeconds, 10.0f);
@@ -1311,8 +2212,9 @@ void AFableCharacter::AnimateBody(float DeltaSeconds)
     SkillVisualRemaining = FMath::Max(0.0f, SkillVisualRemaining - DeltaSeconds);
     HurtVisualRemaining = FMath::Max(0.0f, HurtVisualRemaining - DeltaSeconds);
     VisualRoot->SetRelativeLocation(FVector(0.0f, 0.0f, IsAlive() ? Bob + Breath : -48.0f));
-    VisualRoot->SetRelativeRotation(!IsAlive() ? FRotator(0, 0, -75)
-        : (bDodging ? FRotator(-18, 0, 0) : FRotator(-3.0f * WalkAmount, Phase * 1.6f * WalkAmount, 0)));
+    VisualRoot->SetRelativeRotation(
+        !IsAlive() ? FRotator(0, 0, -75)
+                   : (bDodging ? FRotator(-18, 0, 0) : FRotator(-3.0f * WalkAmount, Phase * 1.6f * WalkAmount, 0)));
     LeftLeg->SetRelativeRotation(FRotator(Stride, 0, -0.8f));
     RightLeg->SetRelativeRotation(FRotator(-Stride, 0, 0.8f));
     // Lift the trailing heel while the supporting leg remains nearly straight.
@@ -1323,15 +2225,25 @@ void AFableCharacter::AnimateBody(float DeltaSeconds)
     LeftForearm->SetRelativeRotation(FRotator(8.0f + FMath::Max(0.0f, Phase) * 13.0f * WalkAmount, 0, 0));
     RightForearm->SetRelativeRotation(FRotator(5.0f + FMath::Max(0.0f, -Phase) * 10.0f * WalkAmount, 0, 0));
     Cape->SetRelativeRotation(FRotator(-WalkAmount * 10.0f + FMath::Sin(WalkPhase - 0.6f) * WalkAmount * 2.0f,
-        Phase * WalkAmount * 1.3f, FMath::Sin(WalkPhase * 0.5f) * WalkAmount * 1.6f));
-    if (HeroClass == EFableClass::Mage) { RightArm->SetRelativeRotation(FRotator(12, 0, 5)); }
+                                       Phase * WalkAmount * 1.3f, FMath::Sin(WalkPhase * 0.5f) * WalkAmount * 1.6f));
+
+    // 캐릭터 부품과 관절 구성 처리
+    if (HeroClass == EFableClass::Mage)
+    {
+        RightArm->SetRelativeRotation(FRotator(12, 0, 5));
+    }
+
+    // 캐릭터 부품과 관절 구성 처리
     if (AttackVisualRemaining > 0.0f)
     {
+        // 캐릭터 부품과 관절 구성에 필요한 값 준비
         const float Progress = 1.0f - AttackVisualRemaining / AttackVisualDuration;
         const float Sweep = FMath::Sin(Progress * PI);
         const float Side = VisualComboIndex == 1 ? -1.0f : 1.0f;
         RightArm->SetRelativeRotation(FRotator(100.0f * Sweep, (Progress * 150.0f - 75.0f) * Side, 8.0f));
         RightForearm->SetRelativeRotation(FRotator(12.0f + 24.0f * Sweep, 0, 0));
+
+        // 캐릭터 부품과 관절 구성 처리
         if (HeroClass == EFableClass::Mage)
         {
             RightArm->SetRelativeRotation(FRotator(65.0f * Sweep, 0, -10));
@@ -1346,12 +2258,17 @@ void AFableCharacter::AnimateBody(float DeltaSeconds)
             BowRoot->SetRelativeRotation(FRotator(-85, 0, 0));
         }
     }
+
+    // 캐릭터 부품과 관절 구성 처리
     if (SkillVisualRemaining > 0.0f)
     {
+        // 캐릭터 부품과 관절 구성 처리
         LeftArm->SetRelativeRotation(FRotator(55, 0, -38));
         RightArm->SetRelativeRotation(FRotator(55, 0, 38));
         LeftForearm->SetRelativeRotation(FRotator(20, 0, 0));
         RightForearm->SetRelativeRotation(FRotator(20, 0, 0));
+
+        // 캐릭터 부품과 관절 구성 처리
         if (HeroClass == EFableClass::Mage)
         {
             LeftArm->SetRelativeRotation(FRotator(45, 0, 20));
@@ -1366,34 +2283,65 @@ void AFableCharacter::AnimateBody(float DeltaSeconds)
             BowRoot->SetRelativeRotation(FRotator(-85, 0, 0));
         }
     }
+
+    // 직업·스킬·특성 빌드 순회
     for (int32 Index = 0; Index < SkillPetals.Num(); ++Index)
     {
+        // 직업·스킬·특성 빌드에 필요한 값 준비
         UStaticMeshComponent* Petal = SkillPetals[Index];
         const bool bShield = GetShieldAmount() > 0.0f;
         const bool bVisible = IsAlive() && (SkillVisualRemaining > 0.0f || bShield);
         Petal->SetVisibility(bVisible);
+
+        // 직업·스킬·특성 빌드 처리
         if (bVisible)
         {
-            const float Progress = bShield ? FMath::Fmod(GetWorld()->GetTimeSeconds() * 0.35f, 1.0f) : 1.0f - SkillVisualRemaining / 0.55f;
+            const float Progress =
+                bShield ? FMath::Fmod(GetWorld()->GetTimeSeconds() * 0.35f, 1.0f) : 1.0f - SkillVisualRemaining / 0.55f;
+
+            // 직업·스킬·특성 빌드 처리
             if (UMaterialInstanceDynamic* Mat = Cast<UMaterialInstanceDynamic>(Petal->GetMaterial(0)))
-                Mat->SetVectorParameterValue(TEXT("Color"), bShield ? FLinearColor(0.18f,0.65f,0.95f) :
-                    (HeroClass == EFableClass::Mage ? (SkillVisualCue == 6 ? FLinearColor(0.3f,0.8f,1.0f) : FLinearColor(0.95f,0.35f,0.08f)) : FLinearColor(0.25f,0.65f,0.32f)));
+            {
+                Mat->SetVectorParameterValue(TEXT("Color"),
+                                             bShield ? FLinearColor(0.18f, 0.65f, 0.95f)
+                                                     : (HeroClass == EFableClass::Mage
+                                                            ? (SkillVisualCue == 6 ? FLinearColor(0.3f, 0.8f, 1.0f)
+                                                                                   : FLinearColor(0.95f, 0.35f, 0.08f))
+                                                            : FLinearColor(0.25f, 0.65f, 0.32f)));
+            }
+
+            // 직업·스킬·특성 빌드에 필요한 값 준비
             const float Angle = Index * 2.0f * PI / SkillPetals.Num() + Progress * 0.8f;
-            const float Radius = bShield ? 88.0f : FMath::Lerp(75.0f, HeroClass == EFableClass::Mage && SkillVisualCue == 6 ? 650.0f : FableCharacterTuning::SkillRange, Progress);
-            Petal->SetRelativeLocation(FVector(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, bShield ? 15.0f + 45.0f * FMath::Sin(Angle * 2.0f) : -48.0f + FMath::Sin(Progress * PI) * 35.0f));
+            const float Radius = bShield ? 88.0f
+                                         : FMath::Lerp(75.0f,
+                                                       HeroClass == EFableClass::Mage && SkillVisualCue == 6
+                                                           ? 650.0f
+                                                           : FableCharacterTuning::SkillRange,
+                                                       Progress);
+            Petal->SetRelativeLocation(FVector(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius,
+                                               bShield ? 15.0f + 45.0f * FMath::Sin(Angle * 2.0f)
+                                                       : -48.0f + FMath::Sin(Progress * PI) * 35.0f));
             // Only transient leaf particles change size; the character parts remain scale 1.
             Petal->SetRelativeScale3D(FVector(1.0f - Progress * 0.65f));
-            Petal->SetRelativeRotation(FRotator(20.0f * FMath::Sin(Angle), FMath::RadiansToDegrees(Angle), Progress * 110.0f));
+            Petal->SetRelativeRotation(
+                FRotator(20.0f * FMath::Sin(Angle), FMath::RadiansToDegrees(Angle), Progress * 110.0f));
         }
     }
+
+    // 이 단계에서 이동·공격 상태를 캐릭터 부품의 자세에 반영한다.
     if (TorsoMaterial)
     {
         const float HurtAmount = HurtVisualRemaining / 0.20f;
-        TorsoMaterial->SetVectorParameterValue(TEXT("Color"), FMath::Lerp(FableCharacterTuning::TunicColor, FLinearColor(0.65f, 0.13f, 0.09f), HurtAmount));
+        TorsoMaterial->SetVectorParameterValue(
+            TEXT("Color"),
+            FMath::Lerp(FableCharacterTuning::TunicColor, FLinearColor(0.65f, 0.13f, 0.09f), HurtAmount));
     }
+
+    // 이 단계에서 이동·공격 상태를 캐릭터 부품의 자세에 반영한다.
     if (BladeMaterial)
     {
         BladeMaterial->SetVectorParameterValue(TEXT("Color"), AttackVisualRemaining > 0.0f
-            ? FLinearColor(0.90f, 0.73f, 0.36f) : FableCharacterTuning::BladeColor);
+                                                                  ? FLinearColor(0.90f, 0.73f, 0.36f)
+                                                                  : FableCharacterTuning::BladeColor);
     }
 }
