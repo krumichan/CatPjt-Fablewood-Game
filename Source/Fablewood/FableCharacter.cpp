@@ -2039,6 +2039,17 @@ void AFableCharacter::SetCheckpoint(const FVector& Location, const FRotator& Rot
         return;
     }
 
+    CommitCheckpointAtCurrentPosition(Rotation, bRestore);
+}
+
+/** 전원 이동 성공 뒤 현재 위치에서만 체크포인트와 전투 정리를 확정한다. */
+void AFableCharacter::CommitCheckpointAtCurrentPosition(const FRotator& Rotation, bool bRestore)
+{
+    if (!HasAuthority() || !GetWorld() || GetActorLocation().ContainsNaN() || Rotation.ContainsNaN())
+    {
+        return;
+    }
+
     // 귀환 직후 폐기되는 이전 원정 지형을 이동 기반으로 계속 참조하지 않는다.
     SetBase(static_cast<FMovementBaseInterfaceData*>(nullptr));
 

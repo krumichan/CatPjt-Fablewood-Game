@@ -4,6 +4,7 @@
 #include "TimerManager.h"
 #include "FableRPGTypes.h"
 #include "FableExpeditionTypes.h"
+#include "FableExpeditionResultTypes.h"
 #include "FableGameMode.generated.h"
 
 class AFableEnemy;
@@ -12,6 +13,16 @@ class AFableMoonwellWorld;
 class AFablePlayerState;
 class AFablePartyEncounter;
 
+/** UObject 참조 없이 개인 결과와 저장 경계를 서버 수명 동안 보존한다. */
+struct FFableCharacterExpeditionLedger
+{
+    TMap<FGuid, FFablePersonalExpeditionResult> Results;
+    TArray<FGuid> Order;
+    TMap<FString, int64> SnapshotGrantSequences;
+    int64 LastGrantSequence = 0;
+    int64 LastCommittedGrantSequence = 0;
+};
+
 /** 서버의 접속·파티 이동·던전·보스·복구 진행을 관리하는 게임 규칙. */
 UCLASS()
 class FABLEWOOD_API AFableGameMode : public AGameModeBase
@@ -19,6 +30,54 @@ class FABLEWOOD_API AFableGameMode : public AGameModeBase
     GENERATED_BODY()
 
 public:
+    /** Native 독립 월드에서도 유일한 서버 정본만 찾는다. */
+    static AFableGameMode* Find(const UWorld* World);
+
+    /** 본인의 원정 결과만 읽으며 조회 자체는 지급하지 않는다. */
+    const FFablePersonalExpeditionResult* GetResultByExpedition(const AFablePlayerState* Recipient,
+                                                                FGuid ExpeditionId) const;
+
+    /** 가장 최근 종료 결과를 본인이 확인했는지 읽는다. 결과가 없으면 허용한다. */
+    bool HasAcknowledgedLatestExpeditionResult(const AFablePlayerState* Recipient) const;
+
+    /** 원하는 개인 결과를 소유 연결에 다시 전달한다. */
+    bool RequestExpeditionResult(APlayerController* Requester, FGuid ExpeditionId);
+
+    /** 정확한 종료 결과를 읽었음을 표시하며 영구 저장 확인과 구분한다. */
+    bool AcknowledgeExpeditionResult(APlayerController* Requester, FGuid ExpeditionId, FGuid CompletionId,
+                                     int32 ExpectedResultRevision);
+
+    /** 이전 결과와 새 명시적 준비를 묶어 한 번만 새로운 증서를 발급한다. */
+    bool RequestRetryExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                                FGuid OldExpeditionId, FGuid CompletionId);
+
+    /** 재도전 정본·현재 명부와 정확한 이전 결과를 검사한다. */
+    bool CanPrepareExpeditionRetry(APlayerController* Requester, FGuid PartyId, FGuid OldExpeditionId,
+                                   FGuid CompletionId) const;
+
+    /** 준비 중인 기존 완료 원정의 참가자 위치를 허용할지 확인한다. */
+    bool IsRetryPreparationParticipant(const AFablePlayerState* Profile, FGuid OldExpeditionId,
+                                       FGuid CompletionId) const;
+
+    /** 실제 원정의 실제 처치에 대해서만 개인 보상을 한 번 기록한다. */
+    bool RecordExpeditionDefeat(AFablePartyEncounter* Encounter, AFableEnemy* Enemy, AFablePlayerState* Recipient);
+
+    /** 원정 종료 ID와 결과를 서버에서 한 번만 확정한다. */
+    void CompleteExpeditionResult(AFablePartyEncounter* Encounter, EFableExpeditionOutcome Outcome);
+
+    /** 인증된 재접속자에게 기존 개인 결과를 복원한다. */
+    void RestoreExpeditionResult(AFablePlayerState* Profile);
+
+    /** 직렬화 스냅숏이 포함하는 개인 지급 순번을 읽는다. */
+    int64 GetExpeditionGrantSequence(const FString& PublicKey) const;
+
+    /** 실제 직렬화한 해시와 그 스냅숏의 지급 경계를 등록한다. */
+    void TrackExpeditionSaveSnapshot(const FString& PublicKey, int64 IncludedGrantSequence, const FString& Hash);
+
+    /** 검증된 동일 저장 배치의 응답으로 포함된 영수증만 저장 확정한다. */
+    void NotifyExpeditionSaveCommitted(const FString& PublicKey, int64 IncludedGrantSequence, int64 BackendRevision,
+                                       const FString& ValidatedHash);
+
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFableGameMode();
 
@@ -109,12 +168,32 @@ public:
 
 private:
     friend struct FFablePartyTestAccess;
+    friend class AFablePartyEncounter;
+
+    /** 신규 원정과 완료 원정 교체의 입장을 같은 원자적 경계로 처리한다. */
+    bool StartPreparedExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                                 AFablePartyEncounter* ReplacedEncounter = nullptr);
+
+    /** 현재 연결이 개인 결과를 읽을 권한이 있는지 확인한다. */
+    bool OwnsResultProfile(const AFablePlayerState* Profile) const;
+
+    /** 미확인·미저장 결과를 보존하면서 안전하게 새 원정 공간을 확보한다. */
+    bool EnsureResultCapacity(const FFableExpeditionTicket& Ticket);
+
+    /** 입장 성공 때 원래 증서의 개인 결과를 전원 생성한다. */
+    void RegisterExpeditionResults(const FFableExpeditionTicket& Ticket);
+
+    /** 개인 결과의 저장 상태와 버전을 갱신해 소유 연결에 전달한다. */
+    void PublishExpeditionResult(FFablePersonalExpeditionResult& Result);
+
+    TMap<FString, FFableCharacterExpeditionLedger> ExpeditionResults;
 
     /** 필드에서는 전체 연결, 원정에서는 확정한 키의 현재 연결만 조회한다. */
     TArray<APlayerController*> GetEncounterPlayers() const;
 
     /** 참가 증서의 모든 플레이어와 입장 조건을 다시 검사한다. */
-    bool ValidateAdmission(const FFableExpeditionTicket& Ticket, TArray<APlayerController*>& OutPlayers) const;
+    bool ValidateAdmission(const FFableExpeditionTicket& Ticket, TArray<APlayerController*>& OutPlayers,
+                           const AFablePartyEncounter* ReplacedEncounter = nullptr) const;
 
     /** 현재 연결이 차지한 파티 슬롯 값을 반환한다. */
     int32 GetConnectionSlot(AController* Player) const;

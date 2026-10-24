@@ -1287,12 +1287,27 @@ void AFableGameMode::RequestEnterRegion(APlayerController* Requester, EFableRegi
 bool AFableGameMode::RequestStartExpedition(APlayerController* Requester, FGuid PartyId,
                                             int32 ExpectedPreparationRevision)
 {
+    AFablePlayerState* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
+    const FFablePartyRecord* Party = Parties && Profile ? Parties->GetPartyForMember(Profile->PartyPlayerKey) : nullptr;
+    if (Party && Party->RetrySourceExpeditionId.IsValid())
+    {
+        Profile->SetNotice(TEXT("재도전 결과를 확인한 전용 입장 요청이 필요합니다."));
+        return false;
+    }
+    return StartPreparedExpedition(Requester, PartyId, ExpectedPreparationRevision);
+}
+
+/** 신규 입장과 완료 원정 교체가 같은 전원 검증·도착 확정 경계를 사용한다. */
+bool AFableGameMode::StartPreparedExpedition(APlayerController* Requester, FGuid PartyId,
+                                             int32 ExpectedPreparationRevision, AFablePartyEncounter* ReplacedEncounter)
+{
     auto* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
     if (!Profile || Profile->GetOwner() != Requester || !IsRequesterAlive(Requester) || bLegacyMode)
     {
         return false;
     }
-    if (IsPartyExpeditionActive(PartyId))
+    if (PendingAdmissions.Contains(PartyId) || (IsPartyExpeditionActive(PartyId) && !ReplacedEncounter))
     {
         Profile->SetNotice(TEXT("해당 파티의 원정이 이미 진행 중입니다."));
         return false;
@@ -1303,14 +1318,34 @@ bool AFableGameMode::RequestStartExpedition(APlayerController* Requester, FGuid 
     {
         return false;
     }
-    if (!CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    if (!ReplacedEncounter && !CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
     {
         Profile->SetNotice(TEXT("파티장이 마을의 파란 포털 근처에서 입장을 요청해야 합니다."));
         return false;
     }
     TArray<APlayerController*> Players;
-    if (!ValidateAdmission(Ticket, Players))
+    if (!ValidateAdmission(Ticket, Players, ReplacedEncounter))
     {
+        return false;
+    }
+    // 모든 참가자는 가장 최근 결과를 명시적으로 확인한 뒤 다음 원정을 시작한다.
+    for (const FString& Key : Ticket.MemberKeys)
+    {
+        APlayerController* Member = Parties->GetConnectedPlayer(Key);
+        AFablePlayerState* Other = Member ? Member->GetPlayerState<AFablePlayerState>() : nullptr;
+        if (!HasAcknowledgedLatestExpeditionResult(Other))
+        {
+            Profile->SetNotice(TEXT("모든 파티원이 이전 원정 결과를 먼저 확인하세요."));
+            if (Other && Other != Profile)
+            {
+                Other->SetNotice(TEXT("이전 원정 결과를 먼저 확인하세요."));
+            }
+            return false;
+        }
+    }
+    if (!EnsureResultCapacity(Ticket))
+    {
+        Profile->SetNotice(TEXT("이전 보상 저장 또는 모험 기록 확인을 마친 뒤 다시 입장하세요."));
         return false;
     }
 
@@ -1344,7 +1379,15 @@ bool AFableGameMode::RequestStartExpedition(APlayerController* Requester, FGuid 
     {
         Expeditions.Add(Ticket.ExpeditionId, Encounter);
     }
-    const bool bAdmitted = bPrepared && Encounter->Admit(Players);
+    if (ReplacedEncounter)
+    {
+        ReplacedEncounter->bTransitionPending = true;
+    }
+    const bool bAdmitted = bPrepared && Encounter->Admit(Players, ReplacedEncounter);
+    if (IsValid(ReplacedEncounter))
+    {
+        ReplacedEncounter->bTransitionPending = false;
+    }
     PendingAdmissions.Remove(PartyId);
     if (!bAdmitted)
     {
@@ -1381,8 +1424,8 @@ void AFableGameMode::RequestReturnVillage(APlayerController* Requester)
 }
 
 /** 이동 직전 명부와 현재 소유 연결을 다시 확인한다. */
-bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket,
-                                       TArray<APlayerController*>& OutPlayers) const
+bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket, TArray<APlayerController*>& OutPlayers,
+                                       const AFablePartyEncounter* ReplacedEncounter) const
 {
     // 확정 직전의 명부·선택을 다시 읽어 준비 단계와 이동 단계의 경계를 닫는다.
     OutPlayers.Reset();
@@ -1409,11 +1452,15 @@ bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket,
             });
         if (!Player || !Profile || Profile->GetOwner() != Player || !Profile->bProfileLoaded ||
             (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) || Profile->IsBackendSavePending() ||
-            Profile->ActiveExpeditionId.IsValid() || Profile->PartyId != Ticket.PartyId || !Hero || !Hero->IsAlive() ||
-            Hero->GetController() != Player || Hero->GetPlayerState<AFablePlayerState>() != Profile ||
-            !Profile->IsRegionEligible(Ticket.Region) ||
-            !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) || !Member || !Member->bConnected ||
-            Member->ReadyRevision != Ticket.PreparationRevision)
+            (Profile->ActiveExpeditionId.IsValid() &&
+             (!ReplacedEncounter || Profile->ActiveExpeditionId != ReplacedEncounter->GetExpeditionId() ||
+              !ReplacedEncounter->IsParticipant(Profile))) ||
+            Profile->PartyId != Ticket.PartyId || !Hero || !Hero->IsAlive() || Hero->GetController() != Player ||
+            Hero->GetPlayerState<AFablePlayerState>() != Profile || !Profile->IsExpeditionEligible(Ticket.Region) ||
+            (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) &&
+             (!ReplacedEncounter || !IsRetryPreparationParticipant(Profile, Party->RetrySourceExpeditionId,
+                                                                   Party->RetrySourceCompletionId))) ||
+            !Member || !Member->bConnected || Member->ReadyRevision != Ticket.PreparationRevision)
         {
             return false;
         }

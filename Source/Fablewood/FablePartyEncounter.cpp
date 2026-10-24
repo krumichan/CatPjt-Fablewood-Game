@@ -11,6 +11,7 @@
 #include "FablePlayerState.h"
 #include "FableProjectile.h"
 #include "Engine/World.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "EngineUtils.h"
 #include "Net/UnrealNetwork.h"
 #include "Kismet/GameplayStatics.h"
@@ -55,6 +56,13 @@ void AFablePartyEncounter::Destroyed()
 {
     if (HasAuthority())
     {
+        if (bCommitted && GetWorld() && !GetWorld()->bIsTearingDown)
+        {
+            if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+            {
+                Mode->CompleteExpeditionResult(this, EFableExpeditionOutcome::Abandoned);
+            }
+        }
         ClearEncounter();
         if (IsValid(Environment))
         {
@@ -68,6 +76,7 @@ void AFablePartyEncounter::Destroyed()
 void AFablePartyEncounter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AFablePartyEncounter, DepartureVote);
     DOREPLIFETIME(AFablePartyEncounter, Ticket);
     DOREPLIFETIME(AFablePartyEncounter, Progress);
     DOREPLIFETIME(AFablePartyEncounter, WorldOrigin);
@@ -210,12 +219,28 @@ bool AFablePartyEncounter::CreateEnvironment()
 }
 
 /** 参加者全員の到着確認後にのみ進行とbindingを確定する。 */
-bool AFablePartyEncounter::Admit(const TArray<APlayerController*>& Players)
+bool AFablePartyEncounter::Admit(const TArray<APlayerController*>& Players,
+                                 AFablePartyEncounter* ReplacedCompletedEncounter)
 {
     if (!HasAuthority() || !Ticket.IsValid() || bCommitted || bAdmissionPending ||
         Players.Num() != Ticket.MemberKeys.Num())
     {
         return false;
+    }
+
+    // 교체는 같은 파티의 실제 완료 원정과 새 명시적 준비를 모두 재검사한다.
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    if (ReplacedCompletedEncounter)
+    {
+        TArray<APlayerController*> Verified;
+        if (!Mode || ReplacedCompletedEncounter == this || !ReplacedCompletedEncounter->IsCommitted() ||
+            ReplacedCompletedEncounter->GetWorld() != GetWorld() || ReplacedCompletedEncounter->IsReturning() ||
+            ReplacedCompletedEncounter->GetTicket().PartyId != Ticket.PartyId ||
+            ReplacedCompletedEncounter->GetProgress().AdventureStage != EFableAdventureStage::Cleared ||
+            !Mode->ValidateAdmission(Ticket, Verified, ReplacedCompletedEncounter) || Verified.Num() != Players.Num())
+        {
+            return false;
+        }
     }
 
     // public 서버 API를 직접 호출해도 증서 밖의 연결을 binding할 수 없다.
@@ -227,7 +252,11 @@ bool AFablePartyEncounter::Admit(const TArray<APlayerController*>& Players)
         const AFableCharacter* Hero = IsValid(Player) ? Player->GetPawn<AFableCharacter>() : nullptr;
         if (!Parties || !Profile || Profile->GetOwner() != Player || Profile->GetWorld() != GetWorld() ||
             !Profile->bProfileLoaded || (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) ||
-            Profile->IsBackendSavePending() || Profile->ActiveExpeditionId.IsValid() ||
+            Profile->IsBackendSavePending() ||
+            (Profile->ActiveExpeditionId.IsValid() &&
+             (!ReplacedCompletedEncounter ||
+              Profile->ActiveExpeditionId != ReplacedCompletedEncounter->GetExpeditionId() ||
+              !ReplacedCompletedEncounter->IsParticipant(Profile))) ||
             Profile->PartyId != Ticket.PartyId || !Ticket.Contains(Profile->PartyPlayerKey) ||
             UniqueKeys.Contains(Profile->PartyPlayerKey) ||
             Parties->GetConnectedPlayer(Profile->PartyPlayerKey) != Player || !Hero || !Hero->IsAlive() ||
@@ -237,7 +266,7 @@ bool AFablePartyEncounter::Admit(const TArray<APlayerController*>& Players)
         }
         UniqueKeys.Add(Profile->PartyPlayerKey);
     }
-    if (!CreateEnvironment())
+    if ((Mode && !Mode->EnsureResultCapacity(Ticket)) || !CreateEnvironment())
     {
         return false;
     }
@@ -257,6 +286,11 @@ bool AFablePartyEncounter::Admit(const TArray<APlayerController*>& Players)
         AFablePlayerState* Profile = Player->GetPlayerState<AFablePlayerState>();
         Profile->ActiveExpeditionId = Ticket.ExpeditionId;
         Profile->ForceNetUpdate();
+    }
+    RefreshDepartureConnections();
+    if (Mode)
+    {
+        Mode->RegisterExpeditionResults(Ticket);
     }
     ForceNetUpdate();
     if (Ticket.Region == EFableRegion::Moonwell)
@@ -289,61 +323,110 @@ bool AFablePartyEncounter::Resume(APlayerController* Requester)
 
 bool AFablePartyEncounter::MoveAdmissionParticipants(const TArray<APlayerController*>& Players)
 {
-    // 전원 원위치와 시점을 보관하고 비어 있는 도착점을 먼저 확보한다.
-    TArray<FTransform> OriginalTransforms;
-    TArray<FRotator> OriginalViews;
+    return MoveParticipantsAtomically(Players, Ticket.Region, WorldOrigin, false);
+}
+
+/** 실패한 임시 이동은 게임 전투 상태를 바꾸지 않고 이동 정보만 복원한다. */
+bool AFablePartyEncounter::MoveParticipantsAtomically(const TArray<APlayerController*>& Players, EFableRegion Region,
+                                                      FVector Origin, bool bRestore)
+{
+    // 전투 상태 대신 임시 이동에서 바뀔 수 있는 엔진 이동 정보만 보관한다.
+    struct FTravelState
+    {
+        FTransform Transform;
+        FRotator View;
+        FVector Velocity;
+        EMovementMode Mode = MOVE_None;
+        uint8 CustomMode = 0;
+        FMovementBaseInterfaceData Base;
+        FName Bone;
+        FFindFloorResult Floor;
+        bool bTeleported = false;
+        bool bForceFloor = false;
+    };
+    TArray<FTravelState> Before;
     TArray<FVector> Destinations;
-    const FRotator ArrivalRotation(0, 90, 0);
+    const FRotator Rotation(0, 90, 0);
     for (int32 Index = 0; Index < Players.Num(); ++Index)
     {
         AFableCharacter* Hero = Players[Index] ? Players[Index]->GetPawn<AFableCharacter>() : nullptr;
-        FVector Destination = FableRPG::RegionEntrance(Ticket.Region) + WorldOrigin + FVector(Index * 240, 0, 10);
-        if (!Hero || !GetWorld()->FindTeleportSpot(Hero, Destination, ArrivalRotation) ||
-            !FableRPG::IsInRegion(Ticket.Region, Destination - WorldOrigin))
+        UCharacterMovementComponent* Movement = Hero ? Hero->GetCharacterMovement() : nullptr;
+        FVector Destination = Region == EFableRegion::Village
+                                  ? FVector(Index * 240, -1080, 110)
+                                  : FableRPG::RegionEntrance(Region) + Origin + FVector(Index * 240, 0, 10);
+        if (!Hero || !Movement || !Hero->HasAuthority() || !GetWorld()->FindTeleportSpot(Hero, Destination, Rotation) ||
+            !FableRPG::IsInRegion(Region, Destination - Origin))
         {
             return false;
         }
-
-        OriginalTransforms.Add(Hero->GetActorTransform());
-        OriginalViews.Add(Players[Index]->GetControlRotation());
+        FTravelState State;
+        State.Transform = Hero->GetActorTransform();
+        State.View = Players[Index]->GetControlRotation();
+        State.Velocity = Movement->Velocity;
+        State.Mode = Movement->MovementMode;
+        State.CustomMode = Movement->CustomMovementMode;
+        if (const FMovementBaseInterfaceData* Base = Hero->GetMovementBaseInterfaceData())
+        {
+            State.Base = *Base;
+        }
+        State.Bone = Hero->GetBasedMovement().BoneName;
+        State.Floor = Movement->CurrentFloor;
+        State.bTeleported = Movement->bJustTeleported;
+        State.bForceFloor = Movement->bForceNextFloorCheck;
+        Before.Add(State);
         Destinations.Add(Destination);
     }
 
-    // HP/MP를 회복하지 않는 이동 뒤 실제 위치를 확인한다.
+    // 임시 단계에서는 SetCheckpoint를 호출하지 않아 cooldown·shield·투사체를 보존한다.
     bool bAllArrived = true;
     for (int32 Index = 0; Index < Players.Num(); ++Index)
     {
         AFableCharacter* Hero = Players[Index]->GetPawn<AFableCharacter>();
-        if (!Hero)
+        if (!Hero || !Hero->TeleportTo(Destinations[Index], Rotation, false, false))
         {
             bAllArrived = false;
             break;
         }
-
-        Hero->SetCheckpoint(Destinations[Index], ArrivalRotation, false);
         const FVector Actual = Hero->GetActorLocation();
-        bAllArrived = Hero->IsAlive() && FableRPG::IsInRegion(Ticket.Region, Actual - WorldOrigin) &&
-                      FVector::DistSquared2D(Actual, Destinations[Index]) <= FMath::Square(150.0f) &&
-                      FMath::Abs(Actual.Z - Destinations[Index].Z) <= 180.0f && bAllArrived;
-    }
-
-    if (!bAllArrived)
-    {
-        // 失敗時はHP/MPを回復せず、元の位置と視点を復元する。
-        for (int32 Index = 0; Index < Players.Num(); ++Index)
+        if (!Hero->IsAlive() || !FableRPG::IsInRegion(Region, Actual - Origin) ||
+            FVector::DistSquared2D(Actual, Destinations[Index]) > FMath::Square(150.0f) ||
+            FMath::Abs(Actual.Z - Destinations[Index].Z) > 180.0f)
         {
-            if (AFableCharacter* Hero = Players[Index] ? Players[Index]->GetPawn<AFableCharacter>() : nullptr)
-            {
-                Hero->SetActorTransform(OriginalTransforms[Index], false, nullptr, ETeleportType::TeleportPhysics);
-                Hero->SetCheckpoint(OriginalTransforms[Index].GetLocation(), OriginalTransforms[Index].Rotator(),
-                                    false);
-                Players[Index]->SetControlRotation(OriginalViews[Index]);
-                Players[Index]->ClientSetRotation(OriginalViews[Index], true);
-            }
+            bAllArrived = false;
+            break;
         }
     }
+    if (!bAllArrived)
+    {
+        // 원래 지형이 살아 있는 동안 이동 기반·floor·속도·시점까지 되돌린다.
+        for (int32 Index = 0; Index < Players.Num(); ++Index)
+        {
+            AFableCharacter* Hero = Players[Index] ? Players[Index]->GetPawn<AFableCharacter>() : nullptr;
+            if (!Hero)
+            {
+                continue;
+            }
+            UCharacterMovementComponent* Movement = Hero->GetCharacterMovement();
+            FTravelState& State = Before[Index];
+            Hero->SetActorTransform(State.Transform, false, nullptr, ETeleportType::TeleportPhysics);
+            Movement->SetMovementMode(State.Mode, State.CustomMode);
+            Hero->SetBase(&State.Base, State.Bone);
+            Movement->CurrentFloor = State.Floor;
+            Movement->Velocity = State.Velocity;
+            Movement->bJustTeleported = State.bTeleported;
+            Movement->bForceNextFloorCheck = State.bForceFloor;
+            Players[Index]->SetControlRotation(State.View);
+            Players[Index]->ClientSetRotation(State.View, true);
+        }
+        return false;
+    }
 
-    return bAllArrived;
+    // 전원 도착 후에는 충돌검사를 다시 하지 않고 현재 위치에서 한 번만 확정한다.
+    for (APlayerController* Player : Players)
+    {
+        Player->GetPawn<AFableCharacter>()->CommitCheckpointAtCurrentPosition(Rotation, bRestore);
+    }
+    return true;
 }
 
 /** 참가자 위치 이동은 원정의 고정 슬롯과 원점을 사용한다. */
@@ -357,7 +440,7 @@ bool AFablePartyEncounter::MovePlayerToCheckpoint(APlayerController* Player, EFa
     AFableCharacter* Hero = Player->GetPawn<AFableCharacter>();
     if (!Hero && !Player->GetPawn())
     {
-        if (auto* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>())
+        if (auto* Mode = AFableGameMode::Find(GetWorld()))
         {
             Mode->RestartPlayer(Player);
         }
@@ -421,7 +504,7 @@ bool AFablePartyEncounter::HasRetryQuest() const
     for (APlayerController* Player : GetParticipants())
     {
         if (const auto* Profile = Player->GetPlayerState<AFablePlayerState>();
-            Profile && Profile->IsRegionEligible(Ticket.Region))
+            Profile && Profile->IsExpeditionEligible(Ticket.Region))
         {
             return true;
         }
@@ -435,6 +518,10 @@ void AFablePartyEncounter::FinishExpedition()
     if (!HasAuthority() || !Ticket.IsValid())
     {
         return;
+    }
+    if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+    {
+        Mode->CompleteExpeditionResult(this, EFableExpeditionOutcome::Abandoned);
     }
     for (TActorIterator<AFablePlayerState> It(GetWorld()); It; ++It)
     {
@@ -754,7 +841,8 @@ void AFablePartyEncounter::HandleEnemyDefeated(AFableEnemy* Enemy)
 {
     // Only a committed death of a member of this encounter can award once.
     // 서버 권한과 실행 위치 조건 검사
-    if (!HasAuthority() || !IsValid(Enemy) || Enemy->GetExpeditionId() != Ticket.ExpeditionId || Enemy->IsAlive() ||
+    if (!HasAuthority() || !bCommitted || bTransitionPending || !IsValid(Enemy) ||
+        Enemy->GetExpeditionId() != Ticket.ExpeditionId || Enemy->IsAlive() ||
         ActiveEnemies.Remove(TWeakObjectPtr<AFableEnemy>(Enemy)) == 0)
     {
         return;
@@ -768,6 +856,7 @@ void AFablePartyEncounter::HandleEnemyDefeated(AFableEnemy* Enemy)
         return;
     }
 
+    RecordedDefeats.Add(Enemy->GetSpawnId());
     const bool bBoss = Enemy->IsBoss();
 
     // 생존 상태와 부활 진행 처리
@@ -795,7 +884,7 @@ void AFablePartyEncounter::HandleEnemyDefeated(AFableEnemy* Enemy)
                                        Profile->ForestQuest == EFableQuestStage::Active;
             const bool bDungeonCredit = IsParticipant(Profile) && IsDungeonRunning() &&
                                         FableAdventure::For(this).IsInRegion(State->ActiveRegion, PawnLocation) &&
-                                        Profile->IsRegionEligible(State->ActiveRegion);
+                                        Profile->IsExpeditionEligible(State->ActiveRegion);
 
             // 지역·적·전투 진행 처리
             if (bForestCredit)
@@ -804,7 +893,10 @@ void AFablePartyEncounter::HandleEnemyDefeated(AFableEnemy* Enemy)
             }
             else if (bDungeonCredit)
             {
-                Profile->RecordRegionKill(State->ActiveRegion, bBoss, State->ActiveDifficulty);
+                if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+                {
+                    Mode->RecordExpeditionDefeat(this, Enemy, Profile);
+                }
             }
         }
     }
@@ -861,6 +953,10 @@ void AFablePartyEncounter::HandleEnemyDefeated(AFableEnemy* Enemy)
         {
             State->AdventureStage = EFableAdventureStage::Cleared;
             State->bObjectiveComplete = true;
+            if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+            {
+                Mode->CompleteExpeditionResult(this, EFableExpeditionOutcome::Cleared);
+            }
             NotifyParty(TEXT("수호자를 처치했습니다! 귀환 포털에서 E를 누르고 안내인에게 해당 의뢰 보상을 받으세요."));
         }
     }
@@ -978,6 +1074,11 @@ void AFablePartyEncounter::CheckPartyState()
         return;
     }
 
+    if (bTransitionPending)
+    {
+        return;
+    }
+    RefreshDepartureConnections();
     FFableAdventureProgress* State = &Progress;
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
@@ -1114,6 +1215,18 @@ void AFablePartyEncounter::CheckPartyState()
 /** ReturnPartyToVillage는 해당 원정의 진행과 참가자만 처리한다. */
 void AFablePartyEncounter::ReturnPartyToVillage(bool bWipe)
 {
+    if (bTransitionPending)
+    {
+        return;
+    }
+    bReturnAfterWipe = bWipe;
+    if (bWipe)
+    {
+        if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+        {
+            Mode->CompleteExpeditionResult(this, EFableExpeditionOutcome::Recovered);
+        }
+    }
     // 지역·적·전투 진행 처리
     ClearEncounter();
     bReturnAfterWipe = bWipe;
@@ -1166,6 +1279,10 @@ void AFablePartyEncounter::ReturnPartyToVillage(bool bWipe)
 /** RequestReturnVillage는 해당 원정의 진행과 참가자만 처리한다. */
 void AFablePartyEncounter::RequestReturnVillage(APlayerController* Requester)
 {
+    if (bTransitionPending)
+    {
+        return;
+    }
     // HTTP 요청·응답과 연결 상태 조건 검사
     if (!bCommitted || !IsRequesterAlive(Requester))
     {
@@ -1223,4 +1340,158 @@ void AFablePartyEncounter::RequestReturnVillage(APlayerController* Requester)
     }
 
     ReturnPartyToVillage(bReturnPending ? bReturnAfterWipe : false);
+}
+
+/** 실제 원정 처치에서 등록한 불변 SpawnId인지 조회한다. */
+bool AFablePartyEncounter::HasRecordedDefeat(FGuid EnemySpawnId) const
+{
+    return bCommitted && EnemySpawnId.IsValid() && RecordedDefeats.Contains(EnemySpawnId);
+}
+
+/** 현재 진행 중 귀환 동의 스냅숏을 읽는다. */
+const FFableExpeditionDepartureVote& AFablePartyEncounter::GetDepartureVote() const
+{
+    return DepartureVote;
+}
+
+/** 접속이 바뀌면 이전 연결이 제출한 귀환 동의를 전부 취소한다. */
+void AFablePartyEncounter::RefreshDepartureConnections()
+{
+    if (!HasAuthority() || !bCommitted)
+    {
+        return;
+    }
+    TSet<FString> Connected;
+    TMap<FString, TWeakObjectPtr<APlayerController>> Controllers;
+    for (APlayerController* Player : GetParticipants())
+    {
+        const FString& Key = Player->GetPlayerState<AFablePlayerState>()->PartyPlayerKey;
+        Connected.Add(Key);
+        Controllers.Add(Key, Player);
+    }
+
+    // 같은 키가 감시 tick 사이에 재접속해도 이전 연결의 동의는 승계하지 않는다.
+    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
+    const FFablePartyRecord* Party =
+        Parties && !Ticket.MemberKeys.IsEmpty() ? Parties->GetPartyForMember(Ticket.MemberKeys[0]) : nullptr;
+    const bool bSameParty = Party && Party->PartyId == Ticket.PartyId;
+    const int32 Revision = bSameParty ? Party->Revision : 0;
+    const FString Leader = bSameParty ? Party->LeaderKey : FString();
+    bool bSame = Connected.Num() == DepartureConnections.Num() && Controllers.Num() == DepartureControllers.Num() &&
+                 Revision == DeparturePartyRevision && Leader == DepartureLeaderKey;
+    for (const FString& Key : Connected)
+    {
+        const TWeakObjectPtr<APlayerController>* Previous = DepartureControllers.Find(Key);
+        const TWeakObjectPtr<APlayerController>* Current = Controllers.Find(Key);
+        bSame &= DepartureConnections.Contains(Key) && Previous && Current && *Previous == *Current;
+    }
+    if (!bSame)
+    {
+        DepartureConnections = MoveTemp(Connected);
+        DepartureControllers = MoveTemp(Controllers);
+        DeparturePartyRevision = Revision;
+        DepartureLeaderKey = Leader;
+        DepartureVote.ConsentingMemberKeys.Reset();
+        DepartureVote.Revision = DepartureVote.Revision < MAX_int32 ? DepartureVote.Revision + 1 : 1;
+        ForceNetUpdate();
+    }
+}
+
+/** 같은 원래 증서 전원이 현재 연결에서 명시적으로 동의해야 철수한다. */
+bool AFablePartyEncounter::SetAbandonConsent(APlayerController* Requester, FGuid ExpectedExpeditionId,
+                                             int32 ExpectedDepartureRevision, bool bConsent)
+{
+    if (!HasAuthority() || bTransitionPending || ExpectedExpeditionId != Ticket.ExpeditionId || !IsDungeonRunning() ||
+        bReturnPending || !IsRequesterAlive(Requester))
+    {
+        return false;
+    }
+    RefreshDepartureConnections();
+    AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
+    if (DepartureVote.Revision != ExpectedDepartureRevision || Profile->IsBackendSavePending() ||
+        (Profile->IsBackendEnabled() && !Profile->IsBackendReady()))
+    {
+        return false;
+    }
+    if (bConsent)
+    {
+        DepartureVote.ConsentingMemberKeys.AddUnique(Profile->PartyPlayerKey);
+    }
+    else
+    {
+        DepartureVote.ConsentingMemberKeys.Remove(Profile->PartyPlayerKey);
+    }
+    ForceNetUpdate();
+    if (!bConsent || DepartureVote.ConsentingMemberKeys.Num() != Ticket.MemberKeys.Num())
+    {
+        return true;
+    }
+    return CommitAbandon();
+}
+
+/** 전원 동의·현재 접속을 다시 검사한 뒤 전원 도착 시에만 원정을 종료한다. */
+bool AFablePartyEncounter::CommitAbandon()
+{
+    const TArray<APlayerController*> Players = GetParticipants();
+    if (Players.Num() != Ticket.MemberKeys.Num() || DepartureConnections.Num() != Ticket.MemberKeys.Num())
+    {
+        return false;
+    }
+    for (APlayerController* Player : Players)
+    {
+        const AFablePlayerState* Profile = Player->GetPlayerState<AFablePlayerState>();
+        const AFableCharacter* Hero = Player->GetPawn<AFableCharacter>();
+        if (!Profile || !Hero || !Hero->IsAlive() ||
+            !DepartureVote.ConsentingMemberKeys.Contains(Profile->PartyPlayerKey) || Profile->IsBackendSavePending() ||
+            (Profile->IsBackendEnabled() && !Profile->IsBackendReady()))
+        {
+            return false;
+        }
+    }
+    TGuardValue<bool> Guard(bTransitionPending, true);
+    if (!MoveParticipantsAtomically(Players, EFableRegion::Village, FVector::ZeroVector, false))
+    {
+        DepartureVote.ConsentingMemberKeys.Reset();
+        DepartureVote.Revision = DepartureVote.Revision < MAX_int32 ? DepartureVote.Revision + 1 : 1;
+        ForceNetUpdate();
+        return false;
+    }
+    if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+    {
+        Mode->CompleteExpeditionResult(this, EFableExpeditionOutcome::Abandoned);
+    }
+    ClearRecoveryCombat();
+    NotifyParty(TEXT("전원이 동의하여 마을로 철수했습니다. 이미 받은 개인 보상은 보존됩니다."));
+    FinishExpedition();
+    return true;
+}
+
+/** 새 증서가 이미 모든 참가자에게 확정된 뒤 이전 원정 자원만 제거한다. */
+void AFablePartyEncounter::RetireAfterReplacement(FGuid NewExpeditionId)
+{
+    if (!HasAuthority() || !NewExpeditionId.IsValid() || NewExpeditionId == Ticket.ExpeditionId ||
+        Progress.AdventureStage != EFableAdventureStage::Cleared)
+    {
+        return;
+    }
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    const AFablePartyEncounter* Replacement = Mode ? Mode->FindExpedition(NewExpeditionId) : nullptr;
+    if (!Replacement || Replacement->GetTicket().PartyId != Ticket.PartyId ||
+        Replacement->GetTicket().MemberKeys.Num() != Ticket.MemberKeys.Num())
+    {
+        return;
+    }
+    const AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld());
+    for (const FString& Key : Ticket.MemberKeys)
+    {
+        const APlayerController* Player = Parties ? Parties->GetConnectedPlayer(Key) : nullptr;
+        const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        if (!Profile || Profile->ActiveExpeditionId != NewExpeditionId)
+        {
+            return;
+        }
+    }
+    bCommitted = false;
+    ClearRecoveryCombat();
+    Destroy();
 }

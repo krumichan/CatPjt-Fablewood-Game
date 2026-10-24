@@ -492,6 +492,11 @@ private:
     /** 회피 사용 조건을 확인하고 이동과 재사용 대기시간을 적용한다. */
     void PerformDodge();
 
+    friend class AFablePartyEncounter;
+
+    /** 이동 성공이 확정된 현재 위치에서만 전투·부활 지점을 확정한다. */
+    void CommitCheckpointAtCurrentPosition(const FRotator& Rotation, bool bRestore);
+
     /** 서버가 관리하는 안전 지점으로 캐릭터를 복귀시킨다. */
     void RespawnAtSafePoint();
 

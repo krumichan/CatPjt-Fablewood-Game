@@ -32,6 +32,7 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendReady, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendClosing, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, ExpeditionResult, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendSavePending, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendRevision, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendAcknowledgedRevision, COND_OwnerOnly);
@@ -1366,6 +1367,91 @@ bool AFablePlayerState::IsRegionEligible(EFableRegion Region) const
     return Region == EFableRegion::Village;
 }
 
+/** 요청한 개인 결과의 소유 연결용 스냅숏을 읽는다. */
+const FFablePersonalExpeditionResult& AFablePlayerState::GetExpeditionResult() const
+{
+    return ExpeditionResult;
+}
+
+/** NPC 보고 권리와 별개로 이미 수락·해금한 지역의 재도전을 허용한다. */
+bool AFablePlayerState::IsExpeditionEligible(EFableRegion Region) const
+{
+    if (!bProfileLoaded)
+    {
+        return false;
+    }
+    const EFableQuestStage Stage = Region == EFableRegion::Moonwell ? MoonwellQuest : DungeonQuest;
+    const bool bAccepted =
+        Stage == EFableQuestStage::Active || Stage == EFableQuestStage::Ready || Stage == EFableQuestStage::Completed;
+    if (Region == EFableRegion::RootRuins)
+    {
+        return ForestQuest == EFableQuestStage::Completed && bAccepted;
+    }
+    if (Region == EFableRegion::Moonwell)
+    {
+        return DungeonCompletions >= 1 && bAccepted;
+    }
+    return false;
+}
+
+/** 원정 정본에서 검증한 지급만 적용하고 저장 큐는 영수증 발급 뒤 호출한다. */
+bool AFablePlayerState::ApplyExpeditionReward(const FFableExpeditionTicket& Ticket, bool bBoss,
+                                              FFablePersonalGrantReceipt& OutReceipt)
+{
+    if (!HasAuthority() || !Ticket.IsValid() || ActiveExpeditionId != Ticket.ExpeditionId ||
+        PartyId != Ticket.PartyId || !Ticket.Contains(PartyPlayerKey) || !IsExpeditionEligible(Ticket.Region) ||
+        (bBackendEnabled && !IsBackendReady()) || uint8(Ticket.Difficulty) > uint8(EFableDifficulty::Hard))
+    {
+        return false;
+    }
+
+    // 함수 안의 동기 지급 차이만 기록하며 원정 전후 지갑 차이를 사용하지 않는다.
+    const int32 BeforeGold = Gold;
+    const int32 BeforeOre = Ore;
+    const int32 BeforeRoot = RootCores;
+    const int32 BeforeMoon = MoonCrystals;
+    const int32 BeforeTotalXP = 50 * Level * (Level - 1) + Experience;
+    const bool bMoon = Ticket.Region == EFableRegion::Moonwell;
+    const float Multiplier = Ticket.Difficulty == EFableDifficulty::Hard ? 1.5f : 1.0f;
+    const int32 GoldReward = FMath::RoundToInt((bBoss ? (bMoon ? 180 : 140) : (bMoon ? 22 : 18)) * Multiplier);
+    const int32 OreReward = FMath::RoundToInt((bBoss ? (bMoon ? 10 : 8) : (bMoon ? 2 : 1)) * Multiplier);
+    const int32 XPReward = FMath::RoundToInt((bBoss ? (bMoon ? 300 : 250) : (bMoon ? 45 : 35)) * Multiplier);
+
+    // 이미 Ready인 의뢰의 미보고 보상은 추가하거나 소비하지 않는다.
+    EFableQuestStage& Quest = bMoon ? MoonwellQuest : DungeonQuest;
+    if (bBoss && Quest == EFableQuestStage::Active)
+    {
+        Quest = EFableQuestStage::Ready;
+    }
+    Gold = FMath::Min(1000000, Gold + GoldReward);
+    Ore = FMath::Min(100000, Ore + OreReward);
+    AddExperience(XPReward);
+
+    // 장비는 발급 당시 전체 스냅숏과 영구 InstanceId를 보관한다.
+    if (bBoss)
+    {
+        int32& Material = bMoon ? MoonCrystals : RootCores;
+        Material = FMath::Min(100000, Material + (Ticket.Difficulty == EFableDifficulty::Hard ? 2 : 1));
+        const int32 Completions = bMoon ? MoonwellCompletions : DungeonCompletions;
+        const EFableEquipmentSlot Slot =
+            Completions % 2 == 0 ? EFableEquipmentSlot::Armor : EFableEquipmentSlot::Weapon;
+        const int32 Nominal = Slot == EFableEquipmentSlot::Weapon ? (bMoon ? 58 : 48) : (bMoon ? 16 : 12);
+        if (AddItem(Slot, HeroClass, bMoon ? 3 : 2, Nominal,
+                    bMoon ? EFableEquipmentSet::Moonlight : EFableEquipmentSet::RootGuardian, Ticket.Difficulty))
+        {
+            OutReceipt.GrantedItems.Add(Inventory.Last());
+        }
+    }
+
+    // 레벨업과 만렙에서 실제 보존된 누적 XP만 영수증에 반영한다.
+    OutReceipt.ActualGold = Gold - BeforeGold;
+    OutReceipt.ActualOre = Ore - BeforeOre;
+    OutReceipt.ActualExperience = FMath::Max(0, 50 * Level * (Level - 1) + Experience - BeforeTotalXP);
+    OutReceipt.ActualRootCores = RootCores - BeforeRoot;
+    OutReceipt.ActualMoonCrystals = MoonCrystals - BeforeMoon;
+    return true;
+}
+
 /** 퀘스트 진행 단계 값을 반환한다. */
 EFableQuestStage AFablePlayerState::GetQuestStage(EFableQuestId Quest) const
 {
@@ -1693,6 +1779,12 @@ void AFablePlayerState::RecordRegionKill(EFableRegion Region, bool bBoss, EFable
         {
             RecordKill(false);
         }
+        return;
+    }
+
+    // private 원정은 SpawnId·증서가 검증된 전용 지급 경로만 사용한다.
+    if (ActiveExpeditionId.IsValid())
+    {
         return;
     }
 

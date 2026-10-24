@@ -209,6 +209,10 @@ void AFablePartyManager::RegisterPlayer(APlayerController* Player)
     }
 
     Publish();
+    if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
+    {
+        Mode->RestoreExpeditionResult(Profile);
+    }
 }
 
 /** 온라인 파티장을 우선하며 모두 끊겼다면 유예 중 기존 명부를 보존한다. */
@@ -293,7 +297,7 @@ bool AFablePartyManager::CanEditMembership(const AFablePlayerState* Profile) con
         return false;
     }
 
-    const AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
     if (Mode &&
         (Mode->IsPartyExpeditionActive(Profile ? Profile->PartyId : FGuid()) || Mode->IsExpeditionParticipant(Profile)))
     {
@@ -557,6 +561,8 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
 void AFablePartyManager::ResetReadiness(FFablePartyRecord& Party)
 {
     Party.PreparationRevision = Party.PreparationRevision < MAX_int32 ? Party.PreparationRevision + 1 : 1;
+    Party.RetrySourceExpeditionId.Invalidate();
+    Party.RetrySourceCompletionId.Invalidate();
 
     for (FFablePartyMember& Member : Party.Members)
     {
@@ -621,7 +627,11 @@ FFablePartyRecord* AFablePartyManager::ValidatePreparation(APlayerController* Re
         Reject(Profile, TEXT("파티 준비 상태가 바뀌었습니다. 새 상태를 확인하세요."));
         return nullptr;
     }
-    if (!CanEditMembership(Profile) || Profile->ActiveExpeditionId.IsValid())
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    const bool bCompletedRetry =
+        Mode && Party->RetrySourceExpeditionId.IsValid() &&
+        Mode->IsRetryPreparationParticipant(Profile, Party->RetrySourceExpeditionId, Party->RetrySourceCompletionId);
+    if ((!CanEditMembership(Profile) || Profile->ActiveExpeditionId.IsValid()) && !bCompletedRetry)
     {
         Reject(Profile, TEXT("원정 중에는 파티 준비를 변경할 수 없습니다."));
         return nullptr;
@@ -645,13 +655,18 @@ bool AFablePartyManager::SelectExpedition(APlayerController* Requester, FGuid Pa
     {
         return false;
     }
+    if (ValidatePlayer(Requester)->ActiveExpeditionId.IsValid())
+    {
+        return Reject(ValidatePlayer(Requester), TEXT("완료 원정 안에서는 원래 목적지로만 재도전하세요."));
+    }
     if ((Region != EFableRegion::RootRuins && Region != EFableRegion::Moonwell) ||
         (Difficulty != EFableDifficulty::Normal && Difficulty != EFableDifficulty::Hard))
     {
         return Reject(ValidatePlayer(Requester), TEXT("유효한 던전과 난이도를 선택하세요."));
     }
 
-    if (Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty)
+    if (Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty ||
+        Party->RetrySourceExpeditionId.IsValid())
     {
         Party->SelectedRegion = Region;
         Party->SelectedDifficulty = Difficulty;
@@ -690,11 +705,15 @@ bool AFablePartyManager::SetExpeditionReady(APlayerController* Requester, FGuid 
             return Entry.PlayerKey == Profile->PartyPlayerKey;
         });
     const AFableCharacter* Hero = Requester->GetPawn<AFableCharacter>();
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    const bool bRetryPlace =
+        Mode && Party->RetrySourceExpeditionId.IsValid() &&
+        Mode->IsRetryPreparationParticipant(Profile, Party->RetrySourceExpeditionId, Party->RetrySourceCompletionId);
     if (!Member || !Member->bConnected || GetConnectedPlayer(Member->PlayerKey) != Requester ||
-        (bReady &&
-         (!Hero || !Hero->IsAlive() || Hero->GetController() != Requester ||
-          Hero->GetPlayerState<AFablePlayerState>() != Profile || !Profile->IsRegionEligible(Party->SelectedRegion) ||
-          !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))))
+        (bReady && (!Hero || !Hero->IsAlive() || Hero->GetController() != Requester ||
+                    Hero->GetPlayerState<AFablePlayerState>() != Profile ||
+                    !Profile->IsExpeditionEligible(Party->SelectedRegion) ||
+                    (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) && !bRetryPlace))))
     {
         return Reject(Profile, TEXT("마을에서 생존 상태와 해당 던전 의뢰를 확인한 뒤 준비하세요."));
     }
@@ -728,6 +747,7 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
         return Reject(Profile, TEXT("파티 명부와 남아 있는 초대를 먼저 확인하세요."));
     }
 
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
     // 파티 UI의 준비 표시는 신뢰하지 않고 전원의 현재 연결·의뢰·생존을 재검사한다.
     TSet<FString> UniqueKeys;
     for (const FFablePartyMember& Member : Party->Members)
@@ -737,10 +757,15 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
         const AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
         if (!Member.bConnected || !Other || !Hero || !Hero->IsAlive() || Hero->GetController() != Player ||
             Hero->GetPlayerState<AFablePlayerState>() != Other || Other->PartyId != PartyId ||
-            Other->IsBackendSavePending() || Other->ActiveExpeditionId.IsValid() ||
-            !Other->IsRegionEligible(Party->SelectedRegion) ||
-            !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) || Member.PlayerKey.IsEmpty() ||
-            UniqueKeys.Contains(Member.PlayerKey))
+            Other->IsBackendSavePending() ||
+            (Other->ActiveExpeditionId.IsValid() &&
+             (!Mode || !Mode->IsRetryPreparationParticipant(Other, Party->RetrySourceExpeditionId,
+                                                            Party->RetrySourceCompletionId))) ||
+            !Other->IsExpeditionEligible(Party->SelectedRegion) ||
+            (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) &&
+             (!Mode || !Mode->IsRetryPreparationParticipant(Other, Party->RetrySourceExpeditionId,
+                                                            Party->RetrySourceCompletionId))) ||
+            Member.PlayerKey.IsEmpty() || UniqueKeys.Contains(Member.PlayerKey))
         {
             return Reject(Profile, TEXT("모든 파티원이 접속·생존·저장·던전 의뢰 조건을 만족해야 합니다."));
         }
@@ -770,7 +795,65 @@ bool AFablePartyManager::StartExpedition(APlayerController* Requester, FGuid Par
         return false;
     }
 
-    AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
     return Mode ? Mode->RequestStartExpedition(Requester, PartyId, ExpectedPreparationRevision)
                 : Reject(ValidatePlayer(Requester), TEXT("원정 서버가 아직 준비되지 않았습니다."));
+}
+
+/** 완료 결과를 새 준비 리비전에 묶으며 중복 준비 요청은 기존 동의를 지우지 않는다. */
+bool AFablePartyManager::PrepareExpeditionRetry(APlayerController* Requester, FGuid PartyId,
+                                                int32 ExpectedPreparationRevision, FGuid OldExpeditionId,
+                                                FGuid CompletionId)
+{
+    AFablePlayerState* Profile = ValidatePlayer(Requester);
+    if (!Profile || GetConnectedPlayer(Profile->PartyPlayerKey) != Requester)
+    {
+        return false;
+    }
+    ExpireEntries();
+    FFablePartyRecord* Party = const_cast<FFablePartyRecord*>(GetPartyForMember(Profile->PartyPlayerKey));
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    if (!Party || Party->PartyId != PartyId || Profile->PartyId != PartyId ||
+        Party->LeaderKey != Profile->PartyPlayerKey || Party->PreparationRevision != ExpectedPreparationRevision ||
+        !Mode)
+    {
+        return Reject(Profile, TEXT("재도전 결과·파티장·모든 접속 및 보상 저장을 확인하세요."));
+    }
+    // 아직 보지 않은 이전 결과를 남긴 채 새 준비를 만들지 않는다.
+    for (const FFablePartyMember& Member : Party->Members)
+    {
+        APlayerController* Player = GetConnectedPlayer(Member.PlayerKey);
+        AFablePlayerState* Other = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        if (!Mode->HasAcknowledgedLatestExpeditionResult(Other))
+        {
+            if (Other && Other != Profile)
+            {
+                Other->SetNotice(TEXT("이전 원정 결과를 먼저 확인하세요."));
+            }
+            return Reject(Profile, TEXT("모든 파티원이 이전 원정 결과를 먼저 확인하세요."));
+        }
+    }
+    if (!Mode->CanPrepareExpeditionRetry(Requester, PartyId, OldExpeditionId, CompletionId))
+    {
+        return Reject(Profile, TEXT("재도전 결과·모든 접속 및 보상 저장을 확인하세요."));
+    }
+    if (Party->RetrySourceExpeditionId == OldExpeditionId && Party->RetrySourceCompletionId == CompletionId)
+    {
+        return true;
+    }
+    const FFablePersonalExpeditionResult* Result = Mode->GetResultByExpedition(Profile, OldExpeditionId);
+    if (!Result)
+    {
+        return false;
+    }
+    const EFableRegion Region = Result->Ticket.Region;
+    const EFableDifficulty Difficulty = Result->Ticket.Difficulty;
+    ResetReadiness(*Party);
+    Party->SelectedRegion = Region;
+    Party->SelectedDifficulty = Difficulty;
+    Party->RetrySourceExpeditionId = OldExpeditionId;
+    Party->RetrySourceCompletionId = CompletionId;
+    Profile->SetNotice(TEXT("재도전을 준비했습니다. 모든 동료가 새로 준비해야 합니다."));
+    Publish();
+    return true;
 }

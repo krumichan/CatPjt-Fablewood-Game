@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerState.h"
 #include "FableRPGTypes.h"
+#include "FableExpeditionResultTypes.h"
 #include "FablePlayerState.generated.h"
 
 class UFableSaveGame;
@@ -26,6 +27,16 @@ public:
     /** 서버 참가 증서와 연결되는 현재 원정. 영구 저장 데이터에는 포함하지 않는다. */
     UPROPERTY(Replicated, BlueprintReadOnly)
     FGuid ActiveExpeditionId;
+
+    /** 최신 또는 요청한 개인 결과만 소유 연결에 복제한다. */
+    UPROPERTY(Replicated)
+    FFablePersonalExpeditionResult ExpeditionResult;
+
+    /** 읽기 전용 결과 스냅숏을 반환한다. */
+    const FFablePersonalExpeditionResult& GetExpeditionResult() const;
+
+    /** NPC 보고 보상과 구분되는 지역 해금·원정 자격을 확인한다. */
+    bool IsExpeditionEligible(EFableRegion Region) const;
 
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFablePlayerState();
@@ -407,6 +418,12 @@ public:
 
 private:
     friend struct FFableBackendSession;
+    friend class AFableGameMode;
+    int64 ExpeditionSnapshotGrantSequence = 0;
+
+    /** 서버 원정 정본이 검증한 처치 보상만 적용하며 저장은 호출자가 뒤에서 요청한다. */
+    bool ApplyExpeditionReward(const FFableExpeditionTicket& Ticket, bool bBoss,
+                               FFablePersonalGrantReceipt& OutReceipt);
     UPROPERTY(Replicated)
     FString BackendPlayerId;
     UPROPERTY(Replicated)

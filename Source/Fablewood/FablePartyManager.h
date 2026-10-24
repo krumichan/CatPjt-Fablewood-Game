@@ -73,6 +73,12 @@ struct FFablePartyRecord
 
     UPROPERTY()
     int32 PreparationRevision = 1;
+
+    UPROPERTY()
+    FGuid RetrySourceExpeditionId;
+
+    UPROPERTY()
+    FGuid RetrySourceCompletionId;
 };
 
 /** 수신자·파티·유효 시간이 고정된 일회성 초대장. */
@@ -151,6 +157,10 @@ public:
     /** 서버가 소유한 현재 연결만 불변 키로 반환한다. */
     APlayerController* GetConnectedPlayer(const FString& PlayerKey) const;
 
+    /** 종료 결과를 고정하고 이전 동의를 전부 지운 뒤 재도전을 준비한다. */
+    bool PrepareExpeditionRetry(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                                FGuid OldExpeditionId, FGuid CompletionId);
+
     /** 전멸·귀환 뒤 다음 시도에 이전 동의가 재사용되지 않도록 초기화한다. */
     void InvalidatePreparation(FGuid PartyId);
 
@@ -180,6 +190,7 @@ public:
 
 private:
     friend struct FFablePartyTestAccess;
+    friend class AFableGameMode;
 
     /** 만료 초대와 재접속 유예가 끝난 구성원을 제거한다. */
     void ExpireEntries();

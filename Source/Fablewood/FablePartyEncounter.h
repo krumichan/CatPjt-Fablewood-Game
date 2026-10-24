@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "FableAdventureTypes.h"
 #include "FableExpeditionTypes.h"
+#include "FableExpeditionResultTypes.h"
 #include "TimerManager.h"
 #include "FablePartyEncounter.generated.h"
 
@@ -37,7 +38,20 @@ public:
     bool InitializeExpedition(const FFableExpeditionTicket& InTicket, FVector InOrigin);
 
     /** 전원 위치 선검사·이동·도착 확인 뒤 첫 전투를 확정한다. */
-    bool Admit(const TArray<APlayerController*>& Players);
+    bool Admit(const TArray<APlayerController*>& Players, AFablePartyEncounter* ReplacedCompletedEncounter = nullptr);
+
+    /** 같은 원정 참가자 전원이 명시적으로 동의한 경우에만 중도 귀환한다. */
+    bool SetAbandonConsent(APlayerController* Requester, FGuid ExpectedExpeditionId, int32 ExpectedDepartureRevision,
+                           bool bConsent);
+
+    /** 현재 동의 리비전과 명시적인 참가 키 목록을 읽는다. */
+    const FFableExpeditionDepartureVote& GetDepartureVote() const;
+
+    /** 실제 처치 처리에서 등록한 SpawnId인지 확인한다. */
+    bool HasRecordedDefeat(FGuid EnemySpawnId) const;
+
+    /** 새 원정 확정 이후 이전 원정 자원만 정리한다. */
+    void RetireAfterReplacement(FGuid NewExpeditionId);
 
     /** 자기 증서에 속한 현재 연결만 다시 입장시킨다. */
     bool Resume(APlayerController* Requester);
@@ -80,6 +94,7 @@ public:
 
 private:
     friend struct FFablePartyTestAccess;
+    friend class AFableGameMode;
 
     /** 현재 참가자가 생존해 요청할 수 있는지 확인한다. */
     bool IsRequesterAlive(APlayerController* Requester) const;
@@ -92,6 +107,10 @@ private:
 
     /** 회복 없는 전원 이동이 실패하면 원래 위치를 복원한다. */
     bool MoveAdmissionParticipants(const TArray<APlayerController*>& Players);
+
+    /** 전원 임시 이동이 성공하기 전에는 전투 상태·체크포인트를 바꾸지 않는다. */
+    bool MoveParticipantsAtomically(const TArray<APlayerController*>& Players, EFableRegion Region, FVector Origin,
+                                    bool bRestore);
 
     /** 참가자 한 명의 체크포인트 이동을 실제 도착까지 확인한다. */
     bool MovePlayerToCheckpoint(APlayerController* Player, EFableRegion Region, bool bRestore = true);
@@ -137,6 +156,22 @@ private:
 
     /** 원정 종료 시 명부 동의와 참가자 binding을 해제한다. */
     void FinishExpedition();
+
+    /** 연결 변화는 제출된 중도 귀환 동의를 모두 무효화한다. */
+    void RefreshDepartureConnections();
+
+    /** 진행 중인 참가자 전원을 회복 없는 원자적 이동으로 귀환시킨다. */
+    bool CommitAbandon();
+
+    UPROPERTY(Replicated)
+    FFableExpeditionDepartureVote DepartureVote;
+
+    TSet<FGuid> RecordedDefeats;
+    TSet<FString> DepartureConnections;
+    TMap<FString, TWeakObjectPtr<APlayerController>> DepartureControllers;
+    int32 DeparturePartyRevision = 0;
+    FString DepartureLeaderKey;
+    bool bTransitionPending = false;
 
     UPROPERTY(Replicated)
     FFableExpeditionTicket Ticket;

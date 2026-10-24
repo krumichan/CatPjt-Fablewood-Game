@@ -54,6 +54,8 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     TWeakObjectPtr<AFablePlayerState> Player;
     TWeakObjectPtr<UWorld> World;
     FString PlayerId, LeaseId;
+    FString ExpeditionPublicKey, SentExpeditionPublicKey;
+    int64 LatestGrantSequence = 0, SentGrantSequence = 0;
     int64 Revision = 0;
     FString LatestPayload, LatestHash, SentHash, SentPayload, OperationId, AcknowledgedHash;
     TSharedPtr<FJsonObject> LatestWallet, SentWallet, LatestInventory, SentInventory, LatestSummary, SentSummary,
@@ -283,11 +285,21 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
 
     /** 최신 프로필을 기존 저장 순서를 유지하는 대기열에 등록한다. */
     void Queue(const FString& Payload, const FString& Hash, const TSharedRef<FJsonObject>& W,
-               const TSharedRef<FJsonObject>& Inventory, const TSharedRef<FJsonObject>& Summary, bool bFinalSnapshot)
+               const TSharedRef<FJsonObject>& Inventory, const TSharedRef<FJsonObject>& Summary, bool bFinalSnapshot,
+               const FString& PublicKey, int64 GrantSequence)
     {
         // 접속 권한·저장 리비전·멱등 키 조건 검사
         if (Failed || (Closing && !bFinalSnapshot) || ReleaseStarted || Released)
         {
+            return;
+        }
+
+        // 하나의 인증 세션은 캐릭터 키나 이미 포함한 지급 경계를 바꿀 수 없다.
+        if ((!ExpeditionPublicKey.IsEmpty() && PublicKey != ExpeditionPublicKey) ||
+            (!SentExpeditionPublicKey.IsEmpty() && Pending && PublicKey != SentExpeditionPublicKey) ||
+            (PublicKey == ExpeditionPublicKey && GrantSequence < LatestGrantSequence))
+        {
+            Failure(TEXT("원정 보상 저장의 캐릭터 또는 스냅숏 순서가 일치하지 않습니다."));
             return;
         }
 
@@ -297,10 +309,17 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         LatestWallet = W;
         LatestInventory = Inventory;
         LatestSummary = Summary;
+        ExpeditionPublicKey = PublicKey;
+        LatestGrantSequence = GrantSequence;
 
         // 프로필 저장과 완료 응답 조건 검사
         if (InventoryAcknowledged && SummaryAcknowledged && !Pending && Hash == AcknowledgedHash)
         {
+            // 동일 bytes의 실제 이전 ACK는 새 영수증 경계에도 유효하다.
+            if (AFableGameMode* Mode = AFableGameMode::Find(World.Get()))
+            {
+                Mode->NotifyExpeditionSaveCommitted(ExpeditionPublicKey, LatestGrantSequence, Revision, Hash);
+            }
             Mirror();
             return;
         }
@@ -329,6 +348,8 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         SentWallet = LatestWallet;
         SentInventory = LatestInventory;
         SentSummary = LatestSummary;
+        SentExpeditionPublicKey = ExpeditionPublicKey;
+        SentGrantSequence = LatestGrantSequence;
         OperationId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
         // All mirrors come from one SaveGame snapshot. Ambiguous retries retain this exact operation and body.
         SentBody = Identity();
@@ -380,6 +401,13 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                     Self->InventoryAcknowledged = true;
                     Self->SummaryAcknowledged = true;
 
+                    // PS가 파괴되어도 검증된 동일 배치의 경계를 서버 장부에 반영한다.
+                    if (AFableGameMode* Mode = AFableGameMode::Find(Self->World.Get()))
+                    {
+                        Mode->NotifyExpeditionSaveCommitted(Self->SentExpeditionPublicKey, Self->SentGrantSequence,
+                                                            Self->Revision, Self->SentHash);
+                    }
+
                     // 프로필 저장과 완료 응답 처리
                     if (auto P = Self->Player.Get())
                     {
@@ -391,6 +419,18 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                     {
                         Self->Start();
                         return;
+                    }
+
+                    // 상한에서 실제 bytes가 같아도 pending 동안 새 명세가 추가될 수 있다.
+                    if (Self->LatestHash == Self->SentHash &&
+                        Self->ExpeditionPublicKey == Self->SentExpeditionPublicKey &&
+                        Self->LatestGrantSequence > Self->SentGrantSequence)
+                    {
+                        if (AFableGameMode* Mode = AFableGameMode::Find(Self->World.Get()))
+                        {
+                            Mode->NotifyExpeditionSaveCommitted(Self->ExpeditionPublicKey, Self->LatestGrantSequence,
+                                                                Self->Revision, Self->SentHash);
+                        }
                     }
 
                     Self->Mirror();
@@ -748,8 +788,15 @@ bool AFablePlayerState::QueueBackendSnapshot(UFableSaveGame* Data, bool bFinalSn
         return false;
     }
 
+    // 영수증 순번은 지급 직후 발급됐으며 실제 직렬화한 hash와 함께 등록한다.
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    const int64 GrantSequence = ExpeditionSnapshotGrantSequence;
+    if (Mode)
+    {
+        Mode->TrackExpeditionSaveSnapshot(PartyPlayerKey, GrantSequence, Hash);
+    }
     BackendSession->Queue(FBase64::Encode(Bytes), Hash, Wallet(Data), InventorySnapshot.ToSharedRef(),
-                          Summary.ToSharedRef(), bFinalSnapshot);
+                          Summary.ToSharedRef(), bFinalSnapshot, PartyPlayerKey, GrantSequence);
 
     return !BackendSession->Failed;
 }
