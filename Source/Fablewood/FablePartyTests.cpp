@@ -5,6 +5,7 @@
 #include "FableProjectile.h"
 #include "FableEnemyBolt.h"
 #include "FableEnemy.h"
+#include "FableExpeditionResultTypes.h"
 #include "FableGameMode.h"
 #include "FableGameState.h"
 #include "FablePlayerState.h"
@@ -14,8 +15,12 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/AutomationTest.h"
+#include "TimerManager.h"
+#include "UObject/Class.h"
 
 /** 실시간 대기 없이 서버 요청 간격과 만료 경계만 제어하는 검증 도우미. */
 struct FFablePartyTestAccess
@@ -61,6 +66,20 @@ struct FFablePartyTestAccess
         Encounter->CheckPartyState();
     }
 
+    /** 벽시계 대기만 생략하고 실제 타이머 콜백과 같은 다음 무리 생성 경로를 호출한다. */
+    static void AdvanceRootWaveBoundary(AFablePartyEncounter* Encounter)
+    {
+        Encounter->GetWorldTimerManager().ClearTimer(Encounter->EncounterTimer);
+        if (Encounter->Progress.DungeonWave < 2)
+        {
+            Encounter->SpawnDungeonWave(2);
+        }
+        else
+        {
+            Encounter->SpawnBoss();
+        }
+    }
+
     /** 서로 다른 사용자 동작 사이의 요청 간격만 초기화한다. */
     static void AllowNextRequest(AFablePartyManager* Manager)
     {
@@ -104,6 +123,65 @@ struct FFablePartyTestAccess
 /** 실제 전투 적용점의 권한을 격리 월드에서 호출하는 검증 접근자. */
 struct FFableExpeditionCombatTestAccess
 {
+    /** 이동 확정 시에만 정리되어야 하는 전투·부활·체크포인트 상태를 보관한다. */
+    struct FTravelState
+    {
+        FVector Checkpoint;
+        FRotator CheckpointRotation;
+        TArray<float> TimersAndResources;
+        uint8 Combo = 0;
+        bool bDodging = false;
+
+        /** 부분 입장 실패가 기존 전투 상태를 변경하지 않았는지 비교한다. */
+        bool Equals(const FTravelState& Other) const
+        {
+            return Checkpoint.Equals(Other.Checkpoint) && CheckpointRotation.Equals(Other.CheckpointRotation) &&
+                   TimersAndResources == Other.TimersAndResources && Combo == Other.Combo && bDodging == Other.bDodging;
+        }
+    };
+
+    /** 검증에서 읽는 값은 체크포인트 확정의 실제 부작용에 해당한다. */
+    static FTravelState CaptureTravelState(const AFableCharacter* Hero)
+    {
+        FTravelState Result;
+        Result.Checkpoint = Hero->SafeSpawnLocation;
+        Result.CheckpointRotation = Hero->SafeSpawnRotation;
+        Result.TimersAndResources = {Hero->Health,
+                                     Hero->Mana,
+                                     Hero->NextAttackServerTime,
+                                     Hero->NextSkillServerTime,
+                                     Hero->NextSecondSkillServerTime,
+                                     Hero->NextThirdSkillServerTime,
+                                     Hero->NextDodgeServerTime,
+                                     Hero->ShieldAmount,
+                                     Hero->ShieldEndServerTime,
+                                     Hero->ReviveProtectionEndServerTime,
+                                     Hero->DodgeEndServerTime,
+                                     Hero->ActionLockEndServerTime,
+                                     Hero->LastRequestServerTime,
+                                     Hero->LastAttackServerTime,
+                                     Hero->NextLocalRequestTime};
+        Result.Combo = Hero->ComboIndex;
+        Result.bDodging = Hero->bDodging;
+        return Result;
+    }
+
+    /** 성공 시 초기화되는 서로 다른 값을 넣어 실패 경로의 잘못된 초기화를 드러낸다. */
+    static void SeedTravelState(AFableCharacter* Hero)
+    {
+        Hero->SafeSpawnLocation = FVector(1300, -900, 110);
+        Hero->SafeSpawnRotation = FRotator(0, 37, 0);
+        Hero->NextAttackServerTime = 23;
+        Hero->NextSkillServerTime = 29;
+        Hero->NextSecondSkillServerTime = 31;
+        Hero->NextThirdSkillServerTime = 37;
+        Hero->NextDodgeServerTime = 41;
+        Hero->ShieldAmount = 43;
+        Hero->ShieldEndServerTime = 47;
+        Hero->ReviveProtectionEndServerTime = 53;
+        Hero->ComboIndex = 2;
+    }
+
     /** 범위·시야·원정 조건을 포함한 실제 광역 스킬 경로를 호출한다. */
     static void Area(AFableCharacter* Hero, float Damage, bool bSlow = false)
     {
@@ -378,6 +456,31 @@ namespace
             Player.Profile->Destroy();
             Player.Controller->Destroy();
             Player = FPartyTestPlayer();
+        }
+
+        /** 타이머를 진행하지 않고 같은 메모리 프로필의 실제 연결 객체만 교체한다. */
+        bool ReplaceConnection(FPartyTestPlayer& Player)
+        {
+            APlayerController* Previous = Player.Controller;
+            Manager->DisconnectPlayer(Previous);
+            Previous->UnPossess();
+            Previous->SetPlayerState(nullptr);
+            World->RemoveController(Previous);
+            RegisteredControllers.Remove(Previous);
+
+            Player.Controller = World->SpawnActor<APlayerController>();
+            if (!Player.Controller)
+            {
+                return false;
+            }
+            Player.Profile->SetOwner(Player.Controller);
+            Player.Controller->SetPlayerState(Player.Profile);
+            World->AddController(Player.Controller);
+            RegisteredControllers.Add(Player.Controller);
+            Player.Controller->Possess(Player.Hero);
+            Manager->RegisterPlayer(Player.Controller);
+            Previous->Destroy();
+            return Manager->GetConnectedPlayer(Player.Profile->PartyPlayerKey) == Player.Controller;
         }
     };
 
@@ -1589,6 +1692,601 @@ bool FFableIsolationProjectileTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("The enemy bolt changes no foreign hero health"), Fixture.Second.Hero->GetHealth(), OtherHealth);
     TestTrue(TEXT("Enemy bolts capture the same immutable expedition identity"),
              Bolt->GetExpeditionId() == Fixture.One->GetExpeditionId());
+    return true;
+}
+
+namespace
+{
+    /** 보상 검증은 실제 두 파티와 처치 경로를 사용하며 지연 시간만 가속한다. */
+    struct FResultTestWorld : FIsolationTestWorld
+    {
+        /** 첫 파티의 실제 수호자 두 무리와 보스를 차례로 처치한다. */
+        bool ClearFirst()
+        {
+            for (int32 Phase = 0; Phase < 3; ++Phase)
+            {
+                TArray<TWeakObjectPtr<AFableEnemy>> Targets;
+                for (TActorIterator<AFableEnemy> It(Base.World); It; ++It)
+                {
+                    if (It->IsAlive() && It->GetExpeditionId() == One->GetExpeditionId())
+                    {
+                        Targets.Add(*It);
+                    }
+                }
+                if (Targets.IsEmpty())
+                {
+                    return false;
+                }
+
+                for (const auto& Target : Targets)
+                {
+                    AFableEnemy* Enemy = Target.Get();
+                    if (!Enemy)
+                    {
+                        return false;
+                    }
+                    Enemy->ReceiveHit(100000, First.Controller);
+                    Base.Mode->HandleEnemyDefeated(Enemy);
+                    if (Enemy->IsAlive())
+                    {
+                        return false;
+                    }
+                }
+
+                if (Phase < 2)
+                {
+                    FFablePartyTestAccess::AdvanceRootWaveBoundary(One);
+                }
+            }
+            return One->GetProgress().AdventureStage == EFableAdventureStage::Cleared;
+        }
+
+        /** 현재 서버 결과를 복사하여 나중의 조회·재도전과 비교한다. */
+        FFablePersonalExpeditionResult Result(const FPartyTestPlayer& Player, FGuid ExpeditionId) const
+        {
+            const auto* Found = Base.Mode->GetResultByExpedition(Player.Profile, ExpeditionId);
+            return Found ? *Found : FFablePersonalExpeditionResult();
+        }
+
+        /** 두 소유자가 각자 현재 종료 결과의 정확한 버전을 확인한다. */
+        bool ConfirmFirstResults(FGuid ExpeditionId)
+        {
+            for (const FPartyTestPlayer* Player : {&First, &FirstPeer})
+            {
+                const auto Current = Result(*Player, ExpeditionId);
+                if (!Current.IsTerminal() ||
+                    !Base.Mode->AcknowledgeExpeditionResult(Player->Controller, ExpeditionId, Current.CompletionId,
+                                                            Current.ResultRevision))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 같은 결과의 준비 요청에 정확한 현재 명부 리비전을 사용한다. */
+        bool PrepareRetry(const FPartyTestPlayer& Leader, const FFablePersonalExpeditionResult& Previous)
+        {
+            const auto* Party = Base.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+            return Party &&
+                   Base.Manager->PrepareExpeditionRetry(Leader.Controller, Party->PartyId, Party->PreparationRevision,
+                                                        Previous.Ticket.ExpeditionId, Previous.CompletionId);
+        }
+
+        /** 전원 준비 이후에도 별도의 재도전 API만 새 원정을 시작한다. */
+        bool Retry(const FPartyTestPlayer& Leader, const FFablePersonalExpeditionResult& Previous)
+        {
+            const auto* Party = Base.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+            return Party &&
+                   Base.Mode->RequestRetryExpedition(Leader.Controller, Party->PartyId, Party->PreparationRevision,
+                                                     Previous.Ticket.ExpeditionId, Previous.CompletionId);
+        }
+    };
+
+    /** 보상 영수증 전체의 반사 필드를 비교해 옵션·내구도도 빠뜨리지 않는다. */
+    bool SameReceipts(const FFablePersonalExpeditionResult& A, const FFablePersonalExpeditionResult& B)
+    {
+        if (A.Receipts.Num() != B.Receipts.Num())
+        {
+            return false;
+        }
+        for (int32 Index = 0; Index < A.Receipts.Num(); ++Index)
+        {
+            if (!FFablePersonalGrantReceipt::StaticStruct()->CompareScriptStruct(&A.Receipts[Index], &B.Receipts[Index],
+                                                                                 0))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFablePersonalResultTest,
+                                 "Fablewood.Native.Results.PersonalReceiptsAndTerminalReadOnly",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 실제 처치 지급과 조회를 분리하고 NPC 보고·개인 장비 인스턴스를 보존한다. */
+bool FFablePersonalResultTest::RunTest(const FString& Parameters)
+{
+    FResultTestWorld Fixture;
+    if (!TestTrue(TEXT("Result fixture enters two genuine parties"), Fixture.Initialize()) ||
+        !TestTrue(TEXT("Actual guardian waves and boss are defeated"), Fixture.ClearFirst()))
+    {
+        return false;
+    }
+
+    const FGuid Id = Fixture.One->GetExpeditionId();
+    const auto Before = Fixture.Result(Fixture.First, Id);
+    const auto Peer = Fixture.Result(Fixture.FirstPeer, Id);
+    TestTrue(TEXT("Both personal results have one immutable terminal completion"),
+             Before.IsTerminal() && Peer.IsTerminal() && Before.CompletionId == Peer.CompletionId &&
+                 Before.Outcome == EFableExpeditionOutcome::Cleared);
+    TestEqual(TEXT("Six guardians and one boss create exactly seven receipts"), Before.Receipts.Num(), 7);
+    TestEqual(TEXT("Actual run gold is granted once"), Fixture.First.Profile->Gold, 248);
+    TestEqual(TEXT("Actual run ore is granted once"), Fixture.First.Profile->Ore, 14);
+    TestEqual(TEXT("Actual run grants one root core"), Fixture.First.Profile->RootCores, 1);
+    TestTrue(TEXT("Boss completion leaves the NPC report ready without claiming it"),
+             Fixture.First.Profile->DungeonQuest == EFableQuestStage::Ready &&
+                 Fixture.First.Profile->DungeonCompletions == 1);
+
+    int32 Gold = 0, Ore = 0, Experience = 0, Cores = 0, Items = 0;
+    int64 LastSequence = 0;
+    TSet<FGuid> Defeats;
+    for (const auto& Receipt : Before.Receipts)
+    {
+        TestTrue(TEXT("A receipt binds this exact recipient and actual defeat"),
+                 Receipt.ExpeditionId == Id && Receipt.RecipientPublicKey == Fixture.First.Profile->PartyPlayerKey &&
+                     Receipt.GrantId.IsValid() && !Defeats.Contains(Receipt.GrantId) &&
+                     Receipt.Sequence > LastSequence && Fixture.One->HasRecordedDefeat(Receipt.GrantId));
+        TestTrue(TEXT("Memory-only fixtures never claim a durable database commit"),
+                 Receipt.SaveState == EFableExpeditionGrantSaveState::MemoryOnly && Receipt.CommittedRevision == 0);
+        Defeats.Add(Receipt.GrantId);
+        LastSequence = Receipt.Sequence;
+        Gold += Receipt.ActualGold;
+        Ore += Receipt.ActualOre;
+        Experience += Receipt.ActualExperience;
+        Cores += Receipt.ActualRootCores;
+        Items += Receipt.GrantedItems.Num();
+        for (const auto& Item : Receipt.GrantedItems)
+        {
+            TestTrue(TEXT("A receipt contains the actual awarded equipment identity"),
+                     Item.InstanceId.IsValid() && Fixture.First.Profile->Inventory.ContainsByPredicate(
+                                                      [&Item](const FFableItem& Owned)
+                                                      {
+                                                          return Owned.InstanceId == Item.InstanceId;
+                                                      }));
+        }
+    }
+    TestTrue(TEXT("Receipt sums are the exact run payout"),
+             Gold == 248 && Ore == 14 && Experience == 460 && Cores == 1 && Items == 1);
+
+    const int32 Bag = Fixture.First.Profile->Inventory.Num();
+    TestTrue(TEXT("The owner can reopen its existing result"),
+             Fixture.Base.Mode->RequestExpeditionResult(Fixture.First.Controller, Id));
+    TestTrue(TEXT("An exact terminal confirmation is accepted"),
+             Fixture.Base.Mode->AcknowledgeExpeditionResult(Fixture.First.Controller, Id, Before.CompletionId,
+                                                            Fixture.Result(Fixture.First, Id).ResultRevision));
+    TestTrue(TEXT("Reopening a confirmed result is still read-only"),
+             Fixture.Base.Mode->RequestExpeditionResult(Fixture.First.Controller, Id));
+    const auto After = Fixture.Result(Fixture.First, Id);
+    TestTrue(TEXT("Lookup and confirmation never reroll, repay or replace completion"),
+             SameReceipts(Before, After) && After.CompletionId == Before.CompletionId &&
+                 Fixture.First.Profile->Gold == 248 && Fixture.First.Profile->Ore == 14 &&
+                 Fixture.First.Profile->Inventory.Num() == Bag);
+    TestFalse(TEXT("A foreign party cannot look up another player's expedition"),
+              Fixture.Base.Mode->RequestExpeditionResult(Fixture.Second.Controller, Id));
+    TestFalse(TEXT("A random completion cannot acknowledge the result"),
+              Fixture.Base.Mode->AcknowledgeExpeditionResult(Fixture.First.Controller, Id, FGuid::NewGuid(),
+                                                             After.ResultRevision));
+    TestFalse(TEXT("A stale result version cannot acknowledge it"),
+              Fixture.Base.Mode->AcknowledgeExpeditionResult(Fixture.First.Controller, Id, After.CompletionId,
+                                                             After.ResultRevision - 1));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableReceiptClampTest, "Fablewood.Native.Results.RewardClampAndIdentityGuards",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 상한에서 명목 보상 대신 실제 증분을 기록하고 출처 재전송을 거부한다. */
+bool FFableReceiptClampTest::RunTest(const FString& Parameters)
+{
+    FResultTestWorld Fixture;
+    if (!TestTrue(TEXT("Clamped payout fixture has genuine participants"), Fixture.Initialize()))
+    {
+        return false;
+    }
+    Fixture.First.Profile->Gold = 999997;
+    Fixture.First.Profile->Ore = 100000;
+    Fixture.First.Profile->Level = 20;
+    Fixture.First.Profile->Experience = 0;
+    AFableEnemy* Victim = Fixture.EnemyFor(Fixture.One);
+    if (!TestNotNull(TEXT("A real tracked source exists"), Victim))
+    {
+        return false;
+    }
+
+    const FGuid Id = Fixture.One->GetExpeditionId();
+    Victim->ReceiveHit(100000, Fixture.First.Controller);
+    Fixture.Base.Mode->HandleEnemyDefeated(Victim);
+    const auto Before = Fixture.Result(Fixture.First, Id);
+    if (!TestEqual(TEXT("Exactly one tracked defeat was recorded"), Before.Receipts.Num(), 1))
+    {
+        return false;
+    }
+    TestTrue(TEXT("Receipt records actual clamped amounts and capped XP"),
+             Before.Receipts[0].ActualGold == 3 && Before.Receipts[0].ActualOre == 0 &&
+                 Before.Receipts[0].ActualExperience == 0 && Fixture.First.Profile->Gold == 1000000 &&
+                 Fixture.First.Profile->Ore == 100000 && Fixture.First.Profile->Experience == 0);
+    Fixture.Base.Mode->HandleEnemyDefeated(Victim);
+    Fixture.One->HandleEnemyDefeated(Victim);
+    TestTrue(TEXT("Duplicate callbacks cannot mint a second receipt or payout"),
+             SameReceipts(Before, Fixture.Result(Fixture.First, Id)));
+
+    AFableEnemy* Untracked = Fixture.SpawnEnemy(Fixture.One, FVector(500, 500, 110));
+    if (!TestNotNull(TEXT("An untracked actor can present the same region and expedition"), Untracked))
+    {
+        return false;
+    }
+    Untracked->ReceiveHit(100000, Fixture.First.Controller);
+    Fixture.Base.Mode->HandleEnemyDefeated(Untracked);
+    TestTrue(TEXT("Same UUID without the actual registered defeat is not a grant source"),
+             SameReceipts(Before, Fixture.Result(Fixture.First, Id)));
+    TestFalse(TEXT("A live run has no terminal completion to acknowledge"),
+              Fixture.Base.Mode->AcknowledgeExpeditionResult(Fixture.First.Controller, Id, FGuid::NewGuid(),
+                                                             Before.ResultRevision));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableConsentedRetryTest, "Fablewood.Native.Expedition.ConsentedRetryAndFreshIdentity",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 보스 의뢰를 보고하지 않아도 전원 새 동의로만 다음 원정을 시작한다. */
+bool FFableConsentedRetryTest::RunTest(const FString& Parameters)
+{
+    FResultTestWorld Fixture;
+    if (!TestTrue(TEXT("Retry fixture clears its genuine first expedition"),
+                  Fixture.Initialize() && Fixture.ClearFirst()))
+    {
+        return false;
+    }
+    const FGuid OldId = Fixture.One->GetExpeditionId();
+    const auto Previous = Fixture.Result(Fixture.First, OldId);
+    const auto ForeignProgress = Fixture.Two->GetProgress();
+    const auto ForeignEnemies = Fixture.EnemyHealth(Fixture.Two);
+    const FGuid ForeignId = Fixture.Two->GetExpeditionId();
+    const int32 Gold = Fixture.First.Profile->Gold;
+    const int32 Ore = Fixture.First.Profile->Ore;
+    const int32 Completions = Fixture.First.Profile->DungeonCompletions;
+
+    TestFalse(TEXT("Unread terminal results cannot be abandoned into a new run"),
+              Fixture.PrepareRetry(Fixture.First, Previous));
+    TestTrue(TEXT("Both owners explicitly confirm their previous personal results"),
+             Fixture.ConfirmFirstResults(OldId));
+    TestFalse(TEXT("A peer cannot prepare the leader's retry"), Fixture.PrepareRetry(Fixture.FirstPeer, Previous));
+    TestTrue(TEXT("Leader prepares the exact terminal result"), Fixture.PrepareRetry(Fixture.First, Previous));
+    TestFalse(TEXT("Retry preparation clears earlier readiness"), Fixture.Retry(Fixture.First, Previous));
+    TestTrue(TEXT("Only the leader has consented so far"), Fixture.Base.Ready(Fixture.First));
+    TestFalse(TEXT("One ready member cannot move the party"), Fixture.Retry(Fixture.First, Previous));
+    TestTrue(TEXT("The peer explicitly consents"), Fixture.Base.Ready(Fixture.FirstPeer));
+    TestFalse(TEXT("Normal start cannot consume a retry selection"), Fixture.Base.Enter(Fixture.First));
+    TestFalse(TEXT("A ready peer still cannot launch a retry"), Fixture.Retry(Fixture.FirstPeer, Previous));
+    TestTrue(TEXT("Exact explicit retry creates the next expedition"), Fixture.Retry(Fixture.First, Previous));
+
+    AFablePartyEncounter* Next = Fixture.Base.Mode->GetExpeditionFor(Fixture.First.Profile);
+    if (!TestNotNull(TEXT("Both bindings resolve to the new committed actor"), Next))
+    {
+        return false;
+    }
+    TestTrue(TEXT("Replacement has a new UUID and retires only the old actor"),
+             Next->GetExpeditionId() != OldId && Next->GetExpeditionId() != ForeignId &&
+                 Fixture.FirstPeer.Profile->ActiveExpeditionId == Next->GetExpeditionId() &&
+                 !Fixture.Base.Mode->FindExpedition(OldId));
+    TestTrue(TEXT("Retry neither pays an NPC reward nor resets its ready quest"),
+             Fixture.First.Profile->DungeonQuest == EFableQuestStage::Ready &&
+                 Fixture.First.Profile->DungeonCompletions == Completions && Fixture.First.Profile->Gold == Gold &&
+                 Fixture.First.Profile->Ore == Ore);
+    TestTrue(TEXT("Original immutable receipts remain queryable"),
+             SameReceipts(Previous, Fixture.Result(Fixture.First, OldId)));
+    TestTrue(TEXT("A different party retains its exact actors and progress"),
+             Fixture.Second.Profile->ActiveExpeditionId == ForeignId &&
+                 SameProgress(ForeignProgress, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, ForeignEnemies));
+    TestFalse(TEXT("Consumed old completion cannot be replayed"), Fixture.Retry(Fixture.First, Previous));
+
+    AFableEnemy* Victim = Fixture.EnemyFor(Next);
+    if (!TestNotNull(TEXT("The new run contains genuine reward sources"), Victim))
+    {
+        return false;
+    }
+    Victim->ReceiveHit(100000, Fixture.First.Controller);
+    Fixture.Base.Mode->HandleEnemyDefeated(Victim);
+    TestTrue(TEXT("A Ready quest still allows new-run combat rewards exactly once"),
+             Fixture.First.Profile->Gold == Gold + 18 && Fixture.First.Profile->Ore == Ore + 1 &&
+                 Fixture.Result(Fixture.First, Next->GetExpeditionId()).Receipts.Num() == 1 &&
+                 Fixture.First.Profile->DungeonQuest == EFableQuestStage::Ready);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableRetryRollbackTest, "Fablewood.Native.Expedition.RetryPartialArrivalRollback",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 첫 도착 후 두 번째 캡슐이 충돌하는 실패도 기존 원정과 전투 상태를 보존한다. */
+bool FFableRetryRollbackTest::RunTest(const FString& Parameters)
+{
+    FResultTestWorld Fixture;
+    if (!TestTrue(TEXT("Rollback fixture has a genuinely cleared expedition"),
+                  Fixture.Initialize() && Fixture.ClearFirst()))
+    {
+        return false;
+    }
+    const FGuid OldId = Fixture.One->GetExpeditionId();
+    const auto Previous = Fixture.Result(Fixture.First, OldId);
+    TestTrue(TEXT("Both old personal results are explicitly confirmed before retry"),
+             Fixture.ConfirmFirstResults(OldId));
+    if (!TestTrue(TEXT("Rollback party explicitly prepares and consents"),
+                  Fixture.PrepareRetry(Fixture.First, Previous) && Fixture.Base.Ready(Fixture.First) &&
+                      Fixture.Base.Ready(Fixture.FirstPeer)))
+    {
+        return false;
+    }
+
+    // 기존 원정에서는 충분히 떨어진 유효 캡슐을 사용한다.
+    AFableCharacter* Leader = Fixture.First.Hero;
+    AFableCharacter* Peer = Fixture.FirstPeer.Hero;
+    Leader->GetCapsuleComponent()->SetCapsuleSize(240, 250);
+    Peer->GetCapsuleComponent()->SetCapsuleSize(240, 250);
+    Leader->SetActorLocation(Fixture.One->GetWorldOrigin() + FVector(7100, -500, 260));
+    Peer->SetActorLocation(Fixture.One->GetWorldOrigin() + FVector(9000, -500, 260));
+    FFableExpeditionCombatTestAccess::SeedTravelState(Leader);
+    FFableExpeditionCombatTestAccess::SeedTravelState(Peer);
+    Leader->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+    Peer->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+    Leader->GetCharacterMovement()->Velocity = FVector(71, 43, -17);
+    Peer->GetCharacterMovement()->Velocity = FVector(-59, 31, -19);
+
+    // 실제 allocator의 첫 빈 원정 원점을 찾는다.
+    FVector NextOrigin;
+    for (int32 Slot = 1; Slot <= 16; ++Slot)
+    {
+        const FVector Candidate(0, Slot * 30000.0f, 0);
+        if (!Fixture.Base.Mode->GetExpeditions().ContainsByPredicate(
+                [&Candidate](const AFablePartyEncounter* Encounter)
+                {
+                    return Encounter->GetWorldOrigin().Equals(Candidate);
+                }))
+        {
+            NextOrigin = Candidate;
+            break;
+        }
+    }
+    if (!TestFalse(TEXT("A distinct destination arena is available"), NextOrigin.IsZero()))
+    {
+        return false;
+    }
+
+    // 도착 지형과 같은 높이의 바닥에서 각 빈 도착점은 개별적으로 통과해야 한다.
+    AActor* Floor = Fixture.Base.World->SpawnActor<AActor>();
+    UBoxComponent* FloorBox = Floor ? NewObject<UBoxComponent>(Floor) : nullptr;
+    if (!TestNotNull(TEXT("A real destination floor exists"), FloorBox))
+    {
+        return false;
+    }
+    Floor->SetRootComponent(FloorBox);
+    FloorBox->SetBoxExtent(FVector(1800, 1800, 25));
+    FloorBox->SetWorldLocation(NextOrigin + FableRPG::RegionCenter(EFableRegion::RootRuins) + FVector(0, 0, -25));
+    FloorBox->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    FloorBox->SetCollisionObjectType(ECC_WorldStatic);
+    FloorBox->SetCollisionResponseToAllChannels(ECR_Block);
+    FloorBox->RegisterComponent();
+
+    const FRotator Arrival(0, 90, 0);
+    FVector FirstSpot = FableRPG::RegionEntrance(EFableRegion::RootRuins) + NextOrigin + FVector(0, 0, 10);
+    FVector SecondSpot = FirstSpot + FVector(240, 0, 0);
+    if (!TestTrue(TEXT("Both empty destination preflights independently succeed"),
+                  Fixture.Base.World->FindTeleportSpot(Leader, FirstSpot, Arrival) &&
+                      Fixture.Base.World->FindTeleportSpot(Peer, SecondSpot, Arrival)))
+    {
+        return false;
+    }
+
+    // 먼저 도착한 캡슐 하나만으로 두 번째 실제 도착 허용 범위를 벗어나는지 확인한다.
+    AActor* Occupancy = Fixture.Base.World->SpawnActor<AActor>();
+    UCapsuleComponent* OccupiedCapsule = Occupancy ? NewObject<UCapsuleComponent>(Occupancy) : nullptr;
+    if (!TestNotNull(TEXT("An occupancy probe uses the same real pawn capsule"), OccupiedCapsule))
+    {
+        return false;
+    }
+    Occupancy->SetRootComponent(OccupiedCapsule);
+    OccupiedCapsule->SetCapsuleSize(240, 250);
+    OccupiedCapsule->SetCollisionProfileName(TEXT("Pawn"));
+    OccupiedCapsule->SetWorldLocation(FirstSpot);
+    OccupiedCapsule->RegisterComponent();
+    FVector OccupiedSecond = SecondSpot;
+    const bool bOccupiedSpotFound = Fixture.Base.World->FindTeleportSpot(Peer, OccupiedSecond, Arrival);
+    TestTrue(TEXT("First-arrival occupancy prevents a second in-tolerance arrival"),
+             !bOccupiedSpotFound || FVector::DistSquared2D(OccupiedSecond, SecondSpot) > FMath::Square(150.0f) ||
+                 FMath::Abs(OccupiedSecond.Z - SecondSpot.Z) > 180);
+    OccupiedCapsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Occupancy->Destroy();
+
+    FActorSpawnParameters ShotParameters;
+    ShotParameters.Owner = Leader;
+    ShotParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AFableProjectile* Shot = Fixture.Base.World->SpawnActor<AFableProjectile>(
+        Leader->GetActorLocation() + FVector(0, 0, 200), FRotator::ZeroRotator, ShotParameters);
+    if (!TestNotNull(TEXT("A still-valid old-expedition projectile exists"), Shot))
+    {
+        return false;
+    }
+    Shot->InitializeShot(FVector::ForwardVector, 10, Fixture.First.Controller, false);
+
+    const auto LeaderState = FFableExpeditionCombatTestAccess::CaptureTravelState(Leader);
+    const auto PeerState = FFableExpeditionCombatTestAccess::CaptureTravelState(Peer);
+    const FTransform LeaderTransform = Leader->GetActorTransform();
+    const FTransform PeerTransform = Peer->GetActorTransform();
+    const FVector LeaderVelocity = Leader->GetVelocity();
+    const FVector PeerVelocity = Peer->GetVelocity();
+    const auto ForeignProgress = Fixture.Two->GetProgress();
+    const auto ForeignEnemies = Fixture.EnemyHealth(Fixture.Two);
+
+    TestFalse(TEXT("A real partial-arrival collision rejects the entire retry"),
+              Fixture.Retry(Fixture.First, Previous));
+    TestTrue(TEXT("Both original transforms and movement are restored"),
+             Leader->GetActorTransform().Equals(LeaderTransform) && Peer->GetActorTransform().Equals(PeerTransform) &&
+                 Leader->GetVelocity().Equals(LeaderVelocity) && Peer->GetVelocity().Equals(PeerVelocity) &&
+                 Leader->GetCharacterMovement()->MovementMode == MOVE_Falling &&
+                 Peer->GetCharacterMovement()->MovementMode == MOVE_Falling);
+    TestTrue(TEXT("No checkpoint, cooldown, shield, protection or resource was committed"),
+             LeaderState.Equals(FFableExpeditionCombatTestAccess::CaptureTravelState(Leader)) &&
+                 PeerState.Equals(FFableExpeditionCombatTestAccess::CaptureTravelState(Peer)));
+    TestTrue(TEXT("Failure retains old projectile, identity, result and live actor"),
+             IsValid(Shot) && !Shot->IsActorBeingDestroyed() && Shot->GetExpeditionId() == OldId &&
+                 Fixture.First.Profile->ActiveExpeditionId == OldId &&
+                 Fixture.FirstPeer.Profile->ActiveExpeditionId == OldId &&
+                 Fixture.Base.Mode->FindExpedition(OldId) == Fixture.One &&
+                 SameReceipts(Previous, Fixture.Result(Fixture.First, OldId)) &&
+                 !Fixture.Result(Fixture.First, OldId).RetryExpeditionId.IsValid());
+    TestTrue(TEXT("Only the two previous expeditions remain and the foreign party is unchanged"),
+             Fixture.Base.Mode->GetExpeditions().Num() == 2 &&
+                 SameProgress(ForeignProgress, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, ForeignEnemies));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableRetreatResultTest,
+                                 "Fablewood.Native.Expedition.UnanimousRetreatAndResultRestore",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 진행 중에는 전원이 동의한 자기 파티만 귀환하고 같은 공개 키는 결과를 다시 읽는다. */
+bool FFableRetreatResultTest::RunTest(const FString& Parameters)
+{
+    FResultTestWorld Fixture;
+    if (!TestTrue(TEXT("Retreat fixture enters two independent expeditions"), Fixture.Initialize()))
+    {
+        return false;
+    }
+    const FGuid Id = Fixture.One->GetExpeditionId();
+    const int32 Revision = Fixture.One->GetDepartureVote().Revision;
+    const auto ForeignProgress = Fixture.Two->GetProgress();
+    const auto ForeignEnemies = Fixture.EnemyHealth(Fixture.Two);
+    TestFalse(TEXT("Foreign callers cannot consent for this ticket"),
+              Fixture.One->SetAbandonConsent(Fixture.Second.Controller, Id, Revision, true));
+    TestFalse(TEXT("A stale UUID cannot submit consent"),
+              Fixture.One->SetAbandonConsent(Fixture.First.Controller, FGuid::NewGuid(), Revision, true));
+    TestFalse(TEXT("A stale vote revision cannot submit consent"),
+              Fixture.One->SetAbandonConsent(Fixture.First.Controller, Id, Revision - 1, true));
+    TestTrue(TEXT("The first participant explicitly consents"),
+             Fixture.One->SetAbandonConsent(Fixture.First.Controller, Id, Revision, true));
+    TestTrue(TEXT("One vote leaves both players in their active expedition"),
+             Fixture.First.Profile->ActiveExpeditionId == Id && Fixture.FirstPeer.Profile->ActiveExpeditionId == Id &&
+                 Fixture.One->GetDepartureVote().ConsentingMemberKeys.Num() == 1);
+    TestTrue(TEXT("Consent can be withdrawn without moving anybody"),
+             Fixture.One->SetAbandonConsent(Fixture.First.Controller, Id, Revision, false) &&
+                 Fixture.One->GetDepartureVote().ConsentingMemberKeys.IsEmpty());
+    TestTrue(TEXT("The first participant consents before a rapid connection replacement"),
+             Fixture.One->SetAbandonConsent(Fixture.First.Controller, Id, Revision, true));
+    if (!TestTrue(TEXT("The same profile receives a different real connection without a monitor tick"),
+                  Fixture.Base.ReplaceConnection(Fixture.FirstPeer)))
+    {
+        return false;
+    }
+    TestFalse(TEXT("The previous connection generation cannot consume a stored vote"),
+              Fixture.One->SetAbandonConsent(Fixture.FirstPeer.Controller, Id, Revision, true));
+    const int32 FreshRevision = Fixture.One->GetDepartureVote().Revision;
+    TestTrue(TEXT("Connection replacement invalidates every earlier consent"),
+             FreshRevision != Revision && Fixture.One->GetDepartureVote().ConsentingMemberKeys.IsEmpty());
+    TestTrue(TEXT("Both current connections explicitly consent to the fresh vote"),
+             Fixture.One->SetAbandonConsent(Fixture.First.Controller, Id, FreshRevision, true) &&
+                 Fixture.One->SetAbandonConsent(Fixture.FirstPeer.Controller, Id, FreshRevision, true));
+    const auto Saved = Fixture.Result(Fixture.First, Id);
+    TestTrue(TEXT("Unanimity ends only this expedition with a fixed abandoned result"),
+             Saved.IsTerminal() && Saved.Outcome == EFableExpeditionOutcome::Abandoned &&
+                 !Fixture.First.Profile->ActiveExpeditionId.IsValid() &&
+                 !Fixture.FirstPeer.Profile->ActiveExpeditionId.IsValid() &&
+                 FableRPG::IsInRegion(EFableRegion::Village, Fixture.First.Hero->GetActorLocation()) &&
+                 FableRPG::IsInRegion(EFableRegion::Village, Fixture.FirstPeer.Hero->GetActorLocation()));
+    TestTrue(TEXT("The foreign party keeps its ticket, progress and exact enemies"),
+             Fixture.Second.Profile->ActiveExpeditionId == Fixture.Two->GetExpeditionId() &&
+                 SameProgress(ForeignProgress, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, ForeignEnemies));
+
+    // 실제 재인증을 주장하지 않는 메모리 fixture에서 PS 재생성 후 공개 키 소유권만 검증한다.
+    const FString Key = Fixture.First.Profile->PartyPlayerKey;
+    Fixture.Base.Disconnect(Fixture.First);
+    FPartyTestPlayer Rejoined = Fixture.Base.AddPlayer(701, true, false);
+    Rejoined.Profile->PartyPlayerKey = Key;
+    Fixture.Base.Manager->RegisterPlayer(Rejoined.Controller);
+    Fixture.Base.Mode->RestoreExpeditionResult(Rejoined.Profile);
+    const auto Restored = Fixture.Result(Rejoined, Id);
+    TestTrue(TEXT("A recreated owned profile reads its original terminal result without payment"),
+             Restored.IsTerminal() && Restored.CompletionId == Saved.CompletionId && SameReceipts(Saved, Restored) &&
+                 Rejoined.Profile->Gold == 0 && Rejoined.Profile->Ore == 0);
+    TestTrue(TEXT("Owner-only published result contains that same completion"),
+             Rejoined.Profile->GetExpeditionResult().CompletionId == Saved.CompletionId);
+    TestFalse(TEXT("A retired actor's vote cannot be replayed"),
+              IsValid(Fixture.One) && Fixture.One->SetAbandonConsent(Rejoined.Controller, Id, Revision, true));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableRetryEligibilityTest,
+                                 "Fablewood.Native.Expedition.CompletedQuestRetryEligibility",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 퀘스트 보고 상태를 되돌리지 않고 전투 재입장 자격만 별도로 판단한다. */
+bool FFableRetryEligibilityTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(801);
+    FPartyTestPlayer Member = Fixture.AddPlayer(802);
+    if (!TestTrue(TEXT("Eligibility fixture has two owned characters"),
+                  Fixture.AddMode() && Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110)) &&
+                      Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member)))
+    {
+        return false;
+    }
+    Leader.Profile->DungeonQuest = EFableQuestStage::Ready;
+    Member.Profile->DungeonQuest = EFableQuestStage::Completed;
+    const int32 LeaderCompletions = Leader.Profile->DungeonCompletions;
+    const int32 MemberCompletions = Member.Profile->DungeonCompletions;
+    TestTrue(TEXT("Both Ready and Completed remain eligible for another combat run"),
+             Leader.Profile->IsExpeditionEligible(EFableRegion::RootRuins) &&
+                 Member.Profile->IsExpeditionEligible(EFableRegion::RootRuins));
+    TestTrue(TEXT("Their genuine new party admission succeeds with explicit readiness"),
+             Fixture.Ready(Leader) && Fixture.Ready(Member) && Fixture.Enter(Leader));
+    AFablePartyEncounter* Encounter = Fixture.Mode->GetExpeditionFor(Leader.Profile);
+    if (!TestNotNull(TEXT("A new run exists without changing quest state"), Encounter))
+    {
+        return false;
+    }
+    AFableEnemy* Victim = nullptr;
+    for (TActorIterator<AFableEnemy> It(Fixture.World); It; ++It)
+    {
+        if (It->IsAlive() && It->GetExpeditionId() == Encounter->GetExpeditionId())
+        {
+            Victim = *It;
+            break;
+        }
+    }
+    if (!TestNotNull(TEXT("A tracked enemy exists in this new run"), Victim))
+    {
+        return false;
+    }
+    Victim->ReceiveHit(100000, Leader.Controller);
+    Fixture.Mode->HandleEnemyDefeated(Victim);
+    TestTrue(TEXT("Combat pays each admitted participant without issuing NPC turn-in rewards"),
+             Leader.Profile->Gold == 18 && Member.Profile->Gold == 18 &&
+                 Leader.Profile->DungeonQuest == EFableQuestStage::Ready &&
+                 Member.Profile->DungeonQuest == EFableQuestStage::Completed &&
+                 Leader.Profile->DungeonCompletions == LeaderCompletions &&
+                 Member.Profile->DungeonCompletions == MemberCompletions);
+    Member.Profile->ForestQuest = EFableQuestStage::Active;
+    TestFalse(TEXT("The original forest prerequisite is still enforced"),
+              Member.Profile->IsExpeditionEligible(EFableRegion::RootRuins));
+    Leader.Profile->DungeonCompletions = 0;
+    TestFalse(TEXT("Moonwell keeps its completed root-dungeon prerequisite"),
+              Leader.Profile->IsExpeditionEligible(EFableRegion::Moonwell));
     return true;
 }
 

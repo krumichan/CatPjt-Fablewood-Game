@@ -93,6 +93,9 @@ private:
     int32 ExpeditionStep = 0, ExpeditionNoticeBefore = 0, ExpeditionPreviousRevision = 0;
     double ExpeditionStarted = 0, ExpeditionLastSentAt = -10;
     bool bExpeditionRequestSent = false;
+    /** 이전 종료 결과는 실제 본인 UI 조회와 확인 응답을 구분해 기다린다. */
+    int32 ExpeditionResultStep = 0;
+    FGuid ExpeditionResultId, ExpeditionCompletionId, ExpeditionPreviousActionId;
     FGuid ExpeditionPartyId;
     FString ExpeditionSelfKey, ExpeditionPeerKey, ExpeditionRequestFingerprint;
     TSharedPtr<FJsonObject> ExpeditionReport, ServerExpeditionArrival;
@@ -113,6 +116,23 @@ private:
     FGuid IsolationPartyId, IsolationExpeditionId;
     TWeakObjectPtr<AFableEnemy> IsolationVictim;
     TSharedPtr<FJsonObject> IsolationReport, ServerIsolationReport;
+
+    /** 실제 보스 결과·재도전·개인 지급·접속 복구와 명시적인 철수를 검증한다. */
+    bool TickPartyResults(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
+
+    /** 같은 원정의 결과 지급과 연결 인원 변화를 서버 정본으로 보존한다. */
+    void ObserveResultsServer(UWorld* World);
+
+    /** 현재 원정·개인 결과·적 UUID와 체력을 읽기 전용으로 기록한다. */
+    TSharedPtr<FJsonObject> ResultsServerSnapshot(UWorld* World) const;
+
+    int32 ResultsStep = 0, ResultsPreviousRevision = 0;
+    double ResultsStepAt = 0, ResultsLastSentAt = -10, ResultsBossDodgeAt = -10;
+    bool bResultsRequestSent = false, bResultsKillInputStopped = false;
+    FString ResultsSelfKey, ResultsPeerKey;
+    FGuid ResultsPartyId, ResultsClearedId, ResultsRetryId, ResultsCompletionId;
+    TWeakObjectPtr<AFableEnemy> ResultsVictim;
+    TSharedPtr<FJsonObject> ResultsReport, ServerResultsReport;
 
     /** 파티 UI 입력과 서버 복제 결과를 단계별로 관찰한다. */
     bool TickParty(AFablePlayerController* PC, AFablePlayerState* Profile, double Now);

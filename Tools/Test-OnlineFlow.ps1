@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -258,7 +258,7 @@ function Wait-OnlineOfflineFailures($Clients){
     }while([DateTime]::UtcNow -lt $deadline)
     Assert-Online $false 'offline_failure_observation_timeout'
 }
-function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
+function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$false){
     Require-OnlineFields $Checkpoint @('playerId','heroClass','level','experience','classTier','revision','acknowledgedRevision','profileHash','ready','savePending','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId') 'checkpoint_incomplete'
     Assert-Online ($Checkpoint.ready -eq $true -and $Checkpoint.savePending -eq $false -and $Checkpoint.revision -ge 1 -and $Checkpoint.revision -eq $Checkpoint.acknowledgedRevision) 'checkpoint_not_acknowledged'
     Assert-Online ([string]$Checkpoint.playerId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and [string]$Checkpoint.profileHash -cmatch '^[a-f0-9]{64}$') 'checkpoint_identity_format'
@@ -267,7 +267,10 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
     }else{
         Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
-        if($Scenario -ceq 'party-entry'){
+        if($Scenario -ceq 'party-results'){
+            $extra=$Role -ceq 'client1' -and -not $BeforeSolo
+            Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq $(if($extra){100}else{65}) -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'results_pending_quest_progression_mismatch'
+        }elseif($Scenario -ceq 'party-entry'){
             Assert-Online ($Checkpoint.level -eq 2 -and $Checkpoint.experience -eq 105 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 1 -and $Checkpoint.dungeonCompletions -eq 0) 'entry_forest_progression_totals_mismatch'
         }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
@@ -286,7 +289,10 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
         Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
-        if($Scenario -ceq 'party-entry'){
+        if($Scenario -ceq 'party-results'){
+            $extra=$Role -ceq 'client1' -and -not $BeforeSolo
+            Assert-Online ($Checkpoint.wallet.gold -eq $(if($extra){401}else{383}) -and $Checkpoint.wallet.ore -eq $(if($extra){22}else{21}) -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'results_personal_reward_totals_mismatch'
+        }elseif($Scenario -ceq 'party-entry'){
             Assert-Online ($Checkpoint.wallet.gold -eq 135 -and $Checkpoint.wallet.ore -eq 7 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 0 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 5 -and $Checkpoint.stashCount -eq 0) 'entry_forest_reward_totals_mismatch'
         }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
@@ -404,6 +410,34 @@ function Resume-OnlinePartyClient($Server,$ClientOne,$Interrupted){
     $summary['interruption']=[ordered]@{status='reconnecting';originalCheckpoint=$Interrupted.checkpoint;originalParty=$Interrupted.partyStage1;canonicalAfterDisconnect=$comparison;serverSurvived=$true;clientOneSurvived=$true;serverControllersAfterDisconnect=1;clientTwoLeaseReleased=$true;resumeProcessId=$resumed.pid;resumeReportDirectory='register-resume'}
     return $resumed
 }
+# 실제 한 처치가 진행된 뒤에도 종료된 개인의 정규 데이터가 그대로인지 먼저 확인한다.
+function Resume-OnlineResultsClient($Server,$ClientOne,$Interrupted){
+    $deadline=[DateTime]::UtcNow.AddSeconds(100);$ready=$false;$before=$null;$latest=$null
+    do{
+        Assert-Online ($null -ne (Get-OnlineOwnedProcess $Server) -and $null -ne (Get-OnlineOwnedProcess $ClientOne)) 'results_survivors_exited_during_reconnect'
+        $latest=Read-OnlineReport $Server -AllowMissing;$survivor=Read-OnlineReport $ClientOne -AllowMissing
+        $me=Api-Online GET '/v1/me' $null $readerTokens.client2
+        if($latest -and @($latest.profiles).Count -eq 1 -and $me.leaseActive -eq $false -and (Test-OnlineCheck $latest 'server_results_retry_member_reserved')){
+            if($null -eq $before){
+                $before=Read-OnlineCanonical 'client2';$comparison=Assert-OnlineCanonical $before $Interrupted 'client2' $true
+                Write-OnlineJson (Join-Path (Join-Path $runFolder 'register') 'client2-results-disconnect-canonical.json') $before
+            }
+            if((Test-OnlineCheck $latest 'server_results_online_member_only_reward') -and (Test-OnlineCheck $survivor 'results_solo_kill_saved')){$ready=$true;break}
+        }
+        Start-Sleep -Milliseconds 350
+    }while([DateTime]::UtcNow -lt $deadline)
+    Assert-Online ($ready -and $null -ne $before) 'results_disconnect_solo_kill_or_lease_timeout'
+    Require-OnlineFields $latest @('serverResults') 'results_server_interruption_missing'
+    Require-OnlineFields $latest.serverResults @('retryBefore','retryDisconnected','retrySoloKill') 'results_interruption_snapshots_missing'
+    $after=Read-OnlineCanonical 'client2';$afterComparison=Assert-OnlineCanonical $after $Interrupted 'client2' $true
+    Assert-Online (Equal-Online $before $after) 'results_offline_character_received_or_lost_data'
+    Write-OnlineJson (Join-Path (Join-Path $runFolder 'register') 'client2-results-after-solo-kill-canonical.json') $after
+    $value=$Interrupted.partyResults;$entry=$accounts.client2;$context=Join-Path $privateFolder 'register-resume-context.private.json'
+    Write-OnlineJson $context @{mode='login';scenario='party-results';offlineFailure=$false;resumeExpedition=$true;accounts=@{client2=@{name=$entry.name;password=$entry.password;initialClass=$entry.initialClass;expected=@{playerId=$after.me.playerId;profileHash=$after.me.profileHash;partyId=$value.partyId;clearedExpeditionId=$value.clearedExpeditionId;retryExpeditionId=$value.retryExpeditionId;completionId=$value.clearResult.completionId;originalClearResult=$value.clearResult;interruptedCheckpoint=$Interrupted.checkpoint}}}}
+    $resumed=Start-OnlineValidationProcess 'client2' 'register-resume' $context
+    $summary['interruption']=[ordered]@{status='reconnecting';originalCheckpoint=$Interrupted.checkpoint;originalPartyResults=$value;canonicalAfterDisconnect=$comparison;canonicalAfterSoloKill=$afterComparison;offlineCanonicalUnchanged=$true;serverSurvived=$true;clientOneSurvived=$true;serverControllersAfterDisconnect=1;reservedPartyMembers=2;clientTwoLeaseReleased=$true;resumeProcessId=$resumed.pid;resumeReportDirectory='register-resume'}
+    return $resumed
+}
 function Resume-OnlineInterruptedClient($Server,$ClientOne,$Interrupted){
     $deadline=[DateTime]::UtcNow.AddSeconds(180);$ready=$false;$latest=$null
     do{
@@ -462,6 +496,76 @@ function Assert-OnlineIsolationServer($ServerReport,$ClientReports){
     foreach($row in @($final.a,$final.b)){Assert-Online ($row.profile.level -eq 2 -and $row.profile.bagCount -eq 5 -and $row.profile.forestQuest -eq 3 -and $row.profile.dungeonQuest -eq 1 -and $row.profile.dungeonCompletions -eq 0) 'isolation_final_profile_scope_invalid'}
     $summary['partyIsolation']=[ordered]@{status='passed';twoSoloPartiesAndSeparateArenas=$true;exactOwnTicketsAndEnemyIds=$true;aKillOnlyRewardsA=$true;aNormalWipeAndOwnRecovery=$true;bUnchangedThroughAKillWipeAndReturn=$true;bCanContinueAndKillOwnEnemy=$true;bKillDoesNotRewardA=$true;actualCrossDamageGuardAttempted=$false;crashReconnectPerformed=$false;partyIds=@($one.partyId,$two.partyId);expeditionIds=@($one.expeditionId,$two.expeditionId)}
 }
+# 결과 확인은 서버가 이미 지급한 내역을 읽기만 하며 장비의 실제 영구 식별자까지 비교한다.
+function Assert-OnlineResultsReceipt($Value,$Checkpoint,[string]$Role,[string]$Key,[string]$Expedition,[int]$Outcome,[bool]$Cleared){
+    Require-OnlineFields $Value @('expeditionId','partyId','recipientKey','region','difficulty','memberKeys','outcome','completionId','resultRevision','acknowledged','allGrantsCommitted','saveReady','requiresBackendCommit','retryExpeditionId','receipts','gold','ore','experience','rootCores','moonCrystals','itemCount') 'results_receipt_incomplete'
+    Assert-Online ($Value.expeditionId -ceq $Expedition -and $Value.recipientKey -ceq $Key -and $Value.region -eq 1 -and $Value.difficulty -eq 0 -and @($Value.memberKeys).Count -eq 2 -and $Key -cin @($Value.memberKeys) -and $Value.outcome -eq $Outcome -and $Value.resultRevision -gt 0 -and $Value.saveReady -eq $true -and $Value.requiresBackendCommit -eq $true) 'results_receipt_owner_or_scope_invalid'
+    if($Outcome -ne 0){Assert-Online ([string]$Value.completionId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and $Value.completionId -cne '00000000-0000-0000-0000-000000000000') 'results_completion_id_invalid'}
+    $extra=-not $Cleared -and $Role -ceq 'client1';$expectedCount=if($Cleared){7}elseif($extra){1}else{0}
+    Assert-Online (@($Value.receipts).Count -eq $expectedCount) 'results_grant_count_mismatch'
+    if($expectedCount){Assert-Online ($Value.allGrantsCommitted -eq $true) 'results_backend_grants_not_committed'}
+    $ids=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$sequences=[Collections.Generic.HashSet[long]]::new();$itemIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $gold=0;$ore=0;$xp=0;$cores=0;$crystals=0;$items=0;$bosses=0
+    foreach($receipt in $Value.receipts){
+        Require-OnlineFields $receipt @('expeditionId','grantId','recipientKey','sequence','boss','gold','ore','experience','rootCores','moonCrystals','saveState','committedRevision','items') 'results_grant_fields_missing'
+        Assert-Online ($receipt.expeditionId -ceq $Expedition -and $receipt.recipientKey -ceq $Key -and [string]$receipt.grantId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and $receipt.grantId -cne '00000000-0000-0000-0000-000000000000' -and $ids.Add([string]$receipt.grantId) -and $receipt.sequence -gt 0 -and $sequences.Add([long]$receipt.sequence)) 'results_grant_identity_replayed_or_foreign'
+        Assert-Online ($receipt.saveState -eq 2 -and $receipt.committedRevision -gt 0 -and $receipt.committedRevision -le $Checkpoint.acknowledgedRevision) 'results_grant_ack_revision_invalid'
+        $bossGrant=$Cleared -and $receipt.boss -eq $true
+        Assert-Online ($receipt.gold -eq $(if($bossGrant){140}else{18}) -and $receipt.ore -eq $(if($bossGrant){8}else{1}) -and $receipt.experience -eq $(if($bossGrant){250}else{35}) -and $receipt.rootCores -eq $(if($bossGrant){1}else{0}) -and $receipt.moonCrystals -eq 0 -and @($receipt.items).Count -eq $(if($bossGrant){1}else{0})) 'results_individual_enemy_grant_mismatch'
+        $gold+=[int]$receipt.gold;$ore+=[int]$receipt.ore;$xp+=[int]$receipt.experience;$cores+=[int]$receipt.rootCores;$crystals+=[int]$receipt.moonCrystals
+        if($receipt.boss -eq $true){++$bosses}
+        foreach($item in $receipt.items){
+            Assert-Online ($itemIds.Add([string]$item.instanceId)) 'results_boss_item_repeated'
+            $actual=@($Checkpoint.items|Where-Object instanceId -CEQ $item.instanceId)
+            Assert-Online ($actual.Count -eq 1) 'results_boss_item_not_in_personal_inventory'
+            foreach($field in @('instanceId','localId','slot','heroClass','rarity','power','upgrade','rollVersion','quality','nominalPower','rollPercent','setId','durabilityVersion','durability','maxDurability','affixes')){Assert-Online (Equal-Online $item.$field $actual[0].$field) 'results_boss_item_snapshot_changed'}
+            ++$items
+        }
+    }
+    $expectedGold=if($Cleared){248}elseif($extra){18}else{0};$expectedOre=if($Cleared){14}elseif($extra){1}else{0};$expectedXp=if($Cleared){460}elseif($extra){35}else{0}
+    Assert-Online ($gold -eq $expectedGold -and $ore -eq $expectedOre -and $xp -eq $expectedXp -and $cores -eq $(if($Cleared){1}else{0}) -and $crystals -eq 0 -and $items -eq $(if($Cleared){1}else{0}) -and $bosses -eq $(if($Cleared){1}else{0})) 'results_actual_receipt_delta_mismatch'
+    foreach($pair in @(@('gold',$gold),@('ore',$ore),@('experience',$xp),@('rootCores',$cores),@('moonCrystals',$crystals),@('itemCount',$items))){Assert-Online ($Value.($pair[0]) -eq $pair[1]) 'results_declared_totals_differ_from_grants'}
+}
+function Assert-OnlineResultsSameGrant($Before,$After){
+    foreach($field in @('expeditionId','partyId','recipientKey','region','difficulty','preparationRevision','memberKeys','outcome','completionId','requiresBackendCommit','receipts')){Assert-Online (Equal-Online $Before.$field $After.$field) 'results_reopen_or_restore_changed_grant'}
+}
+function Assert-OnlineResultsClient($Report,[string]$Role,[string]$Phase,[bool]$Crash){
+    Require-OnlineFields $Report @('partyResults') 'results_client_report_missing';$value=$Report.partyResults
+    Require-OnlineFields $value @('selfKey','partyId','clearedExpeditionId','retryExpeditionId','resumedProcess','serverRestartReceiptPersistenceClaimed') 'results_client_scope_missing'
+    Assert-Online ($value.serverRestartReceiptPersistenceClaimed -eq $false -and $value.clearedExpeditionId -cne $value.retryExpeditionId) 'results_retry_or_persistence_scope_invalid'
+    foreach($id in @($value.partyId,$value.clearedExpeditionId,$value.retryExpeditionId)){Assert-Online ([string]$id -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and $id -cne '00000000-0000-0000-0000-000000000000') 'results_client_uuid_invalid'}
+    if($Phase -ceq 'register'){
+        Require-OnlineFields $value @('forestCheckpoint','firstClearProfile','clearResult','reopenedClearResult','acknowledgedClearResult','retryBeforeProfile','retryPreparationRevision') 'results_initial_evidence_missing'
+        foreach($name in @('both_forest_quests_active','forest_reward_equipped','results_initial_exact_two_arrived','results_second_wave_played','results_boss_played','results_clear_receipts_saved','results_opened_own_result','results_reopened_without_grant','results_acknowledged_without_grant','results_retry_resets_all_consent','results_retry_unready_rejected','results_retry_fresh_both_ready','results_retry_new_uuid_two_arrived','results_retry_safe_before_disconnect')){Assert-Online (Test-OnlineCheck $Report $name) 'results_normal_ui_flow_missing'}
+        Assert-Online ($value.forestCheckpoint.wallet.gold -eq 135 -and $value.forestCheckpoint.wallet.ore -eq 7 -and $value.forestCheckpoint.level -eq 2 -and $value.forestCheckpoint.experience -eq 105 -and $value.forestCheckpoint.bagCount -eq 5) 'results_normal_forest_baseline_invalid'
+        Assert-OnlineCheckpoint $value.firstClearProfile $Role $true
+        Assert-OnlineCheckpoint $value.retryBeforeProfile $Role $true
+        Assert-OnlineResultsReceipt $value.clearResult $value.firstClearProfile $Role $value.selfKey $value.clearedExpeditionId 1 $true
+        Assert-OnlineResultsSameGrant $value.clearResult $value.reopenedClearResult
+        Assert-OnlineResultsSameGrant $value.clearResult $value.acknowledgedClearResult
+        Assert-Online ($value.acknowledgedClearResult.acknowledged -eq $true -and $value.retryPreparationRevision -gt $value.clearResult.preparationRevision) 'results_ack_or_fresh_consent_invalid'
+    }else{
+        Require-OnlineFields $value @('originalClearResult','interruptedCheckpoint','restoredClearResult','restoredRetryResult','restoredProfile') 'results_restored_evidence_missing'
+        foreach($name in @('results_original_receipt_restored','results_no_offline_reward_fullprofile_preserved','results_same_character_new_uuid_restored','results_peer_server_restoration_observed')){Assert-Online (Test-OnlineCheck $Report $name) 'results_restoration_flow_missing'}
+        Assert-Online ($value.resumedProcess -eq $true -and $Role -ceq 'client2') 'results_resume_process_role_invalid'
+        Assert-OnlineResultsSameGrant $value.originalClearResult $value.restoredClearResult
+        Assert-OnlineResultsReceipt $value.restoredClearResult $value.restoredProfile $Role $value.selfKey $value.clearedExpeditionId 1 $true
+        Assert-OnlineResultsReceipt $value.restoredRetryResult $value.restoredProfile $Role $value.selfKey $value.retryExpeditionId 0 $false
+        foreach($field in @('playerId','heroClass','level','experience','classTier','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId','forestQuest','dungeonQuest','dungeonCompletions')){Assert-Online (Equal-Online $value.interruptedCheckpoint.$field $value.restoredProfile.$field) 'results_interrupted_fullprofile_changed'}
+    }
+    if($Crash){
+        Assert-Online ($Role -ceq 'client2' -and $Phase -ceq 'register' -and $value.status -ceq 'crash-ready') 'results_planned_interruption_wrong_phase'
+        Assert-Online (Equal-Online $Report.checkpoint $value.retryBeforeProfile) 'results_crash_checkpoint_not_original_profile'
+        return
+    }
+    Require-OnlineFields $value @('abandonedResult','acknowledgedAbandonedResult','finalProfile') 'results_terminal_evidence_missing'
+    foreach($name in @('results_peer_server_restoration_observed','results_explicit_abandon_consent_sent','results_consented_return_town','results_final_saved','results_final_peer_server_handshake')){Assert-Online (Test-OnlineCheck $Report $name) 'results_terminal_ui_flow_missing'}
+    if($Role -ceq 'client1'){Assert-Online (Test-OnlineCheck $Report 'results_solo_kill_saved') 'results_surviving_member_kill_missing'}
+    Assert-Online ($value.status -ceq 'passed') 'results_client_not_passed'
+    Assert-OnlineResultsReceipt $value.abandonedResult $Report.checkpoint $Role $value.selfKey $value.retryExpeditionId 3 $false
+    Assert-OnlineResultsSameGrant $value.abandonedResult $value.acknowledgedAbandonedResult
+    Assert-Online ($value.acknowledgedAbandonedResult.acknowledged -eq $true -and (Equal-Online $value.finalProfile $Report.checkpoint)) 'results_terminal_checkpoint_or_ack_changed'
+}
 function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$Crash){
     Require-OnlineFields $Report @('movementCm','checkpoint','joinAttempts','hasSession','flowState') 'client_report_incomplete'
     Assert-Online ($Report.movementCm -ge 65) 'normal_movement_missing'
@@ -479,6 +583,7 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
     if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
     if($Scenario -ceq 'reconnect' -and $Phase -in @('register','resume')){Assert-OnlineMidrun $Report $Role $false}
     if($Scenario -ceq 'party' -and $Phase -in @('register','resume')){Assert-OnlineParty $Report $Role ($Phase -ceq 'resume')}
+    if($Scenario -ceq 'party-results' -and $Phase -in @('register','resume')){Assert-OnlineResultsClient $Report $Role $Phase $Crash}
     if($Scenario -ceq 'party-isolation' -and $Phase -ceq 'register'){
         Require-OnlineFields $Report @('partyIsolation') 'isolation_client_report_missing'
         $isolation=$Report.partyIsolation
@@ -511,6 +616,55 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
         foreach($name in @('save_release_ack_before_menu','logout_clears_session')){Assert-Online (Test-OnlineCheck $Report $name) 'safe_leave_or_logout_missing'}
     }
 }
+# 서버 사건 스냅숏과 원본·복구된 클라이언트 보고서의 모든 개인 지급을 교차검사한다.
+function Assert-OnlineResultsServer($ServerReport,$ClientReports){
+    Require-OnlineFields $ServerReport @('serverResults') 'results_server_report_missing';$value=$ServerReport.serverResults
+    Require-OnlineFields $value @('cleared','resultsAcknowledged','retryBefore','retryDisconnected','retrySoloKill','retryRejoined','retreatOneVote','abandoned','serverRestartReceiptPersistenceClaimed') 'results_server_event_missing'
+    Assert-Online ($value.serverRestartReceiptPersistenceClaimed -eq $false) 'results_restart_scope_misrepresented'
+    foreach($name in @('server_results_one_boss_clear_saved','server_results_reopen_ack_no_duplicate','server_results_retry_new_uuid_two_arrived','server_results_retry_member_reserved','server_results_online_member_only_reward','server_results_same_retry_uuid_rejoined','server_results_single_vote_did_not_return_party','server_results_consented_own_return_preserved_grants')){Assert-Online (Test-OnlineCheck $ServerReport $name) 'results_server_observation_missing'}
+    $one=$ClientReports.client1.partyResults;$two=$ClientReports.client2.partyResults;$original=$summary.interruption.originalPartyResults
+    Assert-Online ($summary.interruption.offlineCanonicalUnchanged -eq $true -and $summary.interruption.clientTwoLeaseReleased -eq $true -and $summary.interruption.serverControllersAfterDisconnect -eq 1 -and $summary.interruption.reservedPartyMembers -eq 2) 'results_offline_canonical_proof_missing'
+    Assert-Online ($one.selfKey -cne $two.selfKey -and $one.partyId -ceq $two.partyId -and $one.clearedExpeditionId -ceq $two.clearedExpeditionId -and $one.retryExpeditionId -ceq $two.retryExpeditionId -and $one.retryExpeditionId -cne $one.clearedExpeditionId -and $two.selfKey -ceq $original.selfKey -and $two.retryExpeditionId -ceq $original.retryExpeditionId -and $ClientReports.client2.checkpoint.playerId -ceq $summary.interruption.originalCheckpoint.playerId) 'results_retry_or_authenticated_owner_changed'
+    Assert-OnlineResultsSameGrant $original.clearResult $two.restoredClearResult
+    $clear=$value.cleared;$ack=$value.resultsAcknowledged;$before=$value.retryBefore;$gone=$value.retryDisconnected;$solo=$value.retrySoloKill;$back=$value.retryRejoined;$vote=$value.retreatOneVote;$end=$value.abandoned
+    $keys=@($one.selfKey,$two.selfKey)|Sort-Object -CaseSensitive
+    $bossIds=@();$bossItemIds=@()
+    foreach($pair in @(@('a','client1',$one),@('b','client2',$original))){
+        $slot=$pair[0];$role=$pair[1];$client=$pair[2];$row=$clear.$slot
+        Assert-Online ($row.connected -eq $true -and $row.saved -eq $true -and $row.publicKey -ceq $client.selfKey) 'results_clear_server_person_invalid'
+        Assert-OnlineCheckpoint $row.profile $role $true
+        Assert-OnlineResultsReceipt $row.clearedResult $row.profile $role $client.selfKey $one.clearedExpeditionId 1 $true
+        Assert-OnlineResultsSameGrant $client.clearResult $row.clearedResult
+        Assert-OnlineResultsSameGrant $row.clearedResult $ack.$slot.clearedResult
+        Assert-OnlineResultsSameGrant $row.clearedResult $back.$slot.clearedResult
+        Assert-OnlineResultsSameGrant $row.clearedResult $end.$slot.clearedResult
+        Assert-Online ($ack.$slot.clearedResult.acknowledged -eq $true) 'results_server_ack_missing'
+        foreach($field in @('playerId','heroClass','level','experience','classTier','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId','forestQuest','dungeonQuest','dungeonCompletions')){Assert-Online (Equal-Online $row.profile.$field $ack.$slot.profile.$field) 'results_reopen_or_ack_granted_again'}
+        $boss=@($row.clearedResult.receipts|Where-Object boss -EQ $true)
+        Assert-Online ($boss.Count -eq 1 -and @($boss[0].items).Count -eq 1) 'results_boss_grant_shape_invalid'
+        $bossIds+=@($boss[0].grantId);$bossItemIds+=@($boss[0].items[0].instanceId)
+    }
+    Assert-Online (@($bossIds|Select-Object -Unique).Count -eq 1 -and @($bossItemIds|Select-Object -Unique).Count -eq 2) 'results_more_than_one_boss_or_shared_personal_loot'
+    foreach($view in @($before,$gone,$solo,$back,$vote)){
+        Assert-Online ($view.activeInstances -eq 1 -and $view.activeExpeditionId -ceq $one.retryExpeditionId -and $view.ticketPartyId -ceq $one.partyId -and $view.ticketExpeditionId -ceq $one.retryExpeditionId -and $view.region -eq 1 -and $view.difficulty -eq 0 -and $view.ticketRegion -eq 1 -and $view.ticketDifficulty -eq 0 -and $view.ticketPreparationRevision -eq $one.retryPreparationRevision -and (Equal-Online @($view.ticketMembers|Sort-Object -CaseSensitive) @($keys)) -and $view.wave -eq 1 -and $view.required -eq 3 -and $view.recovering -eq $false) 'results_retry_server_ticket_or_progress_changed'
+        foreach($enemy in $view.enemies){Assert-Online ([string]$enemy.id -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and $enemy.id -cne '00000000-0000-0000-0000-000000000000' -and $enemy.expeditionId -ceq $one.retryExpeditionId -and $enemy.health -gt 0) 'results_retry_enemy_identity_invalid'}
+        Assert-Online (@($view.enemies|ForEach-Object id|Select-Object -Unique).Count -eq @($view.enemies).Count) 'results_retry_enemy_identity_repeated'
+    }
+    Assert-Online ($before.connectedMembers -eq 2 -and $before.reservedMembers -eq 2 -and $before.defeated -eq 0 -and @($before.enemies).Count -eq 3 -and $before.a.safe -eq $true -and $before.b.safe -eq $true) 'results_retry_before_crash_invalid'
+    Assert-Online ($gone.connectedMembers -eq 1 -and $gone.reservedMembers -eq 2 -and $gone.a.connected -eq $true -and $gone.b.connected -eq $false -and $gone.defeated -eq 0 -and (Equal-Online $before.enemies $gone.enemies)) 'results_retry_disconnect_not_reserved'
+    Assert-Online ($solo.connectedMembers -eq 1 -and $solo.b.connected -eq $false -and $solo.defeated -eq 1 -and @($solo.enemies).Count -eq 2 -and $solo.a.safe -eq $true) 'results_survivor_did_not_progress_alone'
+    Assert-OnlineCheckpoint $solo.a.profile 'client1'
+    Assert-OnlineResultsReceipt $solo.a.retryResult $solo.a.profile 'client1' $one.selfKey $one.retryExpeditionId 0 $false
+    Assert-Online ($back.connectedMembers -eq 2 -and $back.reservedMembers -eq 2 -and $back.a.expeditionId -ceq $one.retryExpeditionId -and $back.b.expeditionId -ceq $one.retryExpeditionId -and $back.defeated -eq 1 -and $back.a.safe -eq $true -and $back.b.safe -eq $true -and (Equal-Online $solo.enemies $back.enemies)) 'results_rejoined_enemy_or_progress_changed'
+    Assert-OnlineResultsReceipt $back.a.retryResult $back.a.profile 'client1' $one.selfKey $one.retryExpeditionId 0 $false
+    Assert-OnlineResultsReceipt $back.b.retryResult $back.b.profile 'client2' $two.selfKey $one.retryExpeditionId 0 $false
+    foreach($field in @('playerId','heroClass','level','experience','classTier','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId','forestQuest','dungeonQuest','dungeonCompletions')){Assert-Online (Equal-Online $summary.interruption.originalCheckpoint.$field $back.b.profile.$field) 'results_offline_owner_profile_changed_on_restore'}
+    Assert-Online ($vote.connectedMembers -eq 2 -and @($vote.departureConsents).Count -eq 1 -and $vote.departureConsents[0] -cin @($keys) -and $vote.a.expeditionId -ceq $one.retryExpeditionId -and $vote.b.expeditionId -ceq $one.retryExpeditionId) 'results_single_vote_returned_or_invalid_owner'
+    Assert-Online ($end.activeInstances -eq 0 -and $end.connectedMembers -eq 2 -and $end.a.inTown -eq $true -and $end.b.inTown -eq $true -and $end.a.alive -eq $true -and $end.b.alive -eq $true -and $end.a.saved -eq $true -and $end.b.saved -eq $true -and $end.a.expeditionId -ceq '00000000-0000-0000-0000-000000000000' -and $end.b.expeditionId -ceq '00000000-0000-0000-0000-000000000000') 'results_consented_return_not_complete'
+    foreach($pair in @(@('a','client1',$one),@('b','client2',$two))){$row=$end.($pair[0]);Assert-OnlineCheckpoint $row.profile $pair[1];Assert-OnlineResultsReceipt $row.retryResult $row.profile $pair[1] $pair[2].selfKey $one.retryExpeditionId 3 $false}
+    $summary.interruption.status='passed';$summary.interruption.sameAuthenticatedRetryUuid=$true;$summary.interruption.enemyUuidAndHealthExact=$true;$summary.interruption.noOfflineGrant=$true
+    $summary['partyResults']=[ordered]@{status='running';oneBossCleared=$true;personalReceiptsMatchActualGrants=$true;bossItemIdentityPreserved=$true;resultReopenNoDuplicateGrant=$true;allGrantSaveAcknowledgementsValidated=$true;npcQuestStillReadyWithoutTurnIn=$true;freshConsentRetryNewUuid=$true;exactTicketAndTwoArrivals=$true;sameAuthenticatedCharacterRejoinedNewUuid=$true;enemyUuidAndHealthPreservedOnRejoin=$true;offlineMemberReceivedNoReward=$true;unanimousOwnPartyRetreat=$true;personalAbandonedResultsPreserveGrants=$true;serverRestartReceiptPersistenceClaimed=$false;clearedExpeditionId=$one.clearedExpeditionId;retryExpeditionId=$one.retryExpeditionId;partyId=$one.partyId;memberKeys=@($keys)}
+}
 function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     Require-OnlineFields $ServerReport @('serverObservedPlayerIds') 'server_simultaneous_players_evidence_missing'
     Assert-Online ($ServerReport.networkMode -ceq 'dedicated' -and $ServerReport.localControllerCount -eq 0) 'server_observation_not_dedicated'
@@ -518,6 +672,9 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'party-results' -and $ClientReports.client1.mode -ceq 'register'){
+        Assert-OnlineResultsServer $ServerReport $ClientReports
+    }
     if($Scenario -ceq 'party-isolation' -and $ClientReports.client1.mode -ceq 'register'){
         Assert-OnlineIsolationServer $ServerReport $ClientReports
     }
@@ -581,7 +738,7 @@ function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
         foreach($role in @('client1','client2')){
             if($results.ContainsKey($role)){continue}
             $record=$Clients[$role];$report=Read-OnlineReport $record -AllowMissing
-            $crash=$CrashSecond -and $role -ceq 'client2' -and -not($Scenario -in @('reconnect','party') -and $reconnectResumed)
+            $crash=$CrashSecond -and $role -ceq 'client2' -and -not($Scenario -in @('reconnect','party','party-results') -and $reconnectResumed)
             if($report -and (($crash -and $report.status -ceq 'crash-ready') -or (-not $crash -and $report.status -ceq 'passed'))){
                 if($Scenario -ceq 'reconnect' -and $crash){Assert-OnlineMidrun $report $role $true}
                 else{
@@ -594,8 +751,8 @@ function Wait-OnlinePhase([string]$Phase,$Server,$Clients,[bool]$CrashSecond){
                     $null=Assert-OnlineShots $report $record.phase 5
                     Write-OnlineJson (Join-Path (Join-Path $runFolder $Phase) 'client2-crash-checkpoint.json') $report
                     Stop-OnlineOwned $record $true
-                    if($Scenario -in @('reconnect','party')){
-                        $Clients.client2=if($Scenario -ceq 'party'){Resume-OnlinePartyClient $Server $Clients.client1 $report}else{Resume-OnlineInterruptedClient $Server $Clients.client1 $report}
+                    if($Scenario -in @('reconnect','party','party-results')){
+                        $Clients.client2=if($Scenario -ceq 'party'){Resume-OnlinePartyClient $Server $Clients.client1 $report}elseif($Scenario -ceq 'party-results'){Resume-OnlineResultsClient $Server $Clients.client1 $report}else{Resume-OnlineInterruptedClient $Server $Clients.client1 $report}
                         $reconnectResumed=$true;$crashObservedAt=$null;continue
                     }
                 }
@@ -832,6 +989,17 @@ try{
     $shots=@();foreach($role in @('client1','client2')){$shots+=@(Assert-OnlineShots $reports[$role] 'login' 5)}
     $summary.phases.login=[ordered]@{status='passed';serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;resumeWalletItemsSummaryExact=$true;reports=@((Join-Path $runFolder 'login\client1.json'),(Join-Path $runFolder 'login\client2.json'));canonical=(Join-Path $runFolder 'login\canonical.json')}
     Quit-OnlineServer 'login' $server
+    if($Scenario -ceq 'party-results'){
+        $startedClients=@($ownedProcesses|Where-Object role -IN @('client1','client2'))
+        $interrupted=@($ownedProcesses|Where-Object forcedForScenario -EQ $true)
+        $resumed=@($startedClients|Where-Object {$_.role -ceq 'client2' -and $_.phase -ceq 'register-resume'})
+        Assert-Online ($startedClients.Count -eq 5 -and $resumed.Count -eq 1 -and $interrupted.Count -eq 1 -and $interrupted[0].role -ceq 'client2' -and $interrupted[0].phase -ceq 'register' -and $interrupted[0].exitCode -ne $null -and @($ownedProcesses|Where-Object cleanupForced -EQ $true).Count -eq 0) 'results_planned_five_starts_or_one_interruption_mismatch'
+        Assert-Online ($summary.partyResults.status -ceq 'running' -and $summary.phases.register.status -ceq 'passed' -and $summary.phases.login.resumeWalletItemsSummaryExact -eq $true -and $summary.backendRestart.sameDatabaseIdentity -eq $true -and $summary.backendRestart.healthy -eq $true) 'results_final_durable_verification_missing'
+        $summary.partyResults.plannedClient2InterruptionOnce=$true
+        $summary.partyResults.actualPackagedClientStarts=$startedClients.Count
+        $summary.partyResults.safeLeaveAndApiRestartFullProfileExact=$true
+        $summary.partyResults.status='passed'
+    }
     $summary.status='passed'
 }catch{
     $summary.status='failed';$summary.failedStage=$stage

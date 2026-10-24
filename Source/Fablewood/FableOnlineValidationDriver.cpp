@@ -110,7 +110,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
             Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry") &&
-            Scenario != TEXT("party-isolation"))
+            Scenario != TEXT("party-isolation") && Scenario != TEXT("party-results"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -289,6 +289,15 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     {
         J->SetObjectField(TEXT("serverIsolation"), ServerIsolationReport);
     }
+    if (ResultsReport)
+    {
+        J->SetObjectField(TEXT("partyResults"), ResultsReport);
+    }
+    if (ServerResultsReport)
+    {
+        J->SetObjectField(TEXT("serverResults"), ServerResultsReport);
+    }
+    J->SetNumberField(TEXT("resultsStep"), ResultsStep);
     J->SetNumberField(TEXT("isolationStep"), IsolationStep);
     J->SetNumberField(TEXT("expeditionStep"), ExpeditionStep);
     J->SetNumberField(TEXT("dungeonStep"), DungeonStep);
@@ -593,12 +602,16 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (Scenario == TEXT("party-results"))
+        {
+            ObserveResultsServer(World);
+        }
         if (Scenario == TEXT("party-isolation"))
         {
             ObserveIsolationServer(World);
         }
         if (Scenario == TEXT("party-entry") || Scenario == TEXT("dungeon") || Scenario == TEXT("growth") ||
-            Scenario == TEXT("reconnect"))
+            Scenario == TEXT("reconnect") || Scenario == TEXT("party-results"))
         {
             ObserveExpeditionServer(World);
         }
@@ -875,7 +888,8 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         Checks.Add(TEXT("normal_movement"), true);
         if (Mode == TEXT("login"))
         {
-            if ((Scenario == TEXT("reconnect") || Scenario == TEXT("party")) && bResumeExpedition)
+            if ((Scenario == TEXT("reconnect") || Scenario == TEXT("party") || Scenario == TEXT("party-results")) &&
+                bResumeExpedition)
             {
                 Advance(100);
             }
@@ -926,6 +940,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
             Capture(Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
                     : Scenario == TEXT("party-entry")     ? TEXT("party-entry-finished")
                     : Scenario == TEXT("party-isolation") ? TEXT("party-isolation-finished")
+                    : Scenario == TEXT("party-results")   ? TEXT("party-results-finished")
                     : Scenario == TEXT("growth")          ? TEXT("growth-finished")
                     : Scenario == TEXT("reconnect")       ? TEXT("reconnected-dungeon")
                                                           : TEXT("dungeon-cleared"));

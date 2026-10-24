@@ -209,6 +209,74 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
         return false;
     }
 
+    // 새 원정 전에 미확인 종료 결과가 있으면 실제 조회·확인 RPC와 본인 복제를 모두 관찰한다.
+    const auto& PreviousResult = P->GetExpeditionResult();
+    if (PreviousResult.IsTerminal() && (!PreviousResult.bAcknowledged || ExpeditionResultStep > 0))
+    {
+        if (ExpeditionResultId != PreviousResult.Ticket.ExpeditionId ||
+            ExpeditionCompletionId != PreviousResult.CompletionId)
+        {
+            ExpeditionResultStep = 0;
+            ExpeditionResultId = PreviousResult.Ticket.ExpeditionId;
+            ExpeditionCompletionId = PreviousResult.CompletionId;
+        }
+        if (PC->IsExpeditionActionPending())
+        {
+            return false;
+        }
+        const auto* Displayed = PC->GetDisplayedExpeditionResult();
+        const bool Matches =
+            Displayed && Displayed->IsTerminal() && Displayed->Ticket.ExpeditionId == ExpeditionResultId &&
+            Displayed->CompletionId == ExpeditionCompletionId && Displayed->RecipientPublicKey == P->PartyPlayerKey;
+        const bool ReplyArrived = PC->GetLastExpeditionActionRequestId().IsValid() &&
+                                  PC->GetLastExpeditionActionRequestId() != ExpeditionPreviousActionId;
+        if (ExpeditionResultStep == 0 && Now - ExpeditionLastSentAt >= .7)
+        {
+            ExpeditionPreviousActionId = PC->GetLastExpeditionActionRequestId();
+            PC->UIOpenExpeditionResult(ExpeditionResultId);
+            if (PC->IsExpeditionActionPending())
+            {
+                ExpeditionResultStep = 1;
+                ExpeditionLastSentAt = Now;
+            }
+        }
+        else if (ExpeditionResultStep == 1 && ReplyArrived)
+        {
+            if (PC->DidExpeditionActionSucceed() && Matches)
+            {
+                ExpeditionPreviousActionId = PC->GetLastExpeditionActionRequestId();
+                PC->UIAcknowledgeExpeditionResult();
+                if (PC->IsExpeditionActionPending())
+                {
+                    ExpeditionResultStep = 2;
+                    ExpeditionLastSentAt = Now;
+                }
+            }
+            else if (!PC->DidExpeditionActionSucceed())
+            {
+                ExpeditionResultStep = 0;
+            }
+        }
+        else if (ExpeditionResultStep == 2 && ReplyArrived)
+        {
+            if (PC->DidExpeditionActionSucceed() && Matches && PreviousResult.bAcknowledged)
+            {
+                ExpeditionReport->SetStringField(TEXT("previousResultExpeditionId"),
+                                                 ExpeditionResultId.ToString(EGuidFormats::DigitsWithHyphensLower));
+                ExpeditionReport->SetStringField(TEXT("previousResultCompletionId"),
+                                                 ExpeditionCompletionId.ToString(EGuidFormats::DigitsWithHyphensLower));
+                Mark(TEXT("entry_previous_terminal_result_acknowledged"));
+                ExpeditionResultStep = 0;
+                PC->UIClosePanels();
+            }
+            else if (!PC->DidExpeditionActionSucceed())
+            {
+                ExpeditionResultStep = 0;
+            }
+        }
+        return false;
+    }
+
     const auto* Party = Manager->GetPartyForMember(P->GetPlayerId());
     const auto Both = [&]()
     {

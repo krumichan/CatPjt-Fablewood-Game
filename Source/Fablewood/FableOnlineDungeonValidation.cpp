@@ -253,6 +253,10 @@ void UFableOnlineValidationDriver::DungeonFight(AFablePlayerController* PC, doub
 bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFablePlayerState* P, AFableCharacter* Hero,
                                                double Now)
 {
+    if (Scenario == TEXT("party-results") && (bResumeExpedition || DungeonStep >= 6))
+    {
+        return TickPartyResults(PC, P, Hero, Now);
+    }
     if (Scenario == TEXT("party-isolation") && DungeonStep >= 6)
     {
         return TickPartyIsolation(PC, P, Hero, Now);
@@ -590,10 +594,11 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         {
             PC->UIClosePanels();
         }
-        if (DungeonWalk(PC,
-                        FableRPG::RegionReturnPortal(EFableRegion::RootRuins) +
-                            FVector(Role == TEXT("client1") ? -80 : 80, 0, 100),
-                        100) &&
+        if (DungeonWalk(
+                PC,
+                Progress.ToWorld(EFableRegion::RootRuins, FableRPG::RegionReturnPortal(EFableRegion::RootRuins) +
+                                                              FVector(Role == TEXT("client1") ? -80 : 80, 0, 100)),
+                100) &&
             Hero->GetVelocity().Size2D() < 10 && Now - DungeonActionAt > 1)
         {
             DungeonKey(PC, EKeys::E);
