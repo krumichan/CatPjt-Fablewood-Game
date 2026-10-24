@@ -1,6 +1,7 @@
 #include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
+#include "FablePartyManager.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
@@ -154,6 +155,40 @@ void UFableRPGValidationDriver::TickLoot()
         Finish(false, Reason);
     };
 
+    // 모든 장비 검증 입장도 공통 파티 구성·개별 준비·파티장 출발 경로를 사용한다.
+    const auto PrepareLootPortal = [this, PS, GS, Now](EFableRegion TargetRegion, EFableDifficulty TargetDifficulty)
+    {
+        // 결과 후 귀환 전에 새 입장을 반복하는 구 검증은 명시적으로 중단한다.
+        if (PS->ActiveExpeditionId.IsValid() && GS->AdventureStage == EFableAdventureStage::Cleared)
+        {
+            LootStop();
+            Finish(
+                false,
+                TEXT(
+                    "Legacy loot admission requires returning the current expedition to town before new preparation."));
+            return;
+        }
+
+        AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+        const FFablePartyRecord* Party = Manager ? Manager->GetPartyForMember(PS->PartyPlayerKey) : nullptr;
+        if (Party && Party->LeaderKey == PS->PartyPlayerKey && Party->SelectedDifficulty != TargetDifficulty &&
+            !PS->ActiveExpeditionId.IsValid())
+        {
+            if (!PC->IsPartyExpeditionOpen())
+            {
+                PC->UIOpenPartyExpedition();
+            }
+            if (!PC->IsPartyPreparationPending() && Now - LastAction >= 1)
+            {
+                PC->UISelectDifficulty(TargetDifficulty);
+                LastAction = Now;
+            }
+            return;
+        }
+
+        AdventurePortal(TargetRegion);
+    };
+
     // JSON 계약과 검증 기록 처리
     if (Now - LastLootReport > .5)
     {
@@ -289,41 +324,24 @@ void UFableRPGValidationDriver::TickLoot()
         break;
     }
     case 3:
-        if (GS->ActiveRegion == Region && FableRPG::IsInRegion(Region, Hero->GetActorLocation()) &&
-            GS->RequiredEnemies > 0)
+        if (GS->ActiveRegion == Region && GS->AdventureStage != EFableAdventureStage::Cleared &&
+            FableRPG::IsInRegion(Region, Hero->GetActorLocation()) && GS->RequiredEnemies > 0)
         {
             Go(4);
             break;
         }
-        if (!WalkTo(FableRPG::PortalLocation() + FVector(Role == TEXT("host") ? -80 : 80, -100, 100), 100) ||
-            Hero->GetVelocity().Size2D() > 10)
+
+        // 서버가 선택을 복제한 실제 준비 화면만 기록한다.
+        if (PC->IsPartyExpeditionOpen() && PS->PartyId.IsValid() && PC->GetSelectedDungeonId() == Region &&
+            PC->GetSelectedDifficulty() == Difficulty && LootStage == 0)
         {
+            Capture(FString::Printf(TEXT("portal-cycle-%d"), LootCycle));
+            LootStage = 1;
             LastAction = Now;
-            return;
+            break;
         }
-        if (Now - LastAction < .8)
-        {
-            return;
-        }
-        if (PC->IsPortalOpen())
-        {
-            PC->UISelectDungeon(Region);
-            PC->UISelectDifficulty(Difficulty);
-            if (LootStage == 0)
-            {
-                Capture(FString::Printf(TEXT("portal-cycle-%d"), LootCycle));
-                LootStage = 1;
-                LastAction = Now;
-                return;
-            }
-            PC->UIEnterSelectedDungeon();
-        }
-        else
-        {
-            PC->UIClosePanels();
-            Key(EKeys::E);
-        }
-        LastAction = Now;
+
+        PrepareLootPortal(Region, Difficulty);
         break;
     case 4:
         LootStop();
@@ -780,12 +798,7 @@ void UFableRPGValidationDriver::TickLoot()
             LootStop();
             return;
         }
-        if (WalkTo(FableRPG::PortalLocation() + FVector(Role == TEXT("host") ? -80 : 80, -100, 100), 100) &&
-            Hero->GetVelocity().Size2D() < 10 && Now - LastAction > .8)
-        {
-            Key(EKeys::R);
-            LastAction = Now;
-        }
+        PrepareLootPortal(Region, EFableDifficulty::Hard);
         break;
     case 33:
         LootStop();

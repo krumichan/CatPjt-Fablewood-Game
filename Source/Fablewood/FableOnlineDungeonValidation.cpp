@@ -332,57 +332,29 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         break;
     case 6:
     {
-        // 지역·적·전투 진행 처리
-        if (GS->ActiveRegion == EFableRegion::RootRuins &&
-            FableRPG::IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()))
-        {
-            Checks.Add(TEXT("entered_root_ruins"), true);
-            Capture(TEXT("dungeon-entry"));
-            Advance(7);
-            break;
-        }
-
-        // 퀘스트와 이야기 진행 처리
+        // 기존 던전 검증도 실제 파티 선택과 준비 동의 절차를 통과해야 한다.
         if (!Party(EFableQuestId::RootRuins, EFableQuestStage::Active))
         {
             break;
         }
-
-        const FVector Portal = FableRPG::PortalLocation() + FVector(Role == TEXT("client1") ? -80 : 80, -100, 100);
-
-        // 위치·방향·거리 계산 처리
-        if (PC->IsAnyPanelOpen() && FVector::DistSquared2D(Hero->GetActorLocation(), Portal) > 10000)
+        if (TickExpeditionPreparation(PC, P, Hero, Now))
         {
-            PC->UIClosePanels();
+            Checks.Add(TEXT("entered_root_ruins"), true);
+            if (Scenario == TEXT("party-entry"))
+            {
+                Checks.Add(TEXT("entry_forest_only_totals"),
+                           P->Gold == 135 && P->Ore == 7 && P->Level == 2 && P->Experience == 105 &&
+                               P->Inventory.Num() == 5 && P->DungeonCompletions == 0 && GS->DefeatedEnemies == 0);
+                if (!Checks.FindRef(TEXT("entry_forest_only_totals")))
+                {
+                    Finish(false, TEXT("Entry-only checkpoint included an unexpected dungeon reward."));
+                    break;
+                }
+                return true;
+            }
+            Capture(TEXT("dungeon-entry"));
+            Advance(7);
         }
-
-        // 이동 입력과 속도 제한 처리
-        if (!DungeonWalk(PC, Portal, 100) || Hero->GetVelocity().Size2D() > 10)
-        {
-            DungeonActionAt = Now;
-            break;
-        }
-
-        // 이 단계에서 협동 던전의 입장·웨이브·부활·보스 검증을 순서대로 진행한다.
-        if (Now - DungeonActionAt < 1)
-        {
-            break;
-        }
-
-        // 지역·적·전투 진행 처리
-        if (PC->IsPortalOpen())
-        {
-            PC->UISelectDungeon(EFableRegion::RootRuins);
-            PC->UISelectDifficulty(EFableDifficulty::Normal);
-            PC->UIEnterSelectedDungeon();
-        }
-        else
-        {
-            PC->UIClosePanels();
-            DungeonKey(PC, EKeys::E);
-        }
-
-        DungeonActionAt = Now;
         break;
     }
     case 7:

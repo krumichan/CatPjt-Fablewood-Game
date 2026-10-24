@@ -4,6 +4,7 @@
 #include "FableEnemyBolt.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
+#include "FablePartyManager.h"
 #include "FableGameState.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -369,20 +370,17 @@ void UFableCoopValidationDriver::SelectQuest(EFableQuestId Quest)
 /** 지역 입장에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
 void UFableCoopValidationDriver::EnterRegion(EFableRegion Region, bool bRetry)
 {
-    // 지역·적·전투 진행에 필요한 값 준비
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     const double Now = GetWorld()->GetTimeSeconds();
     const FVector Destination =
         (Region == EFableRegion::Village ? FableRPG::BoardLocation() : FableRPG::PortalLocation()) +
         FVector(Role == TEXT("host") ? -90 : 90, -110, 100);
 
-    // 위치·방향·거리 계산 처리
+    // 이동 중에는 패널이 일반 이동 입력을 막지 않도록 닫는다.
     if (PC->IsAnyPanelOpen() && FVector::DistSquared2D(Hero->GetActorLocation(), Destination) > 10000)
     {
         PC->UIClosePanels();
     }
-
-    // 이동 입력과 속도 제한 조건 검사
     if (!WalkTo(Destination, 95) || Hero->GetVelocity().Size2D() > 10)
     {
         LastAction = Now;
@@ -393,29 +391,108 @@ void UFableCoopValidationDriver::EnterRegion(EFableRegion Region, bool bRetry)
         return;
     }
 
-    // 지역·적·전투 진행 처리
-    if (bRetry)
-    {
-        if (!Checks.FindRef(TEXT("retry_ui_captured")))
-        {
-            Capture(TEXT("retry-ready"));
-            Checks.Add(TEXT("retry_ui_captured"), true);
-            LastAction = Now;
-            return;
-        }
-        Key(EKeys::R);
-    }
-    else if (PC->IsPortalOpen())
-    {
-        PC->UISelectDungeon(Region);
-        PC->UIEnterSelectedDungeon();
-    }
-    else
+    // 숲 재도전은 마을 게시판의 기존 일반 입력을 유지한다.
+    if (Region == EFableRegion::Village)
     {
         PC->UIClosePanels();
-        Key(EKeys::E);
+        Key(bRetry ? EKeys::R : EKeys::E);
+        LastAction = Now;
+        return;
     }
 
+    AFablePlayerState* Profile = PC->GetPlayerState<AFablePlayerState>();
+    AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
+    if (!Profile || !Manager || !State || State->PlayerArray.Num() != (bSolo ? 1 : 2))
+    {
+        LastAction = Now;
+        return;
+    }
+    if (!PC->IsPartyExpeditionOpen())
+    {
+        PC->UIOpenPartyExpedition();
+    }
+
+    // 협동 검증도 실제 생성·초대·수락 요청으로 명부를 구성한다.
+    const FFablePartyRecord* Party = Manager->GetPartyForMember(Profile->PartyPlayerKey);
+    if (!Party)
+    {
+        if (const FFablePartyInvite* Invite = Manager->GetPendingInviteFor(Profile->PartyPlayerKey))
+        {
+            PC->UIRespondPartyInvite(Invite->InviteId, true);
+        }
+        else if (Role == TEXT("host") || bSolo)
+        {
+            PC->UICreateParty();
+        }
+        LastAction = Now;
+        return;
+    }
+
+    const bool bLeader = Party->LeaderKey == Profile->PartyPlayerKey;
+    if (Party->Members.Num() < (bSolo ? 1 : 2))
+    {
+        if (bLeader)
+        {
+            for (APlayerState* Entry : State->PlayerArray)
+            {
+                AFablePlayerState* Peer = Cast<AFablePlayerState>(Entry);
+                if (Peer && Peer != Profile && !Peer->PartyPlayerKey.IsEmpty() &&
+                    !Manager->GetPartyForMember(Peer->PartyPlayerKey) &&
+                    !Manager->GetPendingInviteFor(Peer->PartyPlayerKey))
+                {
+                    PC->UIInviteParty(Peer->GetPlayerId());
+                    break;
+                }
+            }
+        }
+        LastAction = Now;
+        return;
+    }
+
+    // 구조된 참가자의 복귀는 새 원정의 동의와 구분한다.
+    if (Profile->ActiveExpeditionId.IsValid())
+    {
+        if (!PC->IsPartyPreparationPending())
+        {
+            PC->UIEnterSelectedDungeon();
+        }
+        LastAction = Now;
+        return;
+    }
+    if (PC->IsPartyPreparationPending())
+    {
+        LastAction = Now;
+        return;
+    }
+
+    const EFableDifficulty Difficulty = bRetry ? State->RetryDifficulty : Party->SelectedDifficulty;
+    if (Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty)
+    {
+        if (bLeader)
+        {
+            PC->UIRequestPartySelection(Party->PartyId, Party->PreparationRevision, Region, Difficulty);
+        }
+        LastAction = Now;
+        return;
+    }
+    if (bRetry && !Checks.FindRef(TEXT("retry_ui_captured")))
+    {
+        Capture(TEXT("retry-ready"));
+        Checks.Add(TEXT("retry_ui_captured"), true);
+        LastAction = Now;
+        return;
+    }
+
+    // 각자 명시적으로 동의한 뒤 파티장만 서버 입장을 요청한다.
+    if (!PC->IsPartyReady())
+    {
+        PC->UISetPartyReady(true);
+    }
+    else if (bLeader && PC->CanEnterPreparedParty())
+    {
+        PC->UIEnterPreparedParty();
+    }
     LastAction = Now;
 }
 

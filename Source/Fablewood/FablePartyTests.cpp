@@ -1,16 +1,42 @@
 #include "FablePartyManager.h"
+#include "FableCharacter.h"
+#include "FableEnemy.h"
+#include "FableGameMode.h"
 #include "FableGameState.h"
 #include "FablePlayerState.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "Components/BoxComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/AutomationTest.h"
 
 /** 실시간 대기 없이 서버 요청 간격과 만료 경계만 제어하는 검증 도우미. */
 struct FFablePartyTestAccess
 {
+    /** 전투와 보상 경로도 실제 슬롯에 저장하지 않는 메모리 전용 프로필을 사용한다. */
+    static void UseMemoryOnly(AFablePlayerState* Profile)
+    {
+        Profile->bPersistenceEnabled = false;
+        Profile->ProfileSlot.Empty();
+        Profile->bStorageBlocked = false;
+    }
+
+    /** 장비 마모나 처치 보상이 파일 저장으로 이어지지 않는지 확인한다. */
+    static bool IsMemoryOnly(const AFablePlayerState* Profile)
+    {
+        return Profile && !Profile->bPersistenceEnabled && Profile->ProfileSlot.IsEmpty();
+    }
+
+    /** 검증 월드의 정식 상태를 서버 규칙 객체에 연결한다. */
+    static void AttachState(AFableGameMode* Mode, AFableGameState* State)
+    {
+        Mode->GameState = State;
+        Mode->GetWorld()->SetGameState(State);
+    }
+
     /** 서로 다른 사용자 동작 사이의 요청 간격만 초기화한다. */
     static void AllowNextRequest(AFablePartyManager* Manager)
     {
@@ -58,6 +84,7 @@ namespace
     {
         APlayerController* Controller = nullptr;
         AFablePlayerState* Profile = nullptr;
+        AFableCharacter* Hero = nullptr;
 
         /** 이후 검증에서 안전하게 사용할 수 있는 생성 결과인지 확인한다. */
         bool IsValid() const
@@ -72,11 +99,12 @@ namespace
         UWorld* World = nullptr;
         AFableGameState* State = nullptr;
         AFablePartyManager* Manager = nullptr;
+        AFableGameMode* Mode = nullptr;
         TArray<TWeakObjectPtr<APlayerController>> RegisteredControllers;
         bool bOwnsEngineContext = false;
 
-        /** 물리·오디오·저장 초기화 없이 서버 권한 월드를 준비한다. */
-        FPartyTestWorld()
+        /** 오디오·저장을 끄고 입장 충돌 검사에 필요한 경우에만 물리 월드를 준비한다. */
+        explicit FPartyTestWorld(bool bPhysics = false)
         {
             if (!GEngine)
             {
@@ -85,9 +113,9 @@ namespace
 
             const UWorld::InitializationValues Values = UWorld::InitializationValues()
                                                             .RequiresHitProxies(false)
-                                                            .CreatePhysicsScene(false)
+                                                            .CreatePhysicsScene(bPhysics)
                                                             .ShouldSimulatePhysics(false)
-                                                            .EnableTraceCollision(false)
+                                                            .EnableTraceCollision(bPhysics)
                                                             .CreateNavigation(false)
                                                             .CreateAISystem(false)
                                                             .AllowAudioPlayback(false);
@@ -146,6 +174,7 @@ namespace
                 Player.Profile->SetPlayerId(PlayerId);
                 Player.Profile->SetPlayerName(FString::Printf(TEXT("PartyTest%d"), PlayerId));
                 Player.Profile->bProfileLoaded = bLoaded;
+                FFablePartyTestAccess::UseMemoryOnly(Player.Profile);
                 Player.Profile->SetOwner(Player.Controller);
                 Player.Controller->SetPlayerState(Player.Profile);
 
@@ -160,6 +189,70 @@ namespace
             }
 
             return Player;
+        }
+
+        /** 실제 서버의 입장 메서드를 파일이나 서버 연결 없이 검증한다. */
+        bool AddMode()
+        {
+            Mode = World ? World->SpawnActor<AFableGameMode>() : nullptr;
+            if (Mode && State)
+            {
+                FFablePartyTestAccess::AttachState(Mode, State);
+            }
+
+            return Mode && State;
+        }
+
+        /** 생존·위치·지역 자격 검사는 실제 캐릭터와 소유 프로필을 사용한다. */
+        bool AddHero(FPartyTestPlayer& Player, const FVector& Location)
+        {
+            if (!World || !Player.IsValid())
+            {
+                return false;
+            }
+
+            FActorSpawnParameters Parameters;
+            Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+            Player.Hero = World->SpawnActor<AFableCharacter>(Location, FRotator::ZeroRotator, Parameters);
+            if (!Player.Hero)
+            {
+                return false;
+            }
+
+            Player.Controller->Possess(Player.Hero);
+            Player.Profile->ForestQuest = EFableQuestStage::Completed;
+            Player.Profile->DungeonQuest = EFableQuestStage::Active;
+            Player.Profile->MoonwellQuest = EFableQuestStage::Active;
+            Player.Profile->DungeonCompletions = 1;
+            return Player.Hero->IsAlive() && Player.Hero->GetPlayerState() == Player.Profile;
+        }
+
+        /** 준비 요청마다 최신 서버 선택을 사용한다. */
+        bool Ready(const FPartyTestPlayer& Player, bool bReady = true)
+        {
+            const FFablePartyRecord* Party = Manager->GetPartyForMember(Player.Profile->PartyPlayerKey);
+            return Party &&
+                   Manager->SetExpeditionReady(Player.Controller, Party->PartyId, Party->PreparationRevision, bReady);
+        }
+
+        /** 캐시된 준비 리비전 대신 현재 서버 명부를 읽어 입장을 요청한다. */
+        bool Enter(const FPartyTestPlayer& Player)
+        {
+            const FFablePartyRecord* Party = Manager->GetPartyForMember(Player.Profile->PartyPlayerKey);
+            return Party && Mode &&
+                   Mode->RequestStartExpedition(Player.Controller, Party->PartyId, Party->PreparationRevision);
+        }
+
+        /** 전체 필드에 생성된 실제 적의 수를 확인한다. */
+        int32 EnemyCount() const
+        {
+            int32 Count = 0;
+            for (TActorIterator<AFableEnemy> It(World); It; ++It)
+            {
+                Count += It->IsAlive() ? 1 : 0;
+            }
+
+            return Count;
         }
 
         /** 실제 서버 조회에 사용하는 연결 목록에 컨트롤러가 한 번만 등록됐는지 확인한다. */
@@ -638,4 +731,314 @@ bool FFablePartyDeadlineTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableExpeditionConsentTest, "Fablewood.Native.Expedition.SelectionAndExplicitConsent",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 같은 선택에 대한 각자의 동의와 오래된 요청의 거절을 검증한다. */
+bool FFableExpeditionConsentTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(601);
+    FPartyTestPlayer Member = Fixture.AddPlayer(602);
+    if (!TestTrue(TEXT("Preparation fixture has live owned characters"),
+                  Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110))) ||
+        !TestTrue(TEXT("Preparation fixture forms a real two-member party"),
+                  Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member)))
+    {
+        return false;
+    }
+
+    const FFablePartyRecord* Party = Fixture.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+    const FGuid PartyId = Party->PartyId;
+    const int32 InitialRevision = Party->PreparationRevision;
+    FFableExpeditionTicket Ticket;
+    TestFalse(TEXT("A party without consent cannot produce an admission ticket"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, InitialRevision, Ticket));
+    TestTrue(TEXT("The leader explicitly becomes ready"), Fixture.Ready(Leader));
+    TestEqual(TEXT("A readiness update does not invalidate simultaneous peer consent"), Party->PreparationRevision,
+              InitialRevision);
+    TestFalse(TEXT("One ready member cannot stand in for the other"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, InitialRevision, Ticket));
+    TestTrue(TEXT("The peer independently becomes ready for the same revision"), Fixture.Ready(Member));
+    TestTrue(TEXT("The same readiness request is idempotent"), Fixture.Ready(Member));
+    TestEqual(TEXT("Repeated readiness leaves the selection revision unchanged"), Party->PreparationRevision,
+              InitialRevision);
+    TestTrue(TEXT("The exact agreed roster produces a server ticket"),
+             Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, InitialRevision, Ticket));
+    TestEqual(TEXT("A ticket fixes exactly two stable member keys"), Ticket.MemberKeys.Num(), 2);
+    TestTrue(TEXT("The ticket contains the authenticated leader and peer"),
+             Ticket.Contains(Leader.Profile->PartyPlayerKey) && Ticket.Contains(Member.Profile->PartyPlayerKey));
+
+    // 선택을 바꾸지 않은 재전송은 준비를 지우지 않으며 비리더의 변경은 거절한다.
+    TestTrue(TEXT("Re-selecting the same destination preserves consent"),
+             Fixture.Manager->SelectExpedition(Leader.Controller, PartyId, InitialRevision, EFableRegion::RootRuins,
+                                               EFableDifficulty::Normal));
+    TestEqual(TEXT("An identical selection retains its revision"), Party->PreparationRevision, InitialRevision);
+    TestFalse(TEXT("A member cannot change the leader's choice"),
+              Fixture.Manager->SelectExpedition(Member.Controller, PartyId, InitialRevision, EFableRegion::Moonwell,
+                                                EFableDifficulty::Hard));
+    TestTrue(TEXT("A real selection change succeeds for the leader"),
+             Fixture.Manager->SelectExpedition(Leader.Controller, PartyId, InitialRevision, EFableRegion::RootRuins,
+                                               EFableDifficulty::Hard));
+    const int32 ChangedRevision = Party->PreparationRevision;
+    TestTrue(TEXT("A new selection has a new revision"), ChangedRevision != InitialRevision);
+    TestTrue(TEXT("A changed selection clears every old consent"),
+             Party->Members[0].ReadyRevision == 0 && Party->Members[1].ReadyRevision == 0);
+    TestFalse(TEXT("A stale ready packet cannot consent to the new selection"),
+              Fixture.Manager->SetExpeditionReady(Member.Controller, PartyId, InitialRevision, true));
+    TestFalse(TEXT("A guessed party identity cannot change readiness"),
+              Fixture.Manager->SetExpeditionReady(Member.Controller, FGuid::NewGuid(), ChangedRevision, true));
+    TestFalse(TEXT("A stale start snapshot cannot use the new choice"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, InitialRevision, Ticket));
+    TestTrue(TEXT("Both members may consent again without changing the new revision"),
+             Fixture.Ready(Leader) && Fixture.Ready(Member));
+    TestEqual(TEXT("Two fresh ready requests share one selection revision"), Party->PreparationRevision,
+              ChangedRevision);
+    TestTrue(TEXT("Explicit unready is accepted"), Fixture.Ready(Member, false));
+    TestFalse(TEXT("Unready immediately blocks admission"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, ChangedRevision, Ticket));
+    TestTrue(TEXT("Unready does not erase the other member's consent"),
+             Party->Members.ContainsByPredicate(
+                 [&](const FFablePartyMember& Entry)
+                 {
+                     return Entry.PlayerKey == Leader.Profile->PartyPlayerKey && Entry.ReadyRevision == ChangedRevision;
+                 }));
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableExpeditionPresenceTest,
+                                 "Fablewood.Native.Expedition.PreparationInvalidatesOnLeaderAndPresence",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 위임·접속 종료·복귀 뒤에는 이전 구성의 동의가 남지 않아야 한다. */
+bool FFableExpeditionPresenceTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(611);
+    FPartyTestPlayer Member = Fixture.AddPlayer(612);
+    if (!TestTrue(TEXT("Presence fixture has live participants"),
+                  Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110))) ||
+        !TestTrue(TEXT("Presence fixture creates its leader's party"), Fixture.Act(Leader, EFablePartyAction::Create)))
+    {
+        return false;
+    }
+
+    const FFablePartyRecord* Party = Fixture.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+    const FGuid PartyId = Party->PartyId;
+    TestTrue(TEXT("A solo leader can confirm readiness"), Fixture.Ready(Leader));
+    const int32 SoloRevision = Party->PreparationRevision;
+    TestTrue(TEXT("The leader invites the second participant"),
+             Fixture.Act(Leader, EFablePartyAction::Invite, Member.Profile->GetPlayerId()));
+    TestFalse(TEXT("An unresolved invitation rejects a fresh ready request on the server"), Fixture.Ready(Leader));
+    FFableExpeditionTicket PendingTicket;
+    TestFalse(
+        TEXT("An outstanding invitation blocks a solo admission snapshot"),
+        Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, PendingTicket));
+    const FFablePartyInvite* Invite = Fixture.Manager->GetPendingInviteFor(Member.Profile->PartyPlayerKey);
+    if (!TestNotNull(TEXT("Roster-change consent invitation exists"), Invite) ||
+        !TestTrue(TEXT("The peer accepts the exact invitation"),
+                  Fixture.Act(Member, EFablePartyAction::Accept, INDEX_NONE, Invite->InviteId)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("Accepting a new member invalidates the solo leader's old readiness"),
+             Party->PreparationRevision != SoloRevision && Party->Members[0].ReadyRevision == 0 &&
+                 Party->Members[1].ReadyRevision == 0);
+    if (!TestTrue(TEXT("Both members consent before transfer"), Fixture.Ready(Leader) && Fixture.Ready(Member)))
+    {
+        return false;
+    }
+
+    int32 Revision = Party->PreparationRevision;
+    TestTrue(TEXT("An ordinary authority transfer succeeds"),
+             Fixture.Act(Leader, EFablePartyAction::TransferLeader, Member.Profile->GetPlayerId()));
+    TestTrue(TEXT("Leadership transfer invalidates old consent"), Party->PreparationRevision != Revision &&
+                                                                      Party->Members[0].ReadyRevision == 0 &&
+                                                                      Party->Members[1].ReadyRevision == 0);
+    TestTrue(TEXT("Both may consent to the new leadership"), Fixture.Ready(Leader) && Fixture.Ready(Member));
+    Revision = Party->PreparationRevision;
+
+    // 접속 객체는 유지하되 실제 서버의 접속 해제·복귀 콜백을 사용한다.
+    Fixture.Manager->DisconnectPlayer(Member.Controller);
+    TestTrue(TEXT("Disconnect invalidates all preparation"), Party->PreparationRevision != Revision &&
+                                                                 Party->Members[0].ReadyRevision == 0 &&
+                                                                 Party->Members[1].ReadyRevision == 0);
+    TestFalse(TEXT("An offline member cannot submit ready"), Fixture.Ready(Member));
+    FFableExpeditionTicket Ticket;
+    TestFalse(TEXT("A disconnected reserved slot cannot be admitted"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    Revision = Party->PreparationRevision;
+    Fixture.Manager->RegisterPlayer(Member.Controller);
+    TestTrue(TEXT("Reconnect changes the preparation revision"), Party->PreparationRevision != Revision);
+    TestTrue(TEXT("Reconnect restores the same membership without restoring old consent"),
+             Member.Profile->PartyId == PartyId && Party->Members[0].ReadyRevision == 0 &&
+                 Party->Members[1].ReadyRevision == 0);
+    TestTrue(TEXT("Fresh consent after reconnect succeeds"), Fixture.Ready(Leader) && Fixture.Ready(Member));
+    TestTrue(TEXT("The current connected leader can build the restored ticket"),
+             Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableExpeditionEntryTest,
+                                 "Fablewood.Native.Expedition.AuthoritativeEntryAndParticipantRewards",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 입장·처치 보상·기존 진입점 모두 확정된 참가 명부만 사용해야 한다. */
+bool FFableExpeditionEntryTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(621);
+    FPartyTestPlayer Member = Fixture.AddPlayer(622);
+    FPartyTestPlayer Outsider = Fixture.AddPlayer(623);
+    if (!TestTrue(TEXT("Admission fixture has its real game mode and characters"),
+                  Fixture.AddMode() && Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110)) &&
+                      Fixture.AddHero(Outsider, FableRPG::PortalLocation() + FVector(0, 180, 110))) ||
+        !TestTrue(TEXT("Admission party is formed"),
+                  Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member)))
+    {
+        return false;
+    }
+
+    const FVector LeaderBefore = Leader.Hero->GetActorLocation();
+    const FVector MemberBefore = Member.Hero->GetActorLocation();
+    const FVector OutsiderBefore = Outsider.Hero->GetActorLocation();
+    TestFalse(TEXT("A leader cannot bypass missing readiness"), Fixture.Enter(Leader));
+    TestTrue(TEXT("A rejected start moves nobody and spawns no enemies"),
+             Leader.Hero->GetActorLocation().Equals(LeaderBefore) &&
+                 Member.Hero->GetActorLocation().Equals(MemberBefore) && Fixture.EnemyCount() == 0);
+    TestTrue(TEXT("The exact roster becomes ready"), Fixture.Ready(Leader) && Fixture.Ready(Member));
+    TestFalse(TEXT("A ready peer still cannot start as leader"), Fixture.Enter(Member));
+    TestTrue(TEXT("A ready leader atomically starts its expedition"), Fixture.Enter(Leader));
+
+    const FFableExpeditionTicket Ticket = Fixture.Mode->GetActiveExpedition();
+    TestTrue(TEXT("Admission creates a fresh server expedition identity"), Ticket.IsValid());
+    TestTrue(TEXT("Only the agreed party is bound to that identity"),
+             Leader.Profile->ActiveExpeditionId == Ticket.ExpeditionId &&
+                 Member.Profile->ActiveExpeditionId == Ticket.ExpeditionId &&
+                 !Outsider.Profile->ActiveExpeditionId.IsValid());
+    TestTrue(TEXT("Only the ticket participants arrive in the selected region"),
+             FableRPG::IsInRegion(Ticket.Region, Leader.Hero->GetActorLocation()) &&
+                 FableRPG::IsInRegion(Ticket.Region, Member.Hero->GetActorLocation()) &&
+                 Outsider.Hero->GetActorLocation().Equals(OutsiderBefore));
+    TestTrue(TEXT("The mode identifies exact participants"),
+             Fixture.Mode->IsExpeditionParticipant(Leader.Profile) &&
+                 Fixture.Mode->IsExpeditionParticipant(Member.Profile) &&
+                 !Fixture.Mode->IsExpeditionParticipant(Outsider.Profile));
+    TestTrue(TEXT("The first wave starts only after admission"), Fixture.EnemyCount() > 0);
+    TestFalse(TEXT("A duplicate start cannot create another expedition"), Fixture.Enter(Leader));
+    TestTrue(TEXT("A duplicate start retains the same identity"),
+             Fixture.Mode->GetActiveExpedition().ExpeditionId == Ticket.ExpeditionId);
+
+    // 거리만 맞춘 비참가자도 보상을 받거나 기존 지역 진입점으로 합류할 수 없다.
+    Fixture.Mode->RequestEnterRegion(Outsider.Controller, Ticket.Region, Ticket.Difficulty);
+    TestTrue(TEXT("The legacy entry route never moves an outsider into this party"),
+             Outsider.Hero->GetActorLocation().Equals(OutsiderBefore) &&
+                 !Outsider.Profile->ActiveExpeditionId.IsValid());
+    Outsider.Hero->SetActorLocation(FableRPG::RegionEntrance(Ticket.Region) + FVector(700, 0, 110));
+    const int32 OutsiderGold = Outsider.Profile->Gold;
+    const int32 LeaderGold = Leader.Profile->Gold;
+    const int32 MemberGold = Member.Profile->Gold;
+    AFableEnemy* Victim = nullptr;
+    for (TActorIterator<AFableEnemy> It(Fixture.World); It; ++It)
+    {
+        if (It->IsAlive())
+        {
+            Victim = *It;
+            break;
+        }
+    }
+    if (!TestNotNull(TEXT("Admission spawned a real reward target"), Victim))
+    {
+        return false;
+    }
+
+    Victim->ReceiveHit(1000000, Leader.Controller);
+    if (!TestFalse(TEXT("The authoritative hit commits enemy defeat"), Victim->IsAlive()))
+    {
+        return false;
+    }
+    Fixture.Mode->HandleEnemyDefeated(Victim);
+    TestTrue(TEXT("Both admitted participants receive personal kill credit"),
+             Leader.Profile->Gold > LeaderGold && Member.Profile->Gold > MemberGold);
+    TestEqual(TEXT("An eligible outsider standing inside the arena receives no party reward"), Outsider.Profile->Gold,
+              OutsiderGold);
+    const int32 RewardedGold = Leader.Profile->Gold;
+    Fixture.Mode->HandleEnemyDefeated(Victim);
+    TestEqual(TEXT("Replayed defeat notification cannot grant twice"), Leader.Profile->Gold, RewardedGold);
+    TestTrue(TEXT("Combat reward fixtures remain memory-only"),
+             FFablePartyTestAccess::IsMemoryOnly(Leader.Profile) &&
+                 FFablePartyTestAccess::IsMemoryOnly(Member.Profile) &&
+                 FFablePartyTestAccess::IsMemoryOnly(Outsider.Profile));
+
+    Fixture.State->AdventureStage = EFableAdventureStage::Cleared;
+    Outsider.Hero->SetActorLocation(FableRPG::RegionReturnPortal(Ticket.Region) + FVector(0, 0, 110));
+    const FVector LeaderInDungeon = Leader.Hero->GetActorLocation();
+    Fixture.Mode->RequestReturnVillage(Outsider.Controller);
+    TestTrue(TEXT("An outsider at the return portal cannot return or clear another party"),
+             Leader.Hero->GetActorLocation().Equals(LeaderInDungeon) &&
+                 Fixture.Mode->GetActiveExpedition().ExpeditionId == Ticket.ExpeditionId);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableExpeditionBlockedEntryTest,
+                                 "Fablewood.Native.Expedition.BlockedEntryPreservesAllParticipants",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 도착점이 막혔을 때 부분 이동·유령 원정·적 생성이 남지 않는지 확인한다. */
+bool FFableExpeditionBlockedEntryTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(631);
+    FPartyTestPlayer Member = Fixture.AddPlayer(632);
+    if (!TestTrue(TEXT("Blocked admission fixture has live owned characters"),
+                  Fixture.AddMode() && Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110))) ||
+        !TestTrue(TEXT("Blocked admission fixture forms its party"),
+                  Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member)) ||
+        !TestTrue(TEXT("Both blocked admission members consent"), Fixture.Ready(Leader) && Fixture.Ready(Member)))
+    {
+        return false;
+    }
+
+    AActor* Obstacle = Fixture.World->SpawnActor<AActor>();
+    UBoxComponent* Box = Obstacle ? NewObject<UBoxComponent>(Obstacle) : nullptr;
+    if (!TestNotNull(TEXT("A real collision obstacle is available"), Box))
+    {
+        return false;
+    }
+    Obstacle->SetRootComponent(Box);
+    // 보정된 도착점도 벗어날 수 없도록 유효한 유적 범위와 높이를 모두 막는다.
+    Box->SetBoxExtent(FVector(5000, 5000, 3000));
+    Box->SetWorldLocation(FableRPG::RegionCenter(EFableRegion::RootRuins));
+    Box->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    Box->SetCollisionObjectType(ECC_WorldStatic);
+    Box->SetCollisionResponseToAllChannels(ECR_Block);
+    Box->RegisterComponent();
+
+    const FVector LeaderBefore = Leader.Hero->GetActorLocation();
+    const FVector MemberBefore = Member.Hero->GetActorLocation();
+    TestFalse(TEXT("A blocked destination rejects the entire admission"), Fixture.Enter(Leader));
+    TestTrue(TEXT("Neither player is stranded after a failed preflight"),
+             Leader.Hero->GetActorLocation().Equals(LeaderBefore) &&
+                 Member.Hero->GetActorLocation().Equals(MemberBefore));
+    TestFalse(TEXT("A failed admission leaves no active ticket"), Fixture.Mode->GetActiveExpedition().IsValid());
+    TestTrue(TEXT("A failed admission leaves neither profile bound"),
+             !Leader.Profile->ActiveExpeditionId.IsValid() && !Member.Profile->ActiveExpeditionId.IsValid());
+    TestEqual(TEXT("A failed admission starts no encounter enemies"), Fixture.EnemyCount(), 0);
+
+    // 같은 실제 입장 경로가 장애물을 해제한 뒤에는 성공해야 한다.
+    Box->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    TestTrue(TEXT("The party can confirm readiness after the failure"), Fixture.Ready(Leader) && Fixture.Ready(Member));
+    TestTrue(TEXT("Clearing the obstacle allows the unchanged real entry path to succeed"), Fixture.Enter(Leader));
+
+    return true;
+}
+
 #endif

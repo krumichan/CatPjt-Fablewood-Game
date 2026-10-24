@@ -83,6 +83,20 @@ private:
     TArray<FKey> DungeonReleaseKeys;
     TSharedPtr<FJsonObject> DungeonInitial, ServerDungeonObservation;
 
+    /** 실제 파티 UI와 준비 동의 절차를 거쳐 서버의 입장 결과를 관찰한다. */
+    bool TickExpeditionPreparation(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero,
+                                   double Now);
+
+    /** 서버 참가 증서와 정확히 일치하는 두 플레이어의 실제 도착을 보존한다. */
+    void ObserveExpeditionServer(UWorld* World);
+
+    int32 ExpeditionStep = 0, ExpeditionNoticeBefore = 0, ExpeditionPreviousRevision = 0;
+    double ExpeditionStarted = 0, ExpeditionLastSentAt = -10;
+    bool bExpeditionRequestSent = false;
+    FGuid ExpeditionPartyId;
+    FString ExpeditionSelfKey, ExpeditionPeerKey, ExpeditionRequestFingerprint;
+    TSharedPtr<FJsonObject> ExpeditionReport, ServerExpeditionArrival;
+
     /** 파티 UI 입력과 서버 복제 결과를 단계별로 관찰한다. */
     bool TickParty(AFablePlayerController* PC, AFablePlayerState* Profile, double Now);
 

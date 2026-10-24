@@ -109,7 +109,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
-            Scenario != TEXT("reconnect") && Scenario != TEXT("party"))
+            Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -272,6 +272,15 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     {
         J->SetObjectField(TEXT("serverPartyRejoined"), ServerPartyRejoined);
     }
+    if (ExpeditionReport)
+    {
+        J->SetObjectField(TEXT("partyEntry"), ExpeditionReport);
+    }
+    if (ServerExpeditionArrival)
+    {
+        J->SetObjectField(TEXT("serverExpeditionArrival"), ServerExpeditionArrival);
+    }
+    J->SetNumberField(TEXT("expeditionStep"), ExpeditionStep);
     J->SetNumberField(TEXT("dungeonStep"), DungeonStep);
     J->SetNumberField(TEXT("processId"), FPlatformProcess::GetCurrentProcessId());
     J->SetNumberField(TEXT("movementCm"), Movement);
@@ -574,6 +583,12 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (Scenario == TEXT("party-entry") || Scenario == TEXT("dungeon") || Scenario == TEXT("growth") ||
+            Scenario == TEXT("reconnect"))
+        {
+            ObserveExpeditionServer(World);
+        }
+
         if (Scenario == TEXT("party"))
         {
             ObservePartyServer(World);
@@ -934,10 +949,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         if (Scenario == TEXT("party") ? TickParty(PC, P, Now) : TickDungeon(PC, P, Hero, Now))
         {
             Checkpoint = Profile(P);
-            Capture(Scenario == TEXT("party")    ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
-                    : Scenario == TEXT("growth") ? TEXT("growth-finished")
-                    : Scenario == TEXT("reconnect") ? TEXT("reconnected-dungeon")
-                                                    : TEXT("dungeon-cleared"));
+            Capture(Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
+                    : Scenario == TEXT("party-entry") ? TEXT("party-entry-finished")
+                    : Scenario == TEXT("growth")      ? TEXT("growth-finished")
+                    : Scenario == TEXT("reconnect")   ? TEXT("reconnected-dungeon")
+                                                      : TEXT("dungeon-cleared"));
             Advance(30);
         }
         break;

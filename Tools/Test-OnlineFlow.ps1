@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth','reconnect','party')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry')][string]$Scenario='connectivity',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -267,7 +267,9 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
     }else{
         Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
-        if($Scenario -ceq 'dungeon'){
+        if($Scenario -ceq 'party-entry'){
+            Assert-Online ($Checkpoint.level -eq 2 -and $Checkpoint.experience -eq 105 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 1 -and $Checkpoint.dungeonCompletions -eq 0) 'entry_forest_progression_totals_mismatch'
+        }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
         }else{
             if($Scenario -ceq 'growth'){
@@ -284,7 +286,9 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role){
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
         Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
-        if($Scenario -ceq 'dungeon'){
+        if($Scenario -ceq 'party-entry'){
+            Assert-Online ($Checkpoint.wallet.gold -eq 135 -and $Checkpoint.wallet.ore -eq 7 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 0 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 5 -and $Checkpoint.stashCount -eq 0) 'entry_forest_reward_totals_mismatch'
+        }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
         }else{
             if($Scenario -ceq 'growth'){
@@ -437,6 +441,16 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
     if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
     if($Scenario -ceq 'reconnect' -and $Phase -in @('register','resume')){Assert-OnlineMidrun $Report $Role $false}
     if($Scenario -ceq 'party' -and $Phase -in @('register','resume')){Assert-OnlineParty $Report $Role ($Phase -ceq 'resume')}
+    if($Scenario -ceq 'party-entry' -and $Phase -ceq 'register'){
+        Require-OnlineFields $Report @('partyEntry') 'entry_client_report_missing'
+        $entry=$Report.partyEntry
+        Require-OnlineFields $entry @('status','selfKey','peerKey','partyId','expeditionId','preparationRevision','region','difficulty','safeSaved','peerAndServerObserved','extendedNegatives','earnedBeforeEntry') 'entry_client_report_incomplete'
+        Assert-Online ($entry.status -ceq 'passed' -and $entry.extendedNegatives -eq $true -and $entry.safeSaved -eq $true -and $entry.peerAndServerObserved -eq $true -and $entry.preparationRevision -ge 3 -and $entry.region -eq 1 -and $entry.difficulty -eq 0) 'entry_client_not_observed'
+        foreach($id in @($entry.partyId,$entry.expeditionId)){Assert-Online ([string]$id -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and $id -cne '00000000-0000-0000-0000-000000000000') 'entry_uuid_invalid'}
+        Assert-Online (-not [string]::IsNullOrEmpty($entry.selfKey) -and -not [string]::IsNullOrEmpty($entry.peerKey) -and $entry.selfKey -cne $entry.peerKey) 'entry_member_key_invalid'
+        foreach($name in @('both_forest_quests_active','forest_reward_equipped','entered_root_ruins','entry_formal_party_two','entry_unready_rejected','entry_nonleader_selection_rejected','entry_initial_both_ready','entry_selection_resets_all_ready','entry_stale_ready_rejected','entry_stale_selection_rejected','entry_nonleader_start_rejected','entry_stale_start_rejected','entry_final_selection_observed','entry_final_both_ready','entry_exact_two_arrived','entry_safe_saved_server_ticket_observed','entry_peer_and_server_handshake','entry_forest_only_totals')){Assert-Online (Test-OnlineCheck $Report $name) 'entry_required_network_check_missing'}
+        Assert-Online ($entry.earnedBeforeEntry.forestQuest -eq 3 -and $entry.earnedBeforeEntry.dungeonQuest -eq 1 -and $entry.earnedBeforeEntry.wallet.gold -eq 135 -and $entry.earnedBeforeEntry.wallet.ore -eq 7 -and $entry.earnedBeforeEntry.level -eq 2 -and $entry.earnedBeforeEntry.experience -eq 105 -and $entry.earnedBeforeEntry.bagCount -eq 5) 'entry_normal_forest_progress_missing'
+    }
     Assert-OnlineCheckpoint $Report.checkpoint $Role
     if($Crash){Assert-Online ($Report.status -ceq 'crash-ready' -and $Report.step -eq 30 -and $Report.networkMode -ceq 'client' -and $Report.localControllerCount -eq 1 -and $Report.hasSession -eq $true) 'crash_checkpoint_not_ready'}
     else{
@@ -452,6 +466,17 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'party-entry' -and $ClientReports.client1.mode -ceq 'register'){
+        Require-OnlineFields $ServerReport @('serverExpeditionArrival') 'entry_server_ticket_missing'
+        Assert-Online (Test-OnlineCheck $ServerReport 'server_exact_expedition_arrival') 'entry_server_arrival_not_observed'
+        $ticket=$ServerReport.serverExpeditionArrival;$one=$ClientReports.client1.partyEntry;$two=$ClientReports.client2.partyEntry
+        Require-OnlineFields $ticket @('expeditionId','partyId','region','difficulty','preparationRevision','encounterSerial','defeatedEnemies','memberKeys','members') 'entry_server_ticket_incomplete'
+        Assert-Online ($ticket.expeditionId -ceq $one.expeditionId -and $ticket.expeditionId -ceq $two.expeditionId -and $ticket.partyId -ceq $one.partyId -and $ticket.partyId -ceq $two.partyId -and $ticket.region -eq 1 -and $ticket.difficulty -eq 0 -and $ticket.preparationRevision -eq $one.preparationRevision -and $ticket.preparationRevision -eq $two.preparationRevision -and $ticket.encounterSerial -gt 0 -and $ticket.defeatedEnemies -eq 0) 'entry_ticket_selection_or_uuid_mismatch'
+        $keys=@(@($one.selfKey,$two.selfKey)|Sort-Object -CaseSensitive)
+        Assert-Online ($one.selfKey -ceq $two.peerKey -and $two.selfKey -ceq $one.peerKey -and @($ticket.memberKeys).Count -eq 2 -and @($ticket.members).Count -eq 2 -and (Equal-Online @($ticket.memberKeys|Sort-Object -CaseSensitive) $keys) -and (Equal-Online @($ticket.members|ForEach-Object playerKey|Sort-Object -CaseSensitive) $keys) -and (Equal-Online @($ticket.members|ForEach-Object playerId|Sort-Object -CaseSensitive) $expected)) 'entry_ticket_participants_not_exact'
+        foreach($member in $ticket.members){Assert-Online ($member.arrived -eq $true -and $member.expeditionId -ceq $ticket.expeditionId -and $member.ready -eq $true -and $member.savePending -eq $false -and $member.revision -eq $member.acknowledgedRevision -and $member.forestQuest -eq 3 -and $member.dungeonQuest -eq 1 -and $member.wallet.gold -eq 135 -and $member.wallet.ore -eq 7) 'entry_server_member_not_arrived_or_saved'}
+        $summary['partyEntry']=[ordered]@{status='passed';normalForestQuestAndReward=$true;formalPartySelectionAndReady=$true;unreadyAndNonleaderRejected=$true;staleSelectionReadyAndEntryRejected=$true;selectionResetsReadiness=$true;exactTicketAndTwoArrivals=$true;twoClientServerHandshake=$true;entryOnlyNoDungeonRewards=$true;partyId=$ticket.partyId;expeditionId=$ticket.expeditionId;memberKeys=$keys;region=$ticket.region;difficulty=$ticket.difficulty;preparationRevision=$ticket.preparationRevision;crashReconnectPerformed=$false}
+    }
     if($Scenario -ceq 'party' -and $ClientReports.client1.mode -ceq 'register'){
         Require-OnlineFields $ServerReport @('serverPartyBefore','serverPartySolo','serverPartyRejoined') 'party_server_snapshots_missing'
         foreach($name in @('server_party_before_disconnect','server_party_disconnected_member_reserved','server_party_same_character_restored')){Assert-Online (Test-OnlineCheck $ServerReport $name) 'party_server_lifecycle_not_observed'}
@@ -689,7 +714,8 @@ try{
         $accounts[$role]=[ordered]@{name=('o'+[Guid]::NewGuid().ToString('N').Substring(0,24));password=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(30));initialClass=$(if($role -ceq 'client1'){1}else{2})}
     }
     $contextPath=Join-Path $privateFolder 'register-context.private.json'
-    Write-OnlineJson $contextPath @{mode='register';scenario=$Scenario;offlineFailure=$true;crashRole='client2';accounts=$accounts}
+    $crashSecond=$Scenario -cne 'party-entry'
+    Write-OnlineJson $contextPath @{mode='register';scenario=$Scenario;offlineFailure=$true;crashRole=$(if($crashSecond){'client2'}else{''});accounts=$accounts}
     $stage='register-offline-failure';$clients=@{}
     foreach($role in @('client1','client2')){$clients[$role]=Start-OnlineValidationProcess $role 'register' $contextPath}
     $offlineReports=Wait-OnlineOfflineFailures $clients
@@ -700,11 +726,11 @@ try{
     $stage='register-join';$server=Start-OnlineValidationProcess 'server' 'register'
     $serverInitial=Wait-OnlineServer $server
     Write-OnlineJson (Join-Path (Join-Path $runFolder 'register') 'control.json') @{allowJoin=$true;quitServer=$false}
-    $reports=Wait-OnlinePhase 'register' $server $clients $true
+    $reports=Wait-OnlinePhase 'register' $server $clients $crashSecond
     $drained=Wait-OnlineDrain 'register' $server $clients $reports
     $freshCanonical=$drained.canonical
     $shots=@();$shots+=@(Assert-OnlineShots $reports.client1 $clients.client1.phase 7);$shots+=@(Assert-OnlineShots $reports.client2 $clients.client2.phase 5)
-    $summary.phases.register=[ordered]@{status='passed';connectionFailureObservedAtStep5=$true;serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;forcedCloseRole='client2';serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;reports=@((Join-Path $runFolder 'register\client1.json'),(Join-Path $runFolder 'register\client2-crash-checkpoint.json'));canonical=(Join-Path $runFolder 'register\canonical.json')}
+    $summary.phases.register=[ordered]@{status='passed';connectionFailureObservedAtStep5=$true;serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;forcedCloseRole=$(if($crashSecond){'client2'}else{$null});serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;reports=@((Join-Path $runFolder 'register\client1.json'),(Join-Path $runFolder $(if($crashSecond){'register\client2-crash-checkpoint.json'}else{'register\client2.json'})));canonical=(Join-Path $runFolder 'register\canonical.json')}
     Quit-OnlineServer 'register' $server
 
     $stage='owned-api-restart-beforeidentity'

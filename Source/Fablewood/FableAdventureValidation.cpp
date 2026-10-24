@@ -4,6 +4,7 @@
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
+#include "FablePartyManager.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -95,23 +96,97 @@ void UFableRPGValidationDriver::AdventurePortal(EFableRegion Region)
         return;
     }
 
-    // 지역·적·전투 진행 처리
-    if (PC->IsPortalOpen())
+    AFablePlayerState* Profile = PC->GetPlayerState<AFablePlayerState>();
+    AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
+    if (!Profile || !Manager || !State || State->PlayerArray.Num() != 2)
     {
-        PC->UISelectDungeon(Region);
-        if (Region == EFableRegion::Moonwell && !bMoonPortalCaptured)
-        {
-            bMoonPortalCaptured = true;
-            Capture(TEXT("moonwell-portal-selection"));
-            LastAction = Now;
-            return;
-        }
-        PC->UIEnterSelectedDungeon();
+        LastAction = Now;
+        return;
     }
-    else
+
+    // 기존 모험 검증도 일반 사용자의 파티 생성·초대·수락 경로를 따른다.
+    if (!PC->IsPartyExpeditionOpen())
     {
-        PC->UIClosePanels();
-        Key(EKeys::E);
+        PC->UIOpenPartyExpedition();
+    }
+    const FFablePartyRecord* Party = Manager->GetPartyForMember(Profile->PartyPlayerKey);
+    if (!Party)
+    {
+        if (const FFablePartyInvite* Invite = Manager->GetPendingInviteFor(Profile->PartyPlayerKey))
+        {
+            PC->UIRespondPartyInvite(Invite->InviteId, true);
+        }
+        else if (Role == TEXT("host"))
+        {
+            PC->UICreateParty();
+        }
+        LastAction = Now;
+        return;
+    }
+
+    const bool bLeader = Party->LeaderKey == Profile->PartyPlayerKey;
+    if (Party->Members.Num() < 2)
+    {
+        if (bLeader)
+        {
+            for (APlayerState* Entry : State->PlayerArray)
+            {
+                AFablePlayerState* Peer = Cast<AFablePlayerState>(Entry);
+                if (Peer && Peer != Profile && !Peer->PartyPlayerKey.IsEmpty() &&
+                    !Manager->GetPartyForMember(Peer->PartyPlayerKey) &&
+                    !Manager->GetPendingInviteFor(Peer->PartyPlayerKey))
+                {
+                    PC->UIInviteParty(Peer->GetPlayerId());
+                    break;
+                }
+            }
+        }
+        LastAction = Now;
+        return;
+    }
+
+    // 구조된 기존 참가자의 재합류는 새 원정 시작과 구분한다.
+    if (Profile->ActiveExpeditionId.IsValid())
+    {
+        if (!PC->IsPartyPreparationPending())
+        {
+            PC->UIEnterSelectedDungeon();
+        }
+        LastAction = Now;
+        return;
+    }
+
+    if (PC->IsPartyPreparationPending())
+    {
+        LastAction = Now;
+        return;
+    }
+    if (Party->SelectedRegion != Region)
+    {
+        if (bLeader)
+        {
+            PC->UISelectDungeon(Region);
+        }
+        LastAction = Now;
+        return;
+    }
+    if (Region == EFableRegion::Moonwell && !bMoonPortalCaptured)
+    {
+        bMoonPortalCaptured = true;
+        Capture(TEXT("moonwell-portal-selection"));
+        LastAction = Now;
+        return;
+    }
+
+    // 각자 현재 선택에 동의한 뒤 파티장만 전원 입장을 요청한다.
+    if (!PC->IsPartyReady())
+    {
+        PC->UISetPartyReady(true);
+    }
+    else if (bLeader && PC->CanEnterPreparedParty())
+    {
+        PC->UIEnterPreparedParty();
     }
 
     LastAction = Now;
