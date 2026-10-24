@@ -2,6 +2,7 @@
 #include "FableSaveGame.h"
 #include "FableCharacter.h"
 #include "FableGameState.h"
+#include "FableGameMode.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Kismet/GameplayStatics.h"
@@ -107,6 +108,7 @@ namespace
     struct FStoryTestWorld
     {
         UWorld* World = nullptr;
+        TWeakObjectPtr<APlayerController> RegisteredController;
 
         /** 이야기 회귀 검증용 월드와 플레이어를 만들고 이전 실행 문맥을 보존한다. */
         FStoryTestWorld()
@@ -128,6 +130,12 @@ namespace
         {
             if (World)
             {
+                // 이 검증이 명시적으로 등록한 소유 연결만 정리한다.
+                if (APlayerController* Controller = RegisteredController.Get())
+                {
+                    World->RemoveController(Controller);
+                }
+
                 World->DestroyWorld(false);
             }
         }
@@ -502,19 +510,22 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
     AFableCharacter* Hero =
         Fixture.World->SpawnActor<AFableCharacter>(FVector(0, 0, 110), FRotator::ZeroRotator, Spawn);
     AFableGameState* Adventure = Fixture.World->SpawnActor<AFableGameState>();
+    AFableGameMode* Mode = Fixture.World->SpawnActor<AFableGameMode>();
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!TestNotNull(TEXT("Test controller"), Controller) || !TestNotNull(TEXT("Test character"), Hero) ||
-        !TestNotNull(TEXT("Test adventure state"), Adventure))
+        !TestNotNull(TEXT("Test adventure state"), Adventure) || !TestNotNull(TEXT("Test game mode"), Mode))
     {
         return false;
     }
 
     // 현재 월드와 플레이어 참조 처리
-    Fixture.World->SetGameState(Adventure);
+    Fixture.World->CopyGameState(Mode, Adventure);
     Controller->SetPlayerState(State);
     Controller->Possess(Hero);
     State->SetOwner(Controller);
+    Fixture.World->AddController(Controller);
+    Fixture.RegisteredController = Controller;
 
     // 기대값과 상태 보존 검증 조건 검사
     if (!TestTrue(TEXT("Fixture controller possesses the expected character and profile"),
@@ -568,6 +579,19 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
     State->StoryObjectMask = 0;
     State->RecordStoryObject(0);
     TestEqual(TEXT("Object cannot be collected before the story starts"), State->StoryObjectMask, 0);
+    // 루트 룬과 봉인 검증도 실제로 명시 참가한 사용자의 공개 진행만 참조한다.
+    const FVector PreviousLocation = Hero->GetActorLocation();
+    const EFableQuestStage PreviousForestQuest = State->ForestQuest;
+    State->ForestQuest = EFableQuestStage::Active;
+    MoveHero(FableRPG::BoardLocation() + FVector(0, -100, 110));
+    const bool bJoinedField = Mode->JoinPublicField(Controller);
+    State->ForestQuest = PreviousForestQuest;
+    MoveHero(PreviousLocation);
+    if (!TestTrue(TEXT("Story root and seal fixture explicitly joins the public field"), bJoinedField))
+    {
+        return false;
+    }
+
     State->StoryChapter = 3;
     State->StoryObjectMask = 15;
     State->ForestQuest = EFableQuestStage::Completed;

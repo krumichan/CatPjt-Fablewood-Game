@@ -351,6 +351,7 @@ void AFableEnemy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
     // 복제 속성과 소유자별 수신 조건 처리
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFableEnemy, ExpeditionId);
+    DOREPLIFETIME(AFableEnemy, PublicAreaKey);
     DOREPLIFETIME(AFableEnemy, SpawnId);
     DOREPLIFETIME(AFableEnemy, Health);
     DOREPLIFETIME(AFableEnemy, MaxHealth);
@@ -374,12 +375,29 @@ void AFableEnemy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 /** 적을 생성한 원정을 최초 한 번 고정한다. */
 void AFableEnemy::BindExpedition(FGuid InExpeditionId)
 {
-    if (!HasAuthority() || bExpeditionBound)
+    if (!HasAuthority() || bExpeditionBound || !InExpeditionId.IsValid())
     {
         return;
     }
 
     ExpeditionId = InExpeditionId;
+    bExpeditionBound = true;
+    if (!SpawnId.IsValid())
+    {
+        SpawnId = FGuid::NewGuid();
+    }
+    ForceNetUpdate();
+}
+
+/** 원정과 공개 필드는 같은 적을 재사용하지 않고 생성 소유권을 고정한다. */
+void AFableEnemy::BindPublicField(FFablePublicAreaKey InPublicArea)
+{
+    if (!HasAuthority() || bExpeditionBound || !InPublicArea.IsValid())
+    {
+        return;
+    }
+
+    PublicAreaKey = InPublicArea;
     bExpeditionBound = true;
     if (!SpawnId.IsValid())
     {
@@ -505,6 +523,7 @@ void AFableEnemy::ClearBurn()
     BurnInstigator.Reset();
     BurnSourcePawn.Reset();
     BurnExpeditionId.Invalidate();
+    BurnPublicAreaKey = FFablePublicAreaKey();
 }
 
 /** 유효한 화상 피해의 출처·지속 시간·주기를 설정한다. */
@@ -537,6 +556,7 @@ bool AFableEnemy::ApplyBurn(float DamagePerTick, int32 TickCount, AController* I
     BurnInstigator = InstigatorController;
     BurnSourcePawn = Source;
     BurnExpeditionId = ExpeditionId;
+    BurnPublicAreaKey = PublicAreaKey;
     ForceNetUpdate();
 
     return true;
@@ -557,7 +577,8 @@ void AFableEnemy::TickBurn()
     // 지역·적·전투 진행 조건 검사
     if (!IsAlive() || !IsValid(Source) || !Source->IsAlive() || !IsValid(InstigatorController) ||
         InstigatorController->GetPawn() != Source || BurnExpeditionId != ExpeditionId ||
-        !FableAdventure::CanAffect(Source, this) || !IsInsideEncounter(Source->GetActorLocation()))
+        BurnPublicAreaKey != PublicAreaKey || !FableAdventure::CanAffect(Source, this) ||
+        !IsInsideEncounter(Source->GetActorLocation()))
     {
         ClearBurn();
         ForceNetUpdate();
@@ -1135,7 +1156,7 @@ void AFableEnemy::ApplyAreaAttack()
         int32 Shots = 0;
         for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
         {
-            Shots += It->GetExpeditionId() == ExpeditionId ? 1 : 0;
+            Shots += It->GetExpeditionId() == ExpeditionId && It->GetPublicAreaKey() == PublicAreaKey ? 1 : 0;
         }
         if (Shots < 12)
         {

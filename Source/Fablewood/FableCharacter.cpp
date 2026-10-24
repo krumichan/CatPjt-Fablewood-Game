@@ -6,6 +6,7 @@
 #include "FableCombatFeedback.h"
 #include "FablePlayerState.h"
 #include "FableProjectile.h"
+#include "FableTownCatalog.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
@@ -2136,6 +2137,34 @@ void AFableCharacter::RespawnAtSafePoint()
     {
         GetWorldTimerManager().SetTimer(RespawnTimer, this, &AFableCharacter::RespawnAtSafePoint, 0.5f, false);
     }
+}
+
+/** 마을의 단독 낙하/쓰러짐은 다른 숲 참가자의 전멸 처리와 섞지 않는다. */
+bool AFableCharacter::TryRecoverIdleTownAtCheckpoint()
+{
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!HasAuthority() || !GetWorld() || !IsDefeated() || !Profile || !Profile->bProfileLoaded || !Controller ||
+        Profile->GetOwner() != Controller || Controller->GetPawn() != this ||
+        Controller->GetPlayerState<AFablePlayerState>() != Profile || Profile->ActiveExpeditionId.IsValid() ||
+        Profile->GetPublicFieldScopeId().IsValid() || (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) ||
+        !FMath::IsFinite(DefeatedServerTime) || DefeatedServerTime < 0 ||
+        GetWorld()->GetTimeSeconds() - DefeatedServerTime < 3.0)
+    {
+        return false;
+    }
+
+    // Phase 1은 기존에 확정된 LegacyVillage 체크포인트만 사용한다. 새 후보 지형을 활성화하지 않는다.
+    FFableTownLocationContext SafeTown;
+    const UFableTownCatalog* Catalog = GetDefault<UFableTownCatalog>();
+    if (!Catalog->ResolveLocation(SafeSpawnLocation, SafeTown, true) || SafeTown.TownId != EFableTownId::LegacyVillage)
+    {
+        return false;
+    }
+
+    SetCheckpoint(SafeSpawnLocation, SafeSpawnRotation, true);
+    FFableTownLocationContext Arrived;
+    return IsAlive() && Catalog->ResolveLocation(GetActorLocation(), Arrived, true) &&
+           Arrived.TownId == SafeTown.TownId;
 }
 
 /** 복제된 시간 기준으로 보정한 서버 시각 값을 반환한다. */

@@ -65,12 +65,14 @@ void AFableEnemyBolt::InitializeBolt(FVector Direction, float Damage, EFableRegi
 
     // 신뢰한 발사 적의 원정을 발사 순간 고정한다.
     const auto SourceAdventure = FableAdventure::For(GetOwner());
-    if (!SourceAdventure)
+    if (!SourceAdventure || SourceAdventure.IsIdleTown() ||
+        (!SourceAdventure.ExpeditionId().IsValid() && !SourceAdventure.PublicArea().IsValid()))
     {
         return;
     }
 
     ExpeditionId = SourceAdventure.ExpeditionId();
+    PublicAreaKey = SourceAdventure.PublicArea();
 
     // 이동 입력과 속도 제한 처리
     Direction.Z = 0;
@@ -87,6 +89,7 @@ void AFableEnemyBolt::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFableEnemyBolt, ExpeditionId);
+    DOREPLIFETIME(AFableEnemyBolt, PublicAreaKey);
     DOREPLIFETIME(AFableEnemyBolt, EncounterRegion);
     DOREPLIFETIME(AFableEnemyBolt, bImpacted);
 }

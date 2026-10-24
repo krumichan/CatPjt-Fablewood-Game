@@ -166,8 +166,18 @@ public:
     /** 마을의 다른 파티 편집을 막지 않고 해당 참가 파티만 잠근다. */
     bool IsPartyExpeditionActive(FGuid PartyId) const;
 
+    /** 인증된 본인이 게시판에서 현재 공개 숲 실행에 참가한다. */
+    bool JoinPublicField(APlayerController* Requester);
+
+    /** 공개 필드 참가만 해제하며 원정 증서와 물리적 마을은 바꾸지 않는다. */
+    bool LeavePublicField(APlayerController* Requester);
+
+    /** 현재 공개 필드 실행 세대를 읽는다. 미생성 시 빈 값이다. */
+    FGuid GetPublicFieldScopeId() const;
+
 private:
     friend struct FFablePartyTestAccess;
+    friend struct FFableTownTestAccess;
     friend class AFablePartyEncounter;
 
     /** 신규 원정과 완료 원정 교체의 입장을 같은 원자적 경계로 처리한다. */
@@ -188,7 +198,7 @@ private:
 
     TMap<FString, FFableCharacterExpeditionLedger> ExpeditionResults;
 
-    /** 필드에서는 전체 연결, 원정에서는 확정한 키의 현재 연결만 조회한다. */
+    /** 현재 실행 세대에 서버가 등록한 공개 필드 참가자만 조회한다. */
     TArray<APlayerController*> GetEncounterPlayers() const;
 
     /** 참가 증서의 모든 플레이어와 입장 조건을 다시 검사한다. */
@@ -212,6 +222,9 @@ private:
 
     /** 동료들의 생존·지역 상태를 확인해 파티 복구를 판단한다. */
     void CheckPartyState();
+
+    /** 숲 명부 밖의 마을 캐릭터는 본인만 독립적으로 구조한다. */
+    void CheckIdleTownRescues();
 
     /** 파티 전멸 뒤 전투를 정리하고 복구 대기를 시작한다. */
     void BeginPartyRecovery();

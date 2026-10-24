@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "FableRPGTypes.h"
+#include "FableTownTypes.h"
 #include "FableEnemyBolt.generated.h"
 class USceneComponent;
 class UStaticMeshComponent;
@@ -21,6 +22,12 @@ public:
     FGuid GetExpeditionId() const
     {
         return ExpeditionId;
+    }
+
+    /** 적 발사체도 공개 실행 세대를 발사 순간 캡처한다. */
+    FFablePublicAreaKey GetPublicAreaKey() const
+    {
+        return PublicAreaKey;
     }
 
     // Damage is the final server-scaled value; this projectile never applies difficulty twice.
@@ -55,6 +62,8 @@ private:
 
     UPROPERTY(Replicated)
     FGuid ExpeditionId;
+    UPROPERTY(Replicated)
+    FFablePublicAreaKey PublicAreaKey;
 
     UPROPERTY()
     TObjectPtr<USceneComponent> SceneRoot;

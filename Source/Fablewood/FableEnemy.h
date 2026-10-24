@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "FableRPGTypes.h"
+#include "FableTownTypes.h"
 #include "FableEnemy.generated.h"
 
 class AFableCharacter;
@@ -53,6 +54,15 @@ public:
 
     /** 서버의 최초 원정 바인딩만 허용하고 이후 적 재사용을 막는다. */
     void BindExpedition(FGuid InExpeditionId);
+
+    /** 공개 필드 적은 서버 등록 실행 세대를 생성 시 한 번 고정한다. */
+    void BindPublicField(FFablePublicAreaKey InPublicArea);
+
+    /** 물리적 위치가 바뀌어도 원래 공개 실행의 키를 유지한다. */
+    FFablePublicAreaKey GetPublicAreaKey() const
+    {
+        return PublicAreaKey;
+    }
 
     /** 재생성된 동명 적도 구별하는 서버 발급 개체 식별자다. */
     FGuid GetSpawnId() const
@@ -198,9 +208,12 @@ private:
     UPROPERTY(Replicated)
     FGuid ExpeditionId;
     UPROPERTY(Replicated)
+    FFablePublicAreaKey PublicAreaKey;
+    UPROPERTY(Replicated)
     FGuid SpawnId;
     bool bExpeditionBound = false;
     FGuid BurnExpeditionId;
+    FFablePublicAreaKey BurnPublicAreaKey;
 
     /** 공격 가능한 플레이어 중 적의 추적 대상을 선택한다. */
     void FindTarget();

@@ -304,7 +304,8 @@ bool AFablePartyManager::CanEditMembership(const AFablePlayerState* Profile) con
         return false;
     }
 
-    const auto State = FableAdventure::Field(GetWorld());
+    // 다른 공개 필드의 전투가 마을 관찰자의 파티 편집을 막지 않는다.
+    const auto State = FableAdventure::For(Profile);
     return !State || (State->ActiveRegion == EFableRegion::Village && !State->bPartyRecoveryPending &&
                       !(State->AdventureStage == EFableAdventureStage::Forest && !State->bObjectiveComplete));
 }

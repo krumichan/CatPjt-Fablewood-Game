@@ -158,6 +158,9 @@ namespace
         AFablePlayerState* State = nullptr;
         AFableCharacter* Hero = nullptr;
         AFableGameState* GS = nullptr;
+        AFableGameMode* Mode = nullptr;
+        APlayerController* Controller = nullptr;
+        bool bControllerRegistered = false;
 
         /** 특성 회귀 검증용 월드와 플레이어를 만들고 이전 실행 문맥을 보존한다. */
         FTalentWorld()
@@ -183,8 +186,8 @@ namespace
             // 현재 월드와 플레이어 참조 처리
             State = World->SpawnActor<AFablePlayerState>();
             GS = World->SpawnActor<AFableGameState>();
-            AFableGameMode* Mode = World->SpawnActor<AFableGameMode>();
-            APlayerController* Controller = World->SpawnActor<APlayerController>();
+            Mode = World->SpawnActor<AFableGameMode>();
+            Controller = World->SpawnActor<APlayerController>();
             FActorSpawnParameters Spawn;
             Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
             Hero = World->SpawnActor<AFableCharacter>(FableRPG::BoardLocation() + FVector(0, -100, 110),
@@ -202,6 +205,8 @@ namespace
             Controller->Possess(Hero);
             Hero->SetPlayerState(State);
             State->SetOwner(Controller);
+            World->AddController(Controller);
+            bControllerRegistered = true;
             FFableTalentTestAccess::Prepare(State);
             State->Inventory = TalentProfile()->Inventory;
             State->Level = 10;
@@ -230,6 +235,12 @@ namespace
         {
             if (World)
             {
+                // 이 fixture가 추가한 연결만 월드 종료 전에 해제한다.
+                if (bControllerRegistered && IsValid(Controller))
+                {
+                    World->RemoveController(Controller);
+                }
+
                 World->DestroyWorld(false);
             }
         }
@@ -421,6 +432,16 @@ bool FFableTalentSelectionTest::RunTest(const FString& Parameters)
     F.Select(2, EFableTalentPath::First);
     TestEqual(TEXT("Vertical boundary is rejected"), int32(S->GetTalentChoice(2)), 0);
     F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(100, 0, 110));
+
+    // 진행 중인 전투의 빌드 제한은 게시판에서 명시 등록한 본인에게 적용한다.
+    const EFableQuestStage PreviousForestQuest = S->ForestQuest;
+    S->ForestQuest = EFableQuestStage::Active;
+    const bool bJoinedField = F.Mode && F.Mode->JoinPublicField(F.Controller);
+    S->ForestQuest = PreviousForestQuest;
+    if (!TestTrue(TEXT("Talent gate fixture explicitly joins the public field"), bJoinedField))
+    {
+        return false;
+    }
 
     // 직업·스킬·특성 빌드 순회
     for (EFableAdventureStage Stage :

@@ -1018,6 +1018,22 @@ bool FFablePartyGuardTest::RunTest(const FString& Parameters)
               Fixture.Manager->ArePartyMembers(Leader.Profile, Stranger.Profile));
     Stranger.Profile->PartyId.Invalidate();
 
+    // 이 검사는 실제 공개 필드 참가자의 진행 제한을 검증한다.
+    if (!TestTrue(TEXT("Combat guard fixture creates an owned hero and game mode"),
+                  Fixture.AddMode() && Fixture.AddHero(Leader, FableRPG::BoardLocation() + FVector(0, -100, 110))))
+    {
+        return false;
+    }
+
+    const EFableQuestStage PreviousForestQuest = Leader.Profile->ForestQuest;
+    Leader.Profile->ForestQuest = EFableQuestStage::Active;
+    const bool bJoinedField = Fixture.Mode->JoinPublicField(Leader.Controller);
+    Leader.Profile->ForestQuest = PreviousForestQuest;
+    if (!TestTrue(TEXT("Combat guard fixture explicitly joins the public field"), bJoinedField))
+    {
+        return false;
+    }
+
     const FGuid OriginalParty = Leader.Profile->PartyId;
     Fixture.State->FieldProgress.ActiveRegion = EFableRegion::RootRuins;
     TestFalse(TEXT("Dungeon combat prevents explicit party leave"), Fixture.Act(Leader, EFablePartyAction::Leave));

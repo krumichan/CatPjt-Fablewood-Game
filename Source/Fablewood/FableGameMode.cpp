@@ -23,6 +23,7 @@
 
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
+#include "FableTownManager.h"
 
 /** AFableGameMode는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 AFableGameMode::AFableGameMode()
@@ -182,6 +183,11 @@ void AFableGameMode::PostLogin(APlayerController* NewPlayer)
 /** Logout는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::Logout(AController* Exiting)
 {
+    // 종료된 연결의 공개 참가 세대는 재접속한 새 연결로 자동 이전하지 않는다.
+    if (AFableTownManager* Towns = AFableTownManager::Find(GetWorld()))
+    {
+        Towns->UnregisterPlayer(Cast<APlayerController>(Exiting));
+    }
     // 인증 프로필을 해제하기 전에 파티의 재접속 자리를 예약한다.
     if (AFablePartyManager* Parties = AFablePartyManager::Find(GetWorld()))
     {
@@ -353,6 +359,12 @@ void AFableGameMode::BeginPlay()
 {
     Super::BeginPlay();
 
+    // 공간 명부는 서버가 한 번 생성하며 새 후보 마을 지형을 활성화하지 않는다.
+    if (!bFrontEnd)
+    {
+        AFableTownManager::Ensure(GetWorld());
+    }
+
     // 명부는 서버만 생성하고 클라이언트는 복제된 관리자를 사용한다.
     if (!bFrontEnd && !bLegacyMode && !AFablePartyManager::Find(GetWorld()))
     {
@@ -440,6 +452,15 @@ bool AFableGameMode::CanUseTownService(APlayerController* Requester, FVector Loc
 
     const FVector PawnLocation = Requester->GetPawn()->GetActorLocation();
 
+    // Phase 1의 서비스는 기존 마을만 사용한다. 다른 마을/층의 같은 XY를 허용하지 않는다.
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    FFableTownLocationContext Physical;
+    if (Towns && (!Towns->ResolvePhysicalContext(Requester, Physical) ||
+                  Physical.TownId != EFableTownId::LegacyVillage || !Physical.bGeometryReady))
+    {
+        return false;
+    }
+
     return FVector::DistSquared2D(PawnLocation, Location) <= FMath::Square(Radius) &&
            FMath::Abs(PawnLocation.Z - Location.Z) < 300.0f;
 }
@@ -479,7 +500,9 @@ void AFableGameMode::ClearEncounter()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
     {
-        if (!It->GetExpeditionId().IsValid())
+        if (!It->GetExpeditionId().IsValid() && It->GetPublicAreaKey().IsValid() &&
+            It->GetPublicAreaKey().ScopeId == GetPublicFieldScopeId() &&
+            It->GetPublicAreaKey().AreaId == FableTown::LegacyForestAreaId())
         {
             It->Destroy();
         }
@@ -501,6 +524,11 @@ void AFableGameMode::SpawnEncounter()
 
     // 지역·적·전투 진행 처리
     ClearEncounter();
+    AFableTownManager* Towns = AFableTownManager::Ensure(GetWorld());
+    if (!Towns || !Towns->RotatePublicFieldScope().IsValid())
+    {
+        return;
+    }
     const FVector Locations[] = {FVector(-650, 350, 110), FVector(650, 400, 110), FVector(0, 1000, 110)};
 
     // 지역·적·전투 진행 순회
@@ -510,6 +538,7 @@ void AFableGameMode::SpawnEncounter()
         Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
         if (AFableEnemy* Enemy = GetWorld()->SpawnActor<AFableEnemy>(Location, FRotator(0, -90, 0), Params))
         {
+            Enemy->BindPublicField(Towns->GetPublicFieldKey());
             ActiveEnemies.Add(Enemy);
             SpawnedEncounterEnemies.Add(Enemy);
         }
@@ -568,6 +597,10 @@ void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
     if ((Adventure && Adventure->ActiveRegion != EFableRegion::Village))
     {
         Profile->SetNotice(TEXT("숲 순찰을 시작하려면 진행 중인 던전 탐험을 마치고 귀환해야 합니다."));
+        return;
+    }
+    if (!JoinPublicField(Requester))
+    {
         return;
     }
     if (!ActiveEnemies.IsEmpty())
@@ -695,8 +728,9 @@ bool AFableGameMode::MoveParty(EFableRegion Region)
 
         // 지역·적·전투 진행에 필요한 값 준비
         const AFableCharacter* Hero = Cast<AFableCharacter>(PC->GetPawn());
-        const bool bAlreadyReturned = Region == EFableRegion::Village && bReturnPending && Hero && Hero->IsAlive() &&
-                                      FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation());
+        const bool bAlreadyReturned =
+            Region == EFableRegion::Village && bReturnPending && Hero && Hero->IsAlive() &&
+            FableAdventure::For(PC).IsInRegion(EFableRegion::Village, Hero->GetActorLocation());
         const bool bMoved =
             bAlreadyReturned || MovePlayerToCheckpoint(PC, Region, bDedicatedMode ? GetConnectionSlot(PC) : Index);
         ++Index;
@@ -818,6 +852,8 @@ void AFableGameMode::CheckPartyState()
     {
         return;
     }
+
+    CheckIdleTownRescues();
 
     AFableGameState* RootState = GetGameState<AFableGameState>();
     FFableAdventureProgress* State = RootState ? &RootState->FieldProgress : nullptr;
@@ -945,6 +981,39 @@ void AFableGameMode::CheckPartyState()
     }
 }
 
+/** 숲 전멸 명부와 무관한 마을 캐릭터의 단독 구조만 처리한다. */
+void AFableGameMode::CheckIdleTownRescues()
+{
+    if (!HasAuthority() || bLegacyMode || bFrontEnd || !GetWorld())
+    {
+        return;
+    }
+
+    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+    {
+        APlayerController* Player = It->Get();
+        const AFablePlayerState* Profile = IsValid(Player) ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
+        if (!Profile || !Profile->HasAuthority() || Profile->GetOwner() != Player || !Profile->bProfileLoaded ||
+            Profile->ActiveExpeditionId.IsValid() || Profile->GetPublicFieldScopeId().IsValid() || !Hero ||
+            Hero->GetController() != Player || Hero->GetPlayerState<AFablePlayerState>() != Profile)
+        {
+            continue;
+        }
+
+        // 본인의 확정 체크포인트만 사용하며 root 숲의 진행·타이머·이동 명부는 바꾸지 않는다.
+        if (Hero->TryRecoverIdleTownAtCheckpoint())
+        {
+            if (AFableTownManager* Towns = AFableTownManager::Find(GetWorld()))
+            {
+                Towns->RegisterValidatedPresence(Player);
+            }
+            Player->GetPlayerState<AFablePlayerState>()->SetNotice(
+                TEXT("마을 안전 지점으로 구조되었습니다. 의뢰와 장비는 유지됩니다."));
+        }
+    }
+}
+
 /** RequestRetryEncounter는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::RequestRetryEncounter(APlayerController* Requester)
 {
@@ -963,6 +1032,13 @@ void AFableGameMode::RequestRetryEncounter(APlayerController* Requester)
     // 프로필과 저장 스냅숏 조건 검사
     if (!Profile)
     {
+        return;
+    }
+
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    if (!Towns || !Towns->IsSharedForestParticipant(Profile))
+    {
+        Profile->SetNotice(TEXT("게시판에서 숲 순찰 참가를 먼저 확인하세요."));
         return;
     }
 
@@ -1065,7 +1141,10 @@ void AFableGameMode::RequestNewRound(APlayerController* Requester)
         {
             const FFableAdventureProgress* State = &RootState->FieldProgress;
 
-            if (State->bRetryAvailable)
+            const AFablePlayerState* Profile =
+                IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+            const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+            if (State->bRetryAvailable && Towns && Towns->IsSharedForestParticipant(Profile))
             {
                 RequestRetryEncounter(Requester);
                 return;
@@ -1080,7 +1159,7 @@ void AFableGameMode::RequestNewRound(APlayerController* Requester)
 
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !IsValid(Requester) || Requester->GetWorld() != GetWorld() || !State ||
-        !State->bObjectiveComplete)
+        !State->bObjectiveComplete || !GetEncounterPlayers().Contains(Requester))
     {
         return;
     }
@@ -1100,13 +1179,7 @@ void AFableGameMode::RequestNewRound(APlayerController* Requester)
     TArray<APlayerController*> Players;
 
     // 현재 월드와 플레이어 참조 순회
-    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-    {
-        if (APlayerController* PC = It->Get())
-        {
-            Players.Add(PC);
-        }
-    }
+    Players = GetEncounterPlayers();
 
     // 현재 월드와 플레이어 참조 순회
     for (APlayerController* PC : Players)
@@ -1188,16 +1261,67 @@ bool AFableGameMode::IsExpeditionParticipant(const AFablePlayerState* Profile) c
 TArray<APlayerController*> AFableGameMode::GetEncounterPlayers() const
 {
     TArray<APlayerController*> Result;
-    for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    if (!Towns || !Towns->GetPublicFieldScopeId().IsValid())
     {
-        APlayerController* Player = It->Get();
+        return Result;
+    }
+    for (APlayerController* Player : Towns->GetSharedForestPlayers())
+    {
         const AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (IsValid(Player) && (!Profile || !Profile->ActiveExpeditionId.IsValid()))
+        if (IsValid(Player) && Profile && !Profile->ActiveExpeditionId.IsValid() &&
+            Profile->GetPublicFieldScopeId() == Towns->GetPublicFieldScopeId() &&
+            Towns->IsSharedForestParticipant(Profile, Towns->GetPublicFieldScopeId()))
         {
             Result.Add(Player);
         }
     }
     return Result;
+}
+
+/** 명시적인 게시판 요청만 본인의 공개 숲 참가를 등록한다. */
+bool AFableGameMode::JoinPublicField(APlayerController* Requester)
+{
+    AFablePlayerState* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    const AFableGameState* State = GetGameState<AFableGameState>();
+    if (!HasAuthority() || !Profile || !Profile->HasAuthority() || Profile->GetOwner() != Requester ||
+        Requester->GetWorld() != GetWorld() || Profile->GetWorld() != GetWorld() || !Profile->bProfileLoaded ||
+        Profile->ActiveExpeditionId.IsValid() || (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) ||
+        (State && State->FieldProgress.bPartyRecoveryPending) || bReturnPending ||
+        (!bLegacyMode && (Profile->ForestQuest != EFableQuestStage::Active ||
+                          !CanUseTownService(Requester, FableRPG::BoardLocation(), 330))))
+    {
+        return false;
+    }
+
+    AFableTownManager* Towns = AFableTownManager::Ensure(GetWorld());
+    return Towns && Towns->RegisterSharedForestParticipant(Requester);
+}
+
+/** 공개 참가 해제는 동일 소유 연결만 허용하며 private UUID를 수정하지 않는다. */
+bool AFableGameMode::LeavePublicField(APlayerController* Requester)
+{
+    AFablePlayerState* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    if (!HasAuthority() || !Profile || !Profile->HasAuthority() || Profile->GetOwner() != Requester ||
+        Requester->GetWorld() != GetWorld() || Profile->GetWorld() != GetWorld())
+    {
+        return false;
+    }
+
+    if (AFableTownManager* Towns = AFableTownManager::Find(GetWorld()))
+    {
+        Towns->UnregisterSharedForestParticipant(Requester);
+    }
+    Profile->PublicFieldScopeId.Invalidate();
+    Profile->ForceNetUpdate();
+    return true;
+}
+
+/** 현재 실행의 복제된 키와 서버 명부가 같은 값을 사용한다. */
+FGuid AFableGameMode::GetPublicFieldScopeId() const
+{
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    return Towns ? Towns->GetPublicFieldScopeId() : FGuid();
 }
 
 /** 요청자는 자기 진행의 복구 상태만 검사한다. */
@@ -1221,7 +1345,12 @@ void AFableGameMode::RestartPlayer(AController* NewPlayer)
         return;
     }
     Super::RestartPlayer(NewPlayer);
-    if (bLegacyMode || bFrontEnd || !NewPlayer || !NewPlayer->GetPawn<AFableCharacter>())
+    if (bLegacyMode)
+    {
+        JoinPublicField(Cast<APlayerController>(NewPlayer));
+        return;
+    }
+    if (bFrontEnd || !NewPlayer || !NewPlayer->GetPawn<AFableCharacter>())
     {
         return;
     }
@@ -1400,6 +1529,11 @@ bool AFableGameMode::StartPreparedExpedition(APlayerController* Requester, FGuid
         Profile->SetNotice(TEXT("던전 도착 지점을 확보하지 못해 원래 위치로 돌아왔습니다. 다시 준비하세요."));
         return false;
     }
+    // 전원 도착과 private 증서 commit 후에만 기존 공개 참가를 해제한다.
+    for (APlayerController* Member : Players)
+    {
+        LeavePublicField(Member);
+    }
     return true;
 }
 
@@ -1485,6 +1619,8 @@ void AFableGameMode::HandleEnemyDefeated(AFableEnemy* Enemy)
     // Only a committed death of a member of this encounter can award once.
     // 서버 권한과 실행 위치 조건 검사
     if (!HasAuthority() || !IsValid(Enemy) || Enemy->IsAlive() ||
+        Enemy->GetPublicAreaKey().AreaId != FableTown::LegacyForestAreaId() || !Enemy->GetPublicAreaKey().IsValid() ||
+        Enemy->GetPublicAreaKey().ScopeId != GetPublicFieldScopeId() ||
         ActiveEnemies.Remove(TWeakObjectPtr<AFableEnemy>(Enemy)) == 0)
     {
         return;
@@ -1522,7 +1658,7 @@ void AFableGameMode::HandleEnemyDefeated(AFableEnemy* Enemy)
             // 퀘스트와 이야기 진행에 필요한 값 준비
             const FVector PawnLocation = Pawn->GetActorLocation();
             const bool bForestCredit = State->AdventureStage == EFableAdventureStage::Forest &&
-                                       FableRPG::IsInRegion(EFableRegion::Village, PawnLocation) &&
+                                       FableAdventure::For(Profile).IsInRegion(EFableRegion::Village, PawnLocation) &&
                                        Profile->ForestQuest == EFableQuestStage::Active;
 
             // 지역·적·전투 진행 처리
@@ -1547,7 +1683,9 @@ void AFableGameMode::HandleEnemyDefeated(AFableEnemy* Enemy)
     {
         for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
         {
-            if (!It->GetExpeditionId().IsValid())
+            if (!It->GetExpeditionId().IsValid() && It->GetPublicAreaKey().IsValid() &&
+                It->GetPublicAreaKey().ScopeId == GetPublicFieldScopeId() &&
+                It->GetPublicAreaKey().AreaId == FableTown::LegacyForestAreaId())
             {
                 It->Destroy();
             }
@@ -1588,7 +1726,9 @@ void AFableGameMode::ClearRecoveryCombat()
     ClearEncounter();
     for (TActorIterator<AFableProjectile> It(GetWorld()); It; ++It)
     {
-        if (!It->GetExpeditionId().IsValid())
+        if (!It->GetExpeditionId().IsValid() && It->GetPublicAreaKey().IsValid() &&
+            It->GetPublicAreaKey().ScopeId == GetPublicFieldScopeId() &&
+            It->GetPublicAreaKey().AreaId == FableTown::LegacyForestAreaId())
         {
             It->Destroy();
         }

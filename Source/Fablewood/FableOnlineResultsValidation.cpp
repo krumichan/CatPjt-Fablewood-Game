@@ -11,10 +11,12 @@
 #include "FablePlayerState.h"
 #include "CollisionQueryParams.h"
 #include "CollisionShape.h"
+#include "Components/PrimitiveComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
@@ -707,6 +709,230 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
         {
             PC->UIUseHealthPotion();
             ResultsLastSentAt = Now;
+        }
+
+        // 새 원정의 세 적을 피할 때는 서로 다른 남쪽 목표로 흩어지지 않고 두 차선을 함께 순회한다.
+        if (ResultsStep == 10)
+        {
+            const FVector FormationStart = Hero->GetActorLocation();
+            const FVector FormationCanonicalStart = View.ToCanonical(EFableRegion::RootRuins, FormationStart);
+            AFableCharacter* FormationPeer = nullptr;
+            for (APlayerState* FormationMember : View.Players())
+            {
+                auto* FormationPawn = FormationMember ? Cast<AFableCharacter>(FormationMember->GetPawn()) : nullptr;
+                if (FormationPawn && FormationPawn != Hero)
+                {
+                    FormationPeer = FormationPawn;
+                }
+            }
+            EscapeState->SetNumberField(TEXT("formationStep"), 10);
+            EscapeState->SetStringField(TEXT("formationExpeditionId"), ResultsId(ResultsRetryId));
+            EscapeState->SetStringField(TEXT("formationUpdatedUtc"), FDateTime::UtcNow().ToIso8601());
+            if (!Party || Party->Members.Num() != 2 || View.Players().Num() != 2 || Living.Num() != 3 ||
+                View->DefeatedEnemies != 0 || !FormationPeer || !FormationPeer->IsAlive() ||
+                FableAdventure::For(FormationPeer).ExpeditionId() != ResultsRetryId ||
+                Party->Members.ContainsByPredicate(
+                    [](const FFablePartyMember& FormationMember)
+                    {
+                        return !FormationMember.bConnected;
+                    }))
+            {
+                Stop();
+                EscapeState->SetNumberField(TEXT("stableAt"), 0);
+                EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+                EscapeState->SetStringField(TEXT("mode"), TEXT("formation-awaiting-two-live-members"));
+                return false;
+            }
+            float FormationPeerNearest = MAX_flt;
+            for (const auto* FormationEnemy : Living)
+            {
+                FormationPeerNearest = FMath::Min(
+                    FormationPeerNearest,
+                    float(FVector::Dist2D(FormationPeer->GetActorLocation(), FormationEnemy->GetActorLocation())));
+            }
+            EscapeState->SetNumberField(TEXT("formationPeerNearestEnemyDistanceCm"), FormationPeerNearest);
+            EscapeState->SetNumberField(TEXT("formationPeerDistanceCm"),
+                                        FVector::Dist2D(FormationStart, FormationPeer->GetActorLocation()));
+
+            // 양쪽이 동시에 충분히 멀어져야 멈춘다. 한 명의 대기가 다른 동료의 추적을 되살리지 않게 한다.
+            if (Nearest >= 2000 && FormationPeerNearest >= 2000)
+            {
+                Stop();
+                EscapeState->SetStringField(TEXT("mode"), TEXT("formation-holding"));
+                double FormationStableAt = 0;
+                EscapeState->TryGetNumberField(TEXT("stableAt"), FormationStableAt);
+                if (Hero->GetVelocity().Size2D() >= 10 || FormationPeer->GetVelocity().Size2D() >= 10)
+                {
+                    EscapeState->SetNumberField(TEXT("stableAt"), 0);
+                    EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+                    return false;
+                }
+                if (FormationStableAt <= 0)
+                {
+                    FormationStableAt = Now;
+                    EscapeState->SetNumberField(TEXT("stableAt"), FormationStableAt);
+                }
+                EscapeState->SetNumberField(TEXT("stableSeconds"), Now - FormationStableAt);
+                return Now - FormationStableAt >= .9;
+            }
+            EscapeState->SetNumberField(TEXT("stableAt"), 0);
+            EscapeState->SetNumberField(TEXT("stableSeconds"), 0);
+
+            // 실제 입장 위치의 X를 고정해 먼저 평행하게 남하한 뒤 200cm 떨어진 같은 방향 차선으로 들어간다.
+            double FormationIndexValue = 0, FormationStartAX = 0, FormationStartBX = 0;
+            if (A)
+            {
+                if (!EscapeState->TryGetNumberField(TEXT("formationStartAX"), FormationStartAX) ||
+                    !EscapeState->TryGetNumberField(TEXT("formationStartBX"), FormationStartBX))
+                {
+                    FormationStartAX = FMath::Clamp(FormationCanonicalStart.X, 6550.0, 9450.0);
+                    FormationStartBX = FMath::Clamp(
+                        View.ToCanonical(EFableRegion::RootRuins, FormationPeer->GetActorLocation()).X, 6350.0, 9650.0);
+                    EscapeState->SetNumberField(TEXT("formationStartAX"), FormationStartAX);
+                    EscapeState->SetNumberField(TEXT("formationStartBX"), FormationStartBX);
+                    EscapeState->SetNumberField(TEXT("formationWaypoint"), 0);
+                }
+                EscapeState->TryGetNumberField(TEXT("formationWaypoint"), FormationIndexValue);
+            }
+            else
+            {
+                const auto FormationLeaderResult = ResultsObject(PeerDocument, TEXT("partyResults"));
+                const auto FormationLeaderState = ResultsObject(FormationLeaderResult, TEXT("escape"));
+                FString FormationLeaderRole, FormationLeaderId, FormationLeaderUtc;
+                double FormationLeaderStep = -1;
+                FDateTime FormationUpdatedAt;
+                // 공개 이동 계획도 불리언·문자열을 숫자로 암묵 변환하지 않고 실제 JSON 숫자만 받는다.
+                const auto FormationNumber = [&](const TCHAR* FormationName, double& FormationValue)
+                {
+                    const auto* FormationJson =
+                        FormationLeaderState ? FormationLeaderState->Values.Find(FormationName) : nullptr;
+                    return FormationJson && FormationJson->IsValid() && (*FormationJson)->Type == EJson::Number &&
+                           (*FormationJson)->TryGetNumber(FormationValue) && FMath::IsFinite(FormationValue);
+                };
+                const bool FormationFresh =
+                    PeerDocument && PeerDocument->TryGetStringField(TEXT("role"), FormationLeaderRole) &&
+                    FormationLeaderRole == TEXT("client1") && FormationLeaderState &&
+                    FormationNumber(TEXT("formationStep"), FormationLeaderStep) && FormationLeaderStep == 10 &&
+                    FormationLeaderState->TryGetStringField(TEXT("formationExpeditionId"), FormationLeaderId) &&
+                    FormationLeaderId == ResultsId(ResultsRetryId) &&
+                    FormationLeaderState->TryGetStringField(TEXT("formationUpdatedUtc"), FormationLeaderUtc) &&
+                    FDateTime::ParseIso8601(*FormationLeaderUtc, FormationUpdatedAt) &&
+                    (FDateTime::UtcNow() - FormationUpdatedAt).GetTotalSeconds() >= -.5 &&
+                    (FDateTime::UtcNow() - FormationUpdatedAt).GetTotalSeconds() <= 2 &&
+                    FormationNumber(TEXT("formationWaypoint"), FormationIndexValue) &&
+                    FormationNumber(TEXT("formationStartAX"), FormationStartAX) &&
+                    FormationNumber(TEXT("formationStartBX"), FormationStartBX);
+                EscapeState->SetBoolField(TEXT("formationLeaderFresh"), FormationFresh);
+                if (!FormationFresh)
+                {
+                    Stop();
+                    EscapeState->SetStringField(TEXT("mode"), TEXT("formation-awaiting-fresh-leader"));
+                    return false;
+                }
+            }
+            if (!FMath::IsFinite(FormationIndexValue) || FormationIndexValue < 0 || FormationIndexValue > 4 ||
+                FormationIndexValue != double(int32(FormationIndexValue)) || !FMath::IsFinite(FormationStartAX) ||
+                !FMath::IsFinite(FormationStartBX) || FormationStartAX < 6550 || FormationStartAX > 9450 ||
+                FormationStartBX < 6350 || FormationStartBX > 9650)
+            {
+                Stop();
+                EscapeState->SetStringField(TEXT("mode"), TEXT("formation-invalid-route"));
+                return false;
+            }
+            int32 FormationIndex = int32(FormationIndexValue);
+            const FVector FormationRouteA[] = {FVector(FormationStartAX, -1450, 100), FVector(9450, -1450, 100),
+                                               FVector(9450, 1450, 100), FVector(6550, 1450, 100),
+                                               FVector(6550, -1450, 100)};
+            const FVector FormationRouteB[] = {FVector(FormationStartBX, -1650, 100), FVector(9650, -1650, 100),
+                                               FVector(9650, 1650, 100), FVector(6350, 1650, 100),
+                                               FVector(6350, -1650, 100)};
+
+            // 모서리의 실제 오차를 30cm 안으로 좁혀 남쪽 귀환 기둥 쪽으로 구간을 잘라 돌지 않는다.
+            if (A &&
+                FVector::Dist2D(FormationStart,
+                                View.ToWorld(EFableRegion::RootRuins, FormationRouteA[FormationIndex])) < 30 &&
+                FVector::Dist2D(FormationPeer->GetActorLocation(),
+                                View.ToWorld(EFableRegion::RootRuins, FormationRouteB[FormationIndex])) < 30)
+            {
+                FormationIndex = FormationIndex == 4 ? 1 : FormationIndex + 1;
+            }
+            EscapeState->SetNumberField(TEXT("formationWaypoint"), FormationIndex);
+            EscapeState->SetNumberField(TEXT("formationStartAX"), FormationStartAX);
+            EscapeState->SetNumberField(TEXT("formationStartBX"), FormationStartBX);
+            FVector FormationGoal = View.ToWorld(EFableRegion::RootRuins,
+                                                 A ? FormationRouteA[FormationIndex] : FormationRouteB[FormationIndex]);
+            FormationGoal.Z = FormationStart.Z;
+            EscapeState->SetArrayField(TEXT("goalCanonical"),
+                                       ResultsVector(View.ToCanonical(EFableRegion::RootRuins, FormationGoal)));
+            EscapeState->SetNumberField(TEXT("waypoint"), FormationIndex);
+            ReconnectWaypoint = FormationIndex;
+
+            // 일반 이동이 실제 벽·귀환 기둥·동료 폰을 가로지르지 않는지 매번 현재 월드에서 검사한다.
+            FHitResult FormationHit;
+            FCollisionQueryParams FormationParams(SCENE_QUERY_STAT(FableResultsFormationEscape), false, Hero);
+            if (!View.IsInRegion(EFableRegion::RootRuins, FormationGoal) ||
+                Hero->GetWorld()->SweepSingleByObjectType(FormationHit, FormationStart, FormationGoal, FQuat::Identity,
+                                                          FCollisionObjectQueryParams(ECC_WorldStatic),
+                                                          FCollisionShape::MakeSphere(55.f), FormationParams))
+            {
+                Stop();
+                // 이후 행동 불능·마을 복구가 mode를 덮어도 실제 정적 충돌의 마지막 증거는 보존한다.
+                double FormationBlockCount = 0;
+                EscapeState->TryGetNumberField(TEXT("blockCount"), FormationBlockCount);
+                EscapeState->SetNumberField(TEXT("blockCount"), FormationBlockCount + 1);
+                auto FormationLastBlock = MakeShared<FJsonObject>();
+                FormationLastBlock->SetArrayField(TEXT("startCanonical"), ResultsVector(FormationCanonicalStart));
+                FormationLastBlock->SetArrayField(
+                    TEXT("goalCanonical"), ResultsVector(View.ToCanonical(EFableRegion::RootRuins, FormationGoal)));
+                FormationLastBlock->SetArrayField(TEXT("hitLocation"), ResultsVector(FormationHit.Location));
+                FormationLastBlock->SetArrayField(
+                    TEXT("hitCanonical"),
+                    ResultsVector(View.ToCanonical(EFableRegion::RootRuins, FormationHit.Location)));
+                FormationLastBlock->SetArrayField(TEXT("impactPoint"), ResultsVector(FormationHit.ImpactPoint));
+                FormationLastBlock->SetStringField(TEXT("componentName"), FormationHit.GetComponent()
+                                                                              ? FormationHit.GetComponent()->GetName()
+                                                                              : FString());
+                FormationLastBlock->SetBoolField(TEXT("blockingHit"), FormationHit.bBlockingHit);
+                FormationLastBlock->SetBoolField(TEXT("goalInRegion"),
+                                                 View.IsInRegion(EFableRegion::RootRuins, FormationGoal));
+                FormationLastBlock->SetNumberField(TEXT("hitDistanceCm"), FormationHit.Distance);
+                FormationLastBlock->SetNumberField(TEXT("elapsedSeconds"), Now - ResultsStepAt);
+                FormationLastBlock->SetNumberField(TEXT("waypoint"), FormationIndex);
+                EscapeState->SetObjectField(TEXT("lastStaticBlock"), FormationLastBlock);
+                EscapeState->SetStringField(TEXT("mode"), TEXT("formation-static-blocked"));
+                return false;
+            }
+            const FVector FormationDelta = FormationGoal - FormationStart;
+            const float FormationPeerAlpha = FMath::Clamp(
+                float(FVector::DotProduct(FormationPeer->GetActorLocation() - FormationStart, FormationDelta) /
+                      FMath::Max(FormationDelta.SizeSquared2D(), 1.0)),
+                0.f, 1.f);
+            const float FormationPeerClearance = FVector::Dist2D(FormationPeer->GetActorLocation(),
+                                                                 FormationStart + FormationDelta * FormationPeerAlpha);
+            EscapeState->SetNumberField(TEXT("formationPeerSegmentClearanceCm"), FormationPeerClearance);
+            if (FormationPeerClearance <
+                FMath::Min(
+                    130.f,
+                    FMath::Max(0.f, float(FVector::Dist2D(FormationStart, FormationPeer->GetActorLocation())) - 5.f)))
+            {
+                Stop();
+                EscapeState->SetStringField(TEXT("mode"), TEXT("formation-peer-blocked"));
+                return false;
+            }
+            DungeonHold(PC, EKeys::S, false);
+            DungeonHold(PC, EKeys::D, false);
+            DungeonHold(PC, EKeys::J, false);
+            EscapeState->SetStringField(TEXT("mode"), TEXT("formation-moving"));
+            DungeonWalk(PC, FormationGoal, 20);
+            const FVector FormationVelocity = Hero->GetVelocity();
+            if (FormationDelta.Size2D() > 300 && FormationVelocity.Size2D() > 100 &&
+                Hero->GetDodgeCooldownRemaining() <= 0 && Now - DungeonActionAt > 1.5 &&
+                FVector::DotProduct(FormationDelta.GetSafeNormal2D(), FormationVelocity.GetSafeNormal2D()) > .95)
+            {
+                DungeonKey(PC, EKeys::LeftShift);
+                DungeonActionAt = Now;
+            }
+            return false;
         }
 
         // 적의 두 차례 이상 대상 재검색을 넘겨 실제 정지와 충분한 거리가 유지되는지 확인한다.

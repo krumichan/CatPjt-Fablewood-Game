@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FableRPGTypes.h"
+#include "FableTownTypes.h"
 #include "GameFramework/Actor.h"
 #include "FableProjectile.generated.h"
 
@@ -25,6 +26,12 @@ public:
     FGuid GetExpeditionId() const
     {
         return ExpeditionId;
+    }
+
+    /** 시전자 재등록과 관계없이 발사 시점의 공개 실행을 반환한다. */
+    FFablePublicAreaKey GetPublicAreaKey() const
+    {
+        return PublicAreaKey;
     }
 
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
@@ -69,6 +76,8 @@ private:
 
     UPROPERTY(Replicated)
     FGuid ExpeditionId;
+    UPROPERTY(Replicated)
+    FFablePublicAreaKey PublicAreaKey;
 
     UPROPERTY()
     TObjectPtr<USceneComponent> SceneRoot;

@@ -242,6 +242,9 @@ public:
     /** 서버에서 안전 복귀 위치와 회전·자원 회복 여부를 설정한다. */
     void SetCheckpoint(const FVector& Location, const FRotator& Rotation, bool bRestore = true);
 
+    /** 전투에 참가하지 않은 마을 캐릭터만 본인의 확정 체크포인트로 구조한다. */
+    bool TryRecoverIdleTownAtCheckpoint();
+
     /** Server-only item recovery; full resources and defeated actors reject use. */
 
     /** 살아 있는 캐릭터의 체력 또는 마나를 허용량만큼 회복한다. */

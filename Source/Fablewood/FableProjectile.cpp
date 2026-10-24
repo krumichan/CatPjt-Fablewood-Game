@@ -86,12 +86,14 @@ void AFableProjectile::InitializeShot(const FVector& Direction, float Damage, AC
 
     // 발사 후 시전자가 다른 원정에 들어가도 이 식별자는 변경하지 않는다.
     const auto SourceAdventure = FableAdventure::For(DamageInstigator);
-    if (!SourceAdventure)
+    if (!SourceAdventure || SourceAdventure.IsIdleTown() ||
+        (!SourceAdventure.ExpeditionId().IsValid() && !SourceAdventure.PublicArea().IsValid()))
     {
         return;
     }
 
     ExpeditionId = SourceAdventure.ExpeditionId();
+    PublicAreaKey = SourceAdventure.PublicArea();
     bInitialized = true;
     bArrow = bUseArrow;
     BlastRadius = bArrow ? 0.0f : FMath::Clamp(ExplosionRadius, 0.0f, 360.0f);
@@ -137,6 +139,7 @@ void AFableProjectile::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFableProjectile, ExpeditionId);
+    DOREPLIFETIME(AFableProjectile, PublicAreaKey);
     DOREPLIFETIME(AFableProjectile, bArrow);
     DOREPLIFETIME(AFableProjectile, bExplosive);
     DOREPLIFETIME(AFableProjectile, bImpacted);

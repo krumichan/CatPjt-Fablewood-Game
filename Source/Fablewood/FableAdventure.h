@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FableAdventureTypes.h"
+#include "FableTownTypes.h"
 
 class AFableGameState;
 class APlayerState;
@@ -38,6 +39,15 @@ struct FABLEWOOD_API FFableAdventureView
     /** 필드는 빈 UUID, 원정은 불변 UUID를 반환한다. */
     FGuid ExpeditionId() const;
 
+    /** 공개 숲은 발급된 실행 세대, 마을 대기는 빈 실행 세대를 가진다. */
+    FFablePublicAreaKey PublicArea() const;
+
+    /** 원정 소속과 별도로 조회한 실제 마을 문맥을 반환한다. */
+    const FFableTownLocationContext& PhysicalTown() const;
+
+    /** 마을 대기는 전투 진행과 보상을 소유하지 않는다. */
+    bool IsIdleTown() const;
+
     /** 원정 지형의 평행 이동 원점을 반환한다. */
     FVector WorldOrigin() const;
 
@@ -46,7 +56,9 @@ struct FABLEWOOD_API FFableAdventureView
 
     /** resolver만 원본 진행과 소유 Actor를 연결한다. */
     FFableAdventureView(const FFableAdventureProgress* InProgress, AActor* InOwner, AFableGameState* InClock,
-                        FGuid InExpeditionId, FVector InOrigin, EFableRegion InRegion);
+                        FGuid InExpeditionId, FVector InOrigin, EFableRegion InRegion,
+                        FFablePublicAreaKey InPublicArea = FFablePublicAreaKey(),
+                        FFableTownLocationContext InTown = FFableTownLocationContext(), bool bInIdleTown = false);
 
     /** 조회 실패는 필드 대신 빈 참조를 반환한다. */
     FFableAdventureView() = default;
@@ -58,6 +70,9 @@ private:
     FGuid ScopeId;
     FVector Origin = FVector::ZeroVector;
     EFableRegion ScopeRegion = EFableRegion::Village;
+    FFablePublicAreaKey PublicKey;
+    FFableTownLocationContext TownContext;
+    bool bIdleTown = false;
 };
 
 namespace FableAdventure

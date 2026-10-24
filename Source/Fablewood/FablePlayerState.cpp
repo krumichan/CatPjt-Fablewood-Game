@@ -28,6 +28,7 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     DOREPLIFETIME(AFablePlayerState, PartyPlayerKey);
     DOREPLIFETIME(AFablePlayerState, PartyId);
     DOREPLIFETIME(AFablePlayerState, ActiveExpeditionId);
+    DOREPLIFETIME(AFablePlayerState, PublicFieldScopeId);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendPlayerId, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendReady, COND_OwnerOnly);
@@ -1687,6 +1688,10 @@ void AFablePlayerState::InteractQuest(EFableQuestId Quest)
         {
             // 재화와 작업 비용 처리
             ForestQuest = EFableQuestStage::Completed;
+            if (Mode)
+            {
+                Mode->LeavePublicField(PC);
+            }
             Gold = FMath::Min(1000000, Gold + 90);
             Ore = FMath::Min(100000, Ore + 4);
             AddExperience(100);
@@ -1886,7 +1891,7 @@ void AFablePlayerState::RecordKill(bool bBoss)
     const APlayerController* PC = Cast<APlayerController>(GetOwner());
 
     // 지역·적·전투 진행 조건 검사
-    if (!PC || !PC->GetPawn() || !FableRPG::IsInRegion(EFableRegion::Village, PC->GetPawn()->GetActorLocation()))
+    if (!PC || !PC->GetPawn() || !State.IsInRegion(EFableRegion::Village, PC->GetPawn()->GetActorLocation()))
     {
         return;
     }

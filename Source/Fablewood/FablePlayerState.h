@@ -15,6 +15,8 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
     GENERATED_BODY()
 
     friend struct FFablePartyTestAccess;
+    friend struct FFableTownTestAccess;
+    friend class AFableTownManager;
 
 public:
     /** 백엔드 식별자와 분리된 현재 서버의 공개 파티 식별 정보. */
@@ -27,6 +29,12 @@ public:
     /** 서버 참가 증서와 연결되는 현재 원정. 영구 저장 데이터에는 포함하지 않는다. */
     UPROPERTY(Replicated, BlueprintReadOnly)
     FGuid ActiveExpeditionId;
+
+    /** 공개 숲의 현재 실행 세대만 읽는다. 원정 및 영구 저장과는 독립적이다. */
+    FGuid GetPublicFieldScopeId() const
+    {
+        return PublicFieldScopeId;
+    }
 
     /** 최신 또는 요청한 개인 결과만 소유 연결에 복제한다. */
     UPROPERTY(Replicated)
@@ -417,6 +425,10 @@ public:
     }
 
 private:
+    /** 서버 등록을 거친 공개 숲 참가자만 필드 진행과 보상에 포함한다. */
+    UPROPERTY(Replicated)
+    FGuid PublicFieldScopeId;
+
     friend struct FFableBackendSession;
     friend class AFableGameMode;
     int64 ExpeditionSnapshotGrantSequence = 0;
