@@ -7,6 +7,7 @@
 #include "Engine/GameInstance.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
+#include "FablePartyManager.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
 #include "Engine/Engine.h"
@@ -584,12 +585,14 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
         DrawLine(P.X, P.Y + 6 * S, P.X - 6 * S, P.Y, Gold, 2 * S);
     }
 
-    // 지역·적·전투 진행 처리
-    if (GS)
+    // 미니맵에는 실제 같은 파티의 동료만 표시하고 자기 표식은 별도로 그린다.
+    const AFablePartyManager* PartyManager = AFablePartyManager::Find(GetWorld());
+    if (GS && PartyManager)
     {
         for (APlayerState* Member : GS->PlayerArray)
         {
-            if (Member && Member != State)
+            const AFablePlayerState* MemberProfile = Cast<AFablePlayerState>(Member);
+            if (MemberProfile && MemberProfile != State && PartyManager->ArePartyMembers(State, MemberProfile))
             {
                 if (const AFableCharacter* Ally = Cast<AFableCharacter>(Member->GetPawn()))
                 {
@@ -620,6 +623,11 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     // 화면 표시와 사용자 안내에 필요한 값 준비
     const float Width = 268 * S, X = (Canvas->ClipX - Width) * .5f, Y = 14 * S;
     DrawRect(Ink, X, Y, Width, 133 * S);
+    DrawButton(TEXT("G 파티"), TEXT("PartyOpen"), X + 180 * S, Y + 7 * S, 76 * S, 27 * S, S);
+
+    // 같은 서버의 접속자와 실제 파티 구성원을 구분한다.
+    const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    const AFablePlayerState* MyState = PC->GetPlayerState<AFablePlayerState>();
     const AFablePlayerState* PartnerState = nullptr;
 
     // 현재 월드와 플레이어 참조 처리
@@ -627,9 +635,10 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     {
         for (APlayerState* Member : GS->PlayerArray)
         {
-            if (Member && Member != PC->GetPlayerState<AFablePlayerState>())
+            const AFablePlayerState* Candidate = Cast<AFablePlayerState>(Member);
+            if (Candidate && MyState && Manager && Manager->ArePartyMembers(MyState, Candidate) && Candidate != MyState)
             {
-                PartnerState = Cast<AFablePlayerState>(Member);
+                PartnerState = Candidate;
                 break;
             }
         }
@@ -638,9 +647,17 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     // 재화와 작업 비용 처리
     if (!PartnerState)
     {
-        DrawFitted(TEXT("동료 · 혼자 모험 중"), Cream, X + 12 * S, Y + 7 * S, 244 * S, .66f * S);
-        DrawWrapped(TEXT("친구가 호스트 주소로 참가하면 여기에서 상태를 확인합니다."), Muted, X + 12 * S, Y + 43 * S,
-                    244 * S, .59f * S, 3);
+        const FFablePartyRecord* Party =
+            Manager && MyState ? Manager->GetPartyForMember(MyState->GetPlayerId()) : nullptr;
+        const FFablePartyInvite* Invite =
+            Manager && MyState ? Manager->GetPendingInviteFor(MyState->GetPlayerId()) : nullptr;
+        const FString Summary =
+            Party && Party->Members.Num() > 1 ? TEXT("동료 · 재접속 대기") : TEXT("동료 · 혼자 모험 중");
+        DrawFitted(Summary, Cream, X + 12 * S, Y + 7 * S, 156 * S, .66f * S);
+        DrawWrapped(Invite                              ? TEXT("새 파티 초대가 도착했습니다. G 키를 눌러 확인하세요.")
+                    : Party && Party->Members.Num() > 1 ? TEXT("동료의 연결을 기다립니다. G 키에서 명부를 확인하세요.")
+                                                        : TEXT("G 키로 파티를 만들고 접속한 친구를 초대하세요."),
+                    Invite ? Gold : Muted, X + 12 * S, Y + 43 * S, 244 * S, .59f * S, 3);
         if (GS && GS->PartyRecoveryCount > 0)
         {
             DrawFitted(FString::Printf(TEXT("파티 전멸 %d회"), GS->PartyRecoveryCount), Gold, X + 12 * S, Y + 108 * S,
@@ -652,7 +669,7 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     // 화면 표시와 사용자 안내에 필요한 값 준비
     const AFableCharacter* Partner = Cast<AFableCharacter>(PartnerState->GetPawn());
     const AFableCharacter* Hero = Cast<AFableCharacter>(PC->GetPawn());
-    DrawFitted(TEXT("동료 · ") + PartnerState->GetAdvancedClassName(), Cream, X + 12 * S, Y + 7 * S, 244 * S, .66f * S);
+    DrawFitted(TEXT("동료 · ") + PartnerState->GetAdvancedClassName(), Cream, X + 12 * S, Y + 7 * S, 156 * S, .66f * S);
 
     // 화면 표시와 사용자 안내 조건 검사
     if (!Partner)
@@ -726,6 +743,166 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
     }
 
     DrawFitted(Action, Partner->IsDowned() ? Gold : Mint, X + 12 * S, Y + 103 * S, 244 * S, .56f * S);
+}
+
+/** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
+void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GS, float S)
+{
+    // 서버가 복제한 파티와 초대장만 표시하고 구성 변경 결과는 예측하지 않는다.
+    const float X = (Canvas->ClipX - 850 * S) * .5f;
+    const float Y = (Canvas->ClipY - 500 * S) * .5f;
+    const float Right = X + 438 * S;
+    const AFablePlayerState* Mine = PC->GetPlayerState<AFablePlayerState>();
+    const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    DrawPanel(TEXT("파티 관리 · G 키로 닫기"), X, Y, 850 * S, 500 * S, S);
+
+    if (!Mine || !Manager || !GS)
+    {
+        DrawWrapped(TEXT("서버에서 파티 명부를 불러오고 있습니다."), Muted, X + 24 * S, Y + 84 * S, 790 * S, .72f * S);
+        return;
+    }
+
+    const FString MyKey = Manager->GetPlayerKey(Mine->GetPlayerId());
+    const FFablePartyRecord* Party = Manager->GetPartyForMember(Mine->GetPlayerId());
+    const FFablePartyInvite* Invite = Manager->GetPendingInviteFor(Mine->GetPlayerId());
+    const bool bLeader = Party && Party->LeaderKey == MyKey;
+    const bool bProfileReady = !Mine->IsBackendEnabled() || Mine->IsBackendReady();
+    const bool bForestBattle = GS->AdventureStage == EFableAdventureStage::Forest && !GS->bObjectiveComplete;
+    const bool bPartyEditable =
+        GS->ActiveRegion == EFableRegion::Village && !GS->bPartyRecoveryPending && !bForestBattle && bProfileReady;
+    const bool bCanInvite = bPartyEditable && bLeader && Party->Members.Num() < AFablePartyManager::MaxMembers;
+
+    // 접속자 목록을 안정된 플레이어 ID 순서로 표시한다.
+    TArray<const AFablePlayerState*> Connected;
+    for (const APlayerState* Player : GS->PlayerArray)
+    {
+        const AFablePlayerState* Profile = Cast<AFablePlayerState>(Player);
+        if (Profile && Profile != Mine && !Profile->IsBackendClosing())
+        {
+            Connected.Add(Profile);
+        }
+    }
+
+    Connected.Sort(
+        [](const AFablePlayerState& A, const AFablePlayerState& B)
+        {
+            return A.GetPlayerId() < B.GetPlayerId();
+        });
+
+    constexpr int32 PerPage = 4;
+    const int32 Pages = FMath::Max(1, FMath::DivideAndRoundUp(Connected.Num(), PerPage));
+    PartyRosterPage = FMath::Clamp(PartyRosterPage, 0, Pages - 1);
+    DrawFitted(FString::Printf(TEXT("접속한 모험가 · %d명"), Connected.Num()), Cream, X + 24 * S, Y + 74 * S, 382 * S,
+               .72f * S);
+
+    if (Connected.IsEmpty())
+    {
+        DrawWrapped(TEXT("친구가 같은 서버에 접속하면 이 목록에서 초대할 수 있습니다."), Muted, X + 24 * S, Y + 120 * S,
+                    382 * S, .65f * S, 3);
+    }
+
+    for (int32 Row = 0; Row < PerPage && PartyRosterPage * PerPage + Row < Connected.Num(); ++Row)
+    {
+        const AFablePlayerState* Profile = Connected[PartyRosterPage * PerPage + Row];
+        const float RowY = Y + (112 + Row * 66) * S;
+        const FFablePartyRecord* OtherParty = Manager->GetPartyForMember(Profile->GetPlayerId());
+        const bool bSameParty = Party && OtherParty && Party->PartyId == OtherParty->PartyId;
+        DrawRect(FLinearColor(.07f, .14f, .10f), X + 24 * S, RowY, 382 * S, 58 * S);
+        DrawFitted(FString::Printf(TEXT("%s · #%d"), *Profile->GetPlayerName(), Profile->GetPlayerId()), Cream,
+                   X + 34 * S, RowY + 6 * S, 258 * S, .60f * S);
+        DrawFitted(FString::Printf(TEXT("%s · 레벨 %d · %s"), *Profile->GetAdvancedClassName(), Profile->Level,
+                                   bSameParty   ? TEXT("내 파티")
+                                   : OtherParty ? TEXT("다른 파티")
+                                                : TEXT("파티 없음")),
+                   bSameParty ? Mint : Muted, X + 34 * S, RowY + 31 * S, 258 * S, .53f * S);
+        DrawButton(bSameParty ? TEXT("동료") : TEXT("초대"),
+                   FName(*FString::Printf(TEXT("PartyInvite_%d"), Profile->GetPlayerId())), X + 302 * S, RowY + 13 * S,
+                   94 * S, 34 * S, S, bCanInvite && !OtherParty);
+    }
+
+    DrawButton(TEXT("이전"), TEXT("PartyRosterPrevious"), X + 24 * S, Y + 388 * S, 92 * S, 32 * S, S,
+               PartyRosterPage > 0);
+    DrawFitted(FString::Printf(TEXT("%d / %d"), PartyRosterPage + 1, Pages), Muted, X + 178 * S, Y + 395 * S, 100 * S,
+               .60f * S);
+    DrawButton(TEXT("다음"), TEXT("PartyRosterNext"), X + 314 * S, Y + 388 * S, 92 * S, 32 * S, S,
+               PartyRosterPage + 1 < Pages);
+
+    // 파티장은 연결된 구성원에게만 권한을 넘길 수 있다.
+    DrawFitted(Party
+                   ? FString::Printf(TEXT("내 파티 · %d / %d명"), Party->Members.Num(), AFablePartyManager::MaxMembers)
+                   : TEXT("내 파티 · 소속 없음"),
+               Cream, Right, Y + 74 * S, 388 * S, .72f * S);
+
+    if (Party)
+    {
+        for (int32 Row = 0; Row < Party->Members.Num(); ++Row)
+        {
+            const FFablePartyMember& Member = Party->Members[Row];
+            const float RowY = Y + (112 + Row * 66) * S;
+            const bool bMe = Member.PlayerKey == MyKey;
+            const bool bMemberLeader = Member.PlayerKey == Party->LeaderKey;
+            DrawRect(FLinearColor(.07f, .14f, .10f), Right, RowY, 388 * S, 58 * S);
+            DrawFitted(Member.DisplayName + (bMe ? TEXT(" · 나") : TEXT("")) +
+                           (bMemberLeader ? TEXT(" · 파티장") : TEXT("")),
+                       bMemberLeader ? Gold : Cream, Right + 10 * S, RowY + 6 * S, 258 * S, .60f * S);
+
+            const float Wait = FMath::Max(0.f, Member.ReconnectDeadline - GS->GetServerWorldTimeSeconds());
+            DrawFitted(Member.bConnected ? TEXT("접속 중") : FString::Printf(TEXT("재접속 대기 · %.0f초"), Wait),
+                       Member.bConnected ? Mint : Warning, Right + 10 * S, RowY + 31 * S, 258 * S, .53f * S);
+            if (!bMe)
+            {
+                DrawButton(TEXT("위임"), FName(*FString::Printf(TEXT("PartyTransfer_%d"), Member.PlayerId)),
+                           Right + 284 * S, RowY + 13 * S, 94 * S, 34 * S, S,
+                           bPartyEditable && bLeader && Member.bConnected);
+            }
+        }
+
+        DrawButton(TEXT("파티 탈퇴"), TEXT("PartyLeave"), Right, Y + 258 * S, 188 * S, 38 * S, S, bPartyEditable);
+        DrawFitted(bLeader ? TEXT("파티장 · 초대와 위임 가능") : TEXT("파티원 · 초대는 파티장이 진행"), Muted,
+                   Right + 198 * S, Y + 268 * S, 190 * S, .51f * S);
+    }
+    else
+    {
+        DrawButton(TEXT("파티 만들기"), TEXT("PartyCreate"), Right, Y + 116 * S, 388 * S, 42 * S, S, bPartyEditable);
+        DrawWrapped(TEXT("파티를 만든 뒤 왼쪽 목록에서 동료를 초대하세요. 최대 2명이 함께할 수 있습니다."), Muted,
+                    Right, Y + 176 * S, 388 * S, .65f * S, 3);
+    }
+
+    // 초대 ID를 버튼에 고정해 새 초대가 도착해도 다른 초대를 잘못 수락하지 않는다.
+    DrawFitted(TEXT("받은 초대"), Cream, Right, Y + 322 * S, 388 * S, .70f * S);
+    if (Invite)
+    {
+        FString Inviter = TEXT("모험가");
+        for (const FFablePartyRecord& Record : Manager->Parties)
+        {
+            for (const FFablePartyMember& Member : Record.Members)
+            {
+                if (Member.PlayerKey == Invite->InviterKey)
+                {
+                    Inviter = Member.DisplayName;
+                }
+            }
+        }
+
+        const float Remaining = FMath::Max(0.f, Invite->ExpiresAt - GS->GetServerWorldTimeSeconds());
+        DrawFitted(FString::Printf(TEXT("%s님의 초대 · %.0f초 남음"), *Inviter, Remaining), Gold, Right, Y + 356 * S,
+                   388 * S, .60f * S);
+        const FString InviteToken = Invite->InviteId.ToString(EGuidFormats::Digits);
+        DrawButton(TEXT("수락"), FName(*(TEXT("PartyAccept_") + InviteToken)), Right, Y + 388 * S, 188 * S, 38 * S, S,
+                   bPartyEditable && !Party && Remaining > 0);
+        DrawButton(TEXT("거절"), FName(*(TEXT("PartyDecline_") + InviteToken)), Right + 200 * S, Y + 388 * S, 188 * S,
+                   38 * S, S, bPartyEditable && Remaining > 0);
+    }
+    else
+    {
+        DrawWrapped(TEXT("도착한 초대가 없습니다. 초대장은 30초 동안 유효합니다."), Muted, Right, Y + 359 * S, 388 * S,
+                    .62f * S, 2);
+    }
+
+    DrawWrapped(bPartyEditable
+                    ? TEXT("파티 변경과 초대 수락은 서버가 확인합니다. 마지막 구성원이 나가면 파티가 해산됩니다.")
+                    : TEXT("마을의 안전한 상태에서 파티를 변경할 수 있습니다. 프로필 로딩이 끝난 뒤 다시 시도하세요."),
+                bPartyEditable ? Muted : Warning, X + 24 * S, Y + 454 * S, 802 * S, .59f * S, 2);
 }
 
 /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
@@ -906,7 +1083,12 @@ void AFableHUD::DrawHUD()
         DrawFitted(Stage, Gold, W - 298 * S, 21 * S, 270 * S, .65f * S);
         DrawFitted(FString::Printf(TEXT("골드 %d · 광석 %d"), State->Gold, State->Ore), Cream, W - 298 * S, 52 * S,
                    270 * S, .66f * S);
-        DrawFitted(FString::Printf(TEXT("동료 %d / 2 · 공격 %.0f · 방어 %.0f"), GS ? GS->PlayerArray.Num() : 1,
+
+        // 파티 인원은 본인을 포함한 명부의 예약 슬롯 수이며 무소속은 0명으로 표시한다.
+        const AFablePartyManager* PartyManager = AFablePartyManager::Find(GetWorld());
+        const FFablePartyRecord* Party = PartyManager ? PartyManager->GetPartyForMember(State->GetPlayerId()) : nullptr;
+        const int32 PartyMemberCount = Party ? Party->Members.Num() : 0;
+        DrawFitted(FString::Printf(TEXT("파티 %d / 2명 · 공격 %.0f · 방어 %.0f"), PartyMemberCount,
                                    State->GetAttackPower(), State->GetDefense()),
                    Muted, W - 298 * S, 80 * S, 270 * S, .59f * S);
         DrawFitted(DestinationText(State, GS), Mint, W - 298 * S, 111 * S, 270 * S, .61f * S);
@@ -1018,15 +1200,19 @@ void AFableHUD::DrawHUD()
                     : FString::Printf(TEXT(" · 물약 대기 %s"), *Cooldown(State->GetPotionCooldownRemaining()));
             DrawFitted(TEXT("J / 좌클릭 공격 · Shift 회피 · Space 점프") + Protection, Cream, 26 * S, H - 66 * S,
                        W - 52 * S, .58f * S);
-            DrawFitted(
-                FString::Printf(TEXT("H 체력약 %d · M 마나약 %d · I 가방 · Q 의뢰 · P 스킬/특성 (%dP) · F1 도움말"),
-                                State->HealthPotions, State->ManaPotions, State->GetAvailableSkillPoints()),
-                Mint, 26 * S, H - 38 * S, W - 52 * S, .57f * S);
+            DrawFitted(FString::Printf(
+                           TEXT("H 체력약 %d · M 마나약 %d · I 가방 · Q 의뢰 · P 스킬/특성 (%dP) · G 파티 · F1 도움말"),
+                           State->HealthPotions, State->ManaPotions, State->GetAvailableSkillPoints()),
+                       Mint, 26 * S, H - 38 * S, W - 52 * S, .57f * S);
         }
     }
 
     // 직업·스킬·특성 빌드 처리
-    if (PC->IsWorkshopOpen() && State)
+    if (PC->IsPartyOpen() && State)
+    {
+        DrawPartyManagement(PC, GS, S);
+    }
+    else if (PC->IsWorkshopOpen() && State)
     {
         DrawWorkshop(PC, State, S);
     }
@@ -2132,7 +2318,7 @@ void AFableHUD::DrawHelp(AFablePlayerController* PC, float S)
     DrawPanel(TEXT("모험 안내"), X, Y, 850 * S, 490 * S, S);
     const TCHAR* Lines[] = {TEXT("WASD 이동 · 마우스 시점 · Space 점프 · Shift 회피"),
                             TEXT("J / 좌클릭 공격 · K / L / O 스킬 · H 체력약 · M 마나약"),
-                            TEXT("E 대화 · I 가방(Tab 정렬) · Q 의뢰 · P 스킬/특성 · 브람 대화 중 F 공방"),
+                            TEXT("E 대화 · I 가방(Tab 정렬) · Q 의뢰 · P 스킬/특성 · G 파티 · 브람 대화 중 F 공방"),
                             TEXT("쓰러짐 25초 · 동료 근처 E 3초 홀드 구조 · 이동 / 피격 시 취소"),
                             TEXT("전멸 후 R: 숲은 로완 / 던전은 포털 · 이전 난이도로 재도전"),
                             TEXT("1. 로완의 메인 이야기 → 등불 3개 수집 + 오래된 나무 조사"),
@@ -2181,6 +2367,62 @@ void AFableHUD::NotifyHitBoxClick(FName BoxName)
     {
         return;
     }
+
+    // 파티 버튼은 표시했던 대상 ID와 초대 ID만 소유 컨트롤러에 전달한다.
+    if (Name.StartsWith(TEXT("PartyInvite_")))
+    {
+        PC->UIInviteParty(FCString::Atoi(*Name.Mid(12)));
+        return;
+    }
+
+    if (Name.StartsWith(TEXT("PartyTransfer_")))
+    {
+        PC->UITransferPartyLeader(FCString::Atoi(*Name.Mid(14)));
+        return;
+    }
+
+    const bool bAcceptInvite = Name.StartsWith(TEXT("PartyAccept_"));
+    const bool bDeclineInvite = Name.StartsWith(TEXT("PartyDecline_"));
+    if (bAcceptInvite || bDeclineInvite)
+    {
+        FGuid InviteId;
+        if (FGuid::Parse(Name.Mid(bAcceptInvite ? 12 : 13), InviteId))
+        {
+            PC->UIRespondPartyInvite(InviteId, bAcceptInvite);
+        }
+        return;
+    }
+
+    if (BoxName == TEXT("PartyOpen"))
+    {
+        PC->UIToggleParty();
+        return;
+    }
+
+    if (BoxName == TEXT("PartyCreate"))
+    {
+        PC->UICreateParty();
+        return;
+    }
+
+    if (BoxName == TEXT("PartyLeave"))
+    {
+        PC->UILeaveParty();
+        return;
+    }
+
+    if (BoxName == TEXT("PartyRosterPrevious"))
+    {
+        PartyRosterPage = FMath::Max(0, PartyRosterPage - 1);
+        return;
+    }
+
+    if (BoxName == TEXT("PartyRosterNext"))
+    {
+        ++PartyRosterPage;
+        return;
+    }
+
     if (Name.StartsWith(TEXT("SkillTab_")))
     {
         PC->UISelectSkillPanelTab(FCString::Atoi(*Name.Mid(9)));

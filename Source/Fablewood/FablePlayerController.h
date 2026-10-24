@@ -227,6 +227,30 @@ public:
     /** UI에서 선택한 표시 전환 스킬 동작을 처리한다. */
     void UIToggleSkills();
 
+    /** 파티 관리 창을 열거나 닫고 게임 입력 초점을 조정한다. */
+    void UIToggleParty();
+
+    /** 파티 창 열림 여부를 반환한다. */
+    bool IsPartyOpen() const
+    {
+        return bPartyOpen;
+    }
+
+    /** 새 파티 생성을 소유 플레이어의 서버에 요청한다. */
+    void UICreateParty();
+
+    /** 접속한 대상 플레이어에게 파티 초대를 요청한다. */
+    void UIInviteParty(int32 TargetPlayerId);
+
+    /** 선택한 초대장의 수락 또는 거절을 서버에 요청한다. */
+    void UIRespondPartyInvite(FGuid InviteId, bool bAccept);
+
+    /** 현재 파티 탈퇴를 서버에 요청한다. */
+    void UILeaveParty();
+
+    /** 현재 파티의 파티장 위임을 서버에 요청한다. */
+    void UITransferPartyLeader(int32 TargetPlayerId);
+
     /** UI에서 선택한 선택 스킬 동작을 처리한다. */
     void UISelectSkill(int32 Slot);
 
@@ -402,7 +426,7 @@ public:
     bool IsAnyPanelOpen() const
     {
         return bFrontEndOpen || bInventoryOpen || bWorkshopOpen || bQuestsOpen || bHelpOpen || bSkillsOpen ||
-               IsDialogueOpen();
+               bPartyOpen || IsDialogueOpen();
     }
 
     /** 선택한 아이템의 지역 식별자 값을 반환한다. */
@@ -474,6 +498,7 @@ private:
     bool bQuestsOpen = false;
     bool bHelpOpen = false;
     bool bSkillsOpen = false;
+    bool bPartyOpen = false;
     int32 SelectedSkillSlot = 0;
     int32 SkillPanelTab = 0;
     int32 SelectedTalentTier = 2;
@@ -533,6 +558,26 @@ private:
 
     /** 서버 측 RPG 요청의 권한·상태·요청 간격을 확인한다. */
     bool AcceptRPGRequest();
+
+    /** 소유 컨트롤러의 파티 생성 요청을 서버 파티 관리자에 전달한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerCreateParty();
+
+    /** 대상 ID만 전달하고 초대 권한과 연결 상태는 서버에서 판정한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerInviteParty(int32 TargetPlayerId);
+
+    /** 초대 ID와 응답 의사를 전달하고 초대 소유 여부는 서버에서 판정한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerRespondPartyInvite(FGuid InviteId, bool bAccept);
+
+    /** 소유 컨트롤러의 현재 파티 탈퇴 요청을 서버에서 처리한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerLeaveParty();
+
+    /** 파티장 위임 권한과 대상의 현재 소속을 서버에서 검증한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerTransferPartyLeader(int32 TargetPlayerId);
 
     /** 장비 분해 확인 절차 상태를 해제한다. */
     void ClearDismantleConfirmation();

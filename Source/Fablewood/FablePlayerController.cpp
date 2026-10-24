@@ -7,6 +7,7 @@
 #include "HAL/PlatformApplicationMisc.h"
 #include "FableGameState.h"
 #include "FablePlayerState.h"
+#include "FablePartyManager.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "EngineUtils.h"
@@ -364,6 +365,13 @@ bool AFablePlayerController::InputKey(const FInputKeyEventArgs& Params)
         return true;
     }
 
+    // 파티 창은 기존 스킬 단축키와 겹치지 않는 G 키로 연다.
+    if (Params.Key == EKeys::G && Params.Event == IE_Pressed && !bFrontEndOpen)
+    {
+        UIToggleParty();
+        return true;
+    }
+
     // 접속 권한·저장 리비전·멱등 키 처리
     if (bReviveInputHeld)
     {
@@ -648,7 +656,7 @@ void AFablePlayerController::UIClosePanels()
 
     // 생존 상태와 부활 진행 처리
     UIStopRevive();
-    bInventoryOpen = bWorkshopOpen = bQuestsOpen = bHelpOpen = bSkillsOpen = bFreeCursor = false;
+    bInventoryOpen = bWorkshopOpen = bQuestsOpen = bHelpOpen = bSkillsOpen = bPartyOpen = bFreeCursor = false;
     ClearDismantleConfirmation();
     Dialogue = EFableDialogue::None;
     bJoinAddressFocused = false;
@@ -1163,6 +1171,114 @@ void AFablePlayerController::UIToggleSkills()
     SkillPanelTab = 0;
     SelectedSkillSlot = FMath::Clamp(SelectedSkillSlot, 0, 3);
     ApplyUIMode();
+}
+
+/** 파티 관리 창을 열거나 닫고 게임 입력 초점을 조정한다. */
+void AFablePlayerController::UIToggleParty()
+{
+    // 시작 화면과 안전 이탈 중에는 게임 파티 UI를 열지 않는다.
+    if (bFrontEndOpen || bOnlineLeaveInputBlocked)
+    {
+        return;
+    }
+
+    // 기존 창을 닫고 한 개의 관리 창에 입력 초점을 둔다.
+    const bool bOpen = !bPartyOpen;
+    UIClosePanels();
+    bPartyOpen = bOpen;
+    ApplyUIMode();
+}
+
+/** 새 파티 생성을 소유 플레이어의 서버에 요청한다. */
+void AFablePlayerController::UICreateParty()
+{
+    if (bPartyOpen && !bOnlineLeaveInputBlocked)
+    {
+        ServerCreateParty();
+    }
+}
+
+/** 접속한 대상 플레이어에게 파티 초대를 요청한다. */
+void AFablePlayerController::UIInviteParty(int32 TargetPlayerId)
+{
+    if (bPartyOpen && !bOnlineLeaveInputBlocked && TargetPlayerId >= 0)
+    {
+        ServerInviteParty(TargetPlayerId);
+    }
+}
+
+/** 선택한 초대장의 수락 또는 거절을 서버에 요청한다. */
+void AFablePlayerController::UIRespondPartyInvite(FGuid InviteId, bool bAccept)
+{
+    if (bPartyOpen && !bOnlineLeaveInputBlocked && InviteId.IsValid())
+    {
+        ServerRespondPartyInvite(InviteId, bAccept);
+    }
+}
+
+/** 현재 파티 탈퇴를 서버에 요청한다. */
+void AFablePlayerController::UILeaveParty()
+{
+    if (bPartyOpen && !bOnlineLeaveInputBlocked)
+    {
+        ServerLeaveParty();
+    }
+}
+
+/** 현재 파티의 파티장 위임을 서버에 요청한다. */
+void AFablePlayerController::UITransferPartyLeader(int32 TargetPlayerId)
+{
+    if (bPartyOpen && !bOnlineLeaveInputBlocked && TargetPlayerId >= 0)
+    {
+        ServerTransferPartyLeader(TargetPlayerId);
+    }
+}
+
+/** 소유 컨트롤러의 파티 생성 요청을 서버 파티 관리자에 전달한다. */
+void AFablePlayerController::ServerCreateParty_Implementation()
+{
+    // RPC의 송신자 컨트롤러를 그대로 전달해 서버가 신원을 판정한다.
+    if (AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld()))
+    {
+        Manager->ExecuteAction(this, EFablePartyAction::Create);
+    }
+}
+
+/** 대상 ID만 전달하고 초대 권한과 연결 상태는 서버에서 판정한다. */
+void AFablePlayerController::ServerInviteParty_Implementation(int32 TargetPlayerId)
+{
+    if (AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld()))
+    {
+        Manager->ExecuteAction(this, EFablePartyAction::Invite, TargetPlayerId);
+    }
+}
+
+/** 초대 ID와 응답 의사를 전달하고 초대 소유 여부는 서버에서 판정한다. */
+void AFablePlayerController::ServerRespondPartyInvite_Implementation(FGuid InviteId, bool bAccept)
+{
+    if (AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld()))
+    {
+        Manager->ExecuteAction(this, bAccept ? EFablePartyAction::Accept : EFablePartyAction::Decline, INDEX_NONE,
+                               InviteId);
+    }
+}
+
+/** 소유 컨트롤러의 현재 파티 탈퇴 요청을 서버에서 처리한다. */
+void AFablePlayerController::ServerLeaveParty_Implementation()
+{
+    if (AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld()))
+    {
+        Manager->ExecuteAction(this, EFablePartyAction::Leave);
+    }
+}
+
+/** 파티장 위임 권한과 대상의 현재 소속을 서버에서 검증한다. */
+void AFablePlayerController::ServerTransferPartyLeader_Implementation(int32 TargetPlayerId)
+{
+    if (AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld()))
+    {
+        Manager->ExecuteAction(this, EFablePartyAction::TransferLeader, TargetPlayerId);
+    }
 }
 
 /** UI에서 선택한 선택 스킬 동작을 처리한다. */
@@ -2130,6 +2246,12 @@ FString AFablePlayerController::GetContextActionText() const
 /** UI에서 선택한 주변 대상 상호작용 동작을 처리한다. */
 void AFablePlayerController::UIInteract()
 {
+    // 파티 관리 중 E 입력이 뒤의 주민이나 포털 상호작용으로 전달되지 않게 한다.
+    if (bPartyOpen)
+    {
+        return;
+    }
+
     // 퀘스트와 이야기 진행 조건 검사
     if (bFrontEndOpen || bHelpOpen || bQuestsOpen)
     {

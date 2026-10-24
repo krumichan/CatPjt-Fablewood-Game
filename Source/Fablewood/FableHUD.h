@@ -27,6 +27,8 @@ private:
     UPROPERTY()
     TObjectPtr<UFont> KoreanFont;
 
+    int32 PartyRosterPage = 0;
+
     /** 한국어 표시를 지원하는 HUD 글꼴을 반환한다. */
     UFont* UIFont() const;
 
@@ -78,6 +80,9 @@ private:
 
     /** 파티 상태 UI를 현재 상태에 맞게 그린다. */
     void DrawPartyStatus(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
+
+    /** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
+    void DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
 
     /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
     void DrawRecoveryStatus(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
