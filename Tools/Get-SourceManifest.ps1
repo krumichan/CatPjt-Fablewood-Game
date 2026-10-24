@@ -34,7 +34,7 @@ foreach ($directory in @('Source','Config','Content','ArtSource','Tools','ThirdP
         Add-SourceDirectory $path
     }
 }
-foreach ($name in @('Fablewood.uproject','README.md','.gitignore','.gitattributes','.editorconfig')) {
+foreach ($name in @('Fablewood.uproject','README.md','.gitignore','.gitattributes','.editorconfig','.clang-format')) {
     $path=Join-Path $projectRoot $name
     if (Test-Path -LiteralPath $path -PathType Leaf) { $files.Add((Get-Item -LiteralPath $path)) }
 }

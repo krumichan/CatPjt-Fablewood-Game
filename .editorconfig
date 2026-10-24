@@ -1,0 +1,24 @@
+# Fablewood 소스 공통 규칙: 함수 사이와 의미 있는 처리 구간은 한 줄씩 띄운다.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{h,hpp,cpp,c,cs}]
+# 함수·클래스·처리 구간의 역할은 한국어 또는 일본어 주석으로 설명한다.
+# C++ 자동 정리는 저장소의 .clang-format을 사용한다.
+max_line_length = 120
+
+[*.cs]
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_prefer_braces = true:warning
+csharp_preserve_single_line_blocks = false
+csharp_preserve_single_line_statements = false

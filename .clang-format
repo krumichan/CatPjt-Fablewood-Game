@@ -1,0 +1,48 @@
+# Fablewood: 중괄호는 다음 줄에 열고 문장과 함수를 한 줄로 압축하지 않는다.
+BasedOnStyle: Microsoft
+BreakBeforeBraces: Allman
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+NamespaceIndentation: All
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortLambdasOnASingleLine: None
+AllowShortEnumsOnASingleLine: false
+AllowShortCaseExpressionOnASingleLine: false
+InsertBraces: true
+SortIncludes: Never
+SortUsingDeclarations: Never
+FixNamespaceComments: false
+BreakStringLiterals: false
+ReflowComments: Never
+MaxEmptyLinesToKeep: 1
+EmptyLineAfterAccessModifier: Never
+EmptyLineBeforeAccessModifier: Always
+SeparateDefinitionBlocks: Leave
+PointerAlignment: Left
+DerivePointerAlignment: false
+BreakAfterAttributes: Always
+SkipMacroDefinitionBody: true
+StatementMacros:
+  - UCLASS
+  - USTRUCT
+  - UENUM
+  - UFUNCTION
+  - UPROPERTY
+  - GENERATED_BODY
+  - GENERATED_UCLASS_BODY
+  - IMPLEMENT_SIMPLE_AUTOMATION_TEST
+  - IMPLEMENT_PRIMARY_GAME_MODULE
+  - SLATE_BEGIN_ARGS
+  - SLATE_ARGUMENT
+  - SLATE_END_ARGS
+LineEnding: LF
+InsertNewlineAtEOF: true
+---
+Language: CSharp
+InsertBraces: false
