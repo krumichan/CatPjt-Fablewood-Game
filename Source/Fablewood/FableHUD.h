@@ -84,6 +84,9 @@ private:
     /** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
     void DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
 
+    /** 서버 선택·개별 준비·파티장 출발을 원정 탭에 표시한다. */
+    void DrawPartyExpedition(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
+
     /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
     void DrawRecoveryStatus(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
 

@@ -748,6 +748,13 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const AFableGameStat
 /** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
 void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GS, float S)
 {
+    // 구성 화면과 원정 화면은 같은 파티 창의 입력 모드를 공유한다.
+    if (PC->IsPartyExpeditionOpen())
+    {
+        DrawPartyExpedition(PC, GS, S);
+        return;
+    }
+
     // 서버가 복제한 파티와 초대장만 표시하고 구성 변경 결과는 예측하지 않는다.
     const float X = (Canvas->ClipX - 850 * S) * .5f;
     const float Y = (Canvas->ClipY - 500 * S) * .5f;
@@ -755,6 +762,8 @@ void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGame
     const AFablePlayerState* Mine = PC->GetPlayerState<AFablePlayerState>();
     const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
     DrawPanel(TEXT("파티 관리 · G 키로 닫기"), X, Y, 850 * S, 500 * S, S);
+    DrawButton(TEXT("파티 구성"), TEXT("PartyTabMembers"), X + 470 * S, Y + 14 * S, 110 * S, 35 * S, S, false);
+    DrawButton(TEXT("원정 준비"), TEXT("PartyTabExpedition"), X + 592 * S, Y + 14 * S, 142 * S, 35 * S, S);
 
     if (!Mine || !Manager || !GS)
     {
@@ -903,6 +912,147 @@ void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGame
                     ? TEXT("파티 변경과 초대 수락은 서버가 확인합니다. 마지막 구성원이 나가면 파티가 해산됩니다.")
                     : TEXT("마을의 안전한 상태에서 파티를 변경할 수 있습니다. 프로필 로딩이 끝난 뒤 다시 시도하세요."),
                 bPartyEditable ? Muted : Warning, X + 24 * S, Y + 454 * S, 802 * S, .59f * S, 2);
+}
+
+/** 서버 선택·개별 준비·파티장 출발을 원정 탭에 표시한다. */
+void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGameState* GS, float S)
+{
+    const float X = (Canvas->ClipX - 850 * S) * .5f;
+    const float Y = (Canvas->ClipY - 500 * S) * .5f;
+    const AFablePlayerState* Mine = PC->GetPlayerState<AFablePlayerState>();
+    const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
+    const FFablePartyRecord* Party = Manager && Mine ? Manager->GetPartyForMember(Mine->GetPlayerId()) : nullptr;
+    DrawPanel(TEXT("파티 원정 준비 · G 키로 닫기"), X, Y, 850 * S, 500 * S, S);
+    DrawButton(TEXT("파티 구성"), TEXT("PartyTabMembers"), X + 470 * S, Y + 14 * S, 110 * S, 35 * S, S);
+    DrawButton(TEXT("원정 준비"), TEXT("PartyTabExpedition"), X + 592 * S, Y + 14 * S, 142 * S, 35 * S, S, false);
+
+    if (!Mine || !Manager || !GS)
+    {
+        DrawWrapped(TEXT("서버에서 원정 준비 정보를 불러오고 있습니다."), Muted, X + 24 * S, Y + 82 * S, 802 * S,
+                    .70f * S, 2);
+        return;
+    }
+
+    // 혼자 플레이할 때도 같은 서버 파티·준비 검사를 거친다.
+    if (!Party)
+    {
+        DrawWrapped(PC->GetPartyPreparationStatus(), Cream, X + 24 * S, Y + 111 * S, 802 * S, .76f * S, 3);
+        DrawButton(TEXT("파티 만들기"), TEXT("PartyCreate"), X + 24 * S, Y + 221 * S, 270 * S, 44 * S, S);
+        DrawWrapped(
+            TEXT("친구와 함께하려면 파티 구성 탭에서 초대하세요. 혼자 출발할 때는 파티를 만든 뒤 여기서 준비하세요."),
+            Muted, X + 24 * S, Y + 291 * S, 802 * S, .65f * S, 3);
+        if (!PC->GetPartyPreparationMessage().IsEmpty())
+        {
+            DrawWrapped(PC->GetPartyPreparationMessage(), Warning, X + 24 * S, Y + 423 * S, 802 * S, .60f * S, 3);
+        }
+        return;
+    }
+
+    const bool bLeader = Party->LeaderKey == Mine->PartyPlayerKey;
+    const bool bActive = Mine->ActiveExpeditionId.IsValid();
+    const bool bSelecting = PC->CanSelectPartyExpedition();
+    const EFableRegion Regions[] = {EFableRegion::RootRuins, EFableRegion::Moonwell};
+    DrawFitted(bLeader ? TEXT("파티장이 목적지와 난이도를 선택합니다 · 선택이 바뀌면 모두 다시 준비해야 합니다.")
+                       : TEXT("파티장의 선택을 확인하고 준비하세요 · 최종 자격과 이동은 서버가 확인합니다."),
+               Cream, X + 24 * S, Y + 69 * S, 802 * S, .59f * S);
+
+    // 목적지와 난이도는 로컬 선택을 예상하지 않고 복제된 값을 표시한다.
+    for (int32 Index = 0; Index < UE_ARRAY_COUNT(Regions); ++Index)
+    {
+        const EFableRegion Region = Regions[Index];
+        const float CardX = X + (24 + Index * 407) * S;
+        const bool bSelected = Party->SelectedRegion == Region;
+        DrawRect(bSelected ? FLinearColor(.18f, .34f, .24f) : FLinearColor(.07f, .14f, .10f), CardX, Y + 100 * S,
+                 395 * S, 100 * S);
+        DrawRect(bSelected ? Gold : Muted * .4f, CardX, Y + 100 * S, 395 * S, 3 * S);
+        DrawFitted((bSelected ? TEXT("선택 · ") : TEXT("")) + FableRPG::RegionName(Region), bSelected ? Gold : Cream,
+                   CardX + 14 * S, Y + 111 * S, 367 * S, .77f * S);
+        DrawFitted(Index == 0 ? TEXT("두 무리 + 고대 수호자 · 뿌리 수호자 세트")
+                              : TEXT("세 봉인 + 달빛 수호자 · 달빛 세트"),
+                   Cream, CardX + 14 * S, Y + 143 * S, 367 * S, .54f * S);
+        DrawFitted(Mine->IsRegionEligible(Region) ? TEXT("내 의뢰 자격 충족")
+                                                  : TEXT("로완에게 이 지역 의뢰를 준비하세요"),
+                   Mine->IsRegionEligible(Region) ? Mint : Warning, CardX + 14 * S, Y + 171 * S, 367 * S, .54f * S);
+        if (bSelecting)
+        {
+            AddHitBox(FVector2D(CardX, Y + 100 * S), FVector2D(395 * S, 100 * S),
+                      FName(*FString::Printf(TEXT("Dungeon_%d"), int32(Region))), true, 20);
+        }
+    }
+
+    DrawButton((Party->SelectedDifficulty == EFableDifficulty::Normal ? TEXT("● ") : TEXT("")) +
+                   FableRPG::DifficultyName(EFableDifficulty::Normal),
+               TEXT("DifficultyNormal"), X + 24 * S, Y + 212 * S, 154 * S, 34 * S, S, bSelecting);
+    DrawButton((Party->SelectedDifficulty == EFableDifficulty::Hard ? TEXT("● ") : TEXT("")) +
+                   FableRPG::DifficultyName(EFableDifficulty::Hard),
+               TEXT("DifficultyHard"), X + 190 * S, Y + 212 * S, 154 * S, 34 * S, S, bSelecting);
+    DrawFitted(Party->SelectedDifficulty == EFableDifficulty::Hard
+                   ? TEXT("어려움 · 적 체력 ×1.45 / 피해 ×1.25 · 처치 보상 ×1.5")
+                   : TEXT("일반 · 기본 전투와 보상 · 품질과 추가 옵션은 획득 시 결정"),
+               Muted, X + 360 * S, Y + 221 * S, 466 * S, .52f * S);
+
+    DrawFitted(FString::Printf(TEXT("구성원 준비 · %d명"), Party->Members.Num()), Cream, X + 24 * S, Y + 258 * S,
+               802 * S, .68f * S);
+    for (int32 Index = 0; Index < Party->Members.Num(); ++Index)
+    {
+        const FFablePartyMember& Member = Party->Members[Index];
+        const float RowY = Y + (290 + Index * 45) * S;
+        const AFablePlayerState* Profile = nullptr;
+        for (const APlayerState* Player : GS->PlayerArray)
+        {
+            const AFablePlayerState* Candidate = Cast<AFablePlayerState>(Player);
+            if (Candidate && Candidate->PartyPlayerKey == Member.PlayerKey &&
+                Candidate->GetPlayerId() == Member.PlayerId)
+            {
+                Profile = Candidate;
+                break;
+            }
+        }
+
+        const AFableCharacter* Hero = Profile ? Cast<AFableCharacter>(Profile->GetPawn()) : nullptr;
+        const bool bMine = Member.PlayerKey == Mine->PartyPlayerKey;
+        const bool bEligible = Profile && Profile->bProfileLoaded && Hero && Hero->IsAlive() &&
+                               Profile->IsRegionEligible(Party->SelectedRegion);
+        const bool bReady = Member.bConnected && Member.ReadyRevision == Party->PreparationRevision;
+        FString Connection = !Member.bConnected                     ? TEXT("접속 끊김")
+                             : !Profile || !Profile->bProfileLoaded ? TEXT("불러오는 중")
+                                                                    : TEXT("접속 중");
+        if (bMine && Mine->IsBackendEnabled() && (!Mine->IsBackendReady() || Mine->IsBackendSavePending()))
+        {
+            Connection = TEXT("저장 확인 중");
+        }
+
+        DrawRect(FLinearColor(.07f, .14f, .10f), X + 24 * S, RowY, 802 * S, 38 * S);
+        DrawFitted(Member.DisplayName + (bMine ? TEXT(" · 나") : TEXT("")) +
+                       (Member.PlayerKey == Party->LeaderKey ? TEXT(" · 파티장") : TEXT("")),
+                   Cream, X + 34 * S, RowY + 8 * S, 294 * S, .58f * S);
+        DrawFitted(Connection, Member.bConnected ? Mint : Warning, X + 338 * S, RowY + 8 * S, 146 * S, .57f * S);
+        DrawFitted(bEligible ? TEXT("자격 충족") : TEXT("자격·회복 필요"), bEligible ? Mint : Warning, X + 494 * S,
+                   RowY + 8 * S, 164 * S, .57f * S);
+        DrawFitted(bReady ? TEXT("준비 완료") : TEXT("준비 대기"), bReady ? Gold : Muted, X + 668 * S, RowY + 8 * S,
+                   148 * S, .57f * S);
+    }
+
+    DrawWrapped(PC->GetPartyPreparationStatus(), Muted, X + 24 * S, Y + 383 * S, 802 * S, .53f * S, 2);
+    const bool bReady = PC->IsPartyReady();
+    DrawButton(bReady ? TEXT("준비 취소") : TEXT("준비"), bReady ? TEXT("PartyReadyFalse") : TEXT("PartyReadyTrue"),
+               X + 24 * S, Y + 418 * S, 188 * S, 36 * S, S,
+               !bActive && !PC->IsPartyPreparationPending() && (PC->CanSetPartyReady() || bReady));
+    DrawButton(bActive   ? TEXT("현재 원정으로 복귀")
+               : bLeader ? TEXT("전원 준비 · 함께 출발")
+                         : TEXT("파티장이 출발합니다"),
+               bActive ? TEXT("PartyResume") : TEXT("PartyDepart"), X + 224 * S, Y + 418 * S, 602 * S, 36 * S, S,
+               bActive ? PC->CanEnterDungeon(Party->SelectedRegion) : PC->CanEnterPreparedParty());
+
+    // 거절 응답도 같은 창에 남기며 서버의 입장 성공 응답만 창을 닫는다.
+    if (!PC->GetPartyPreparationMessage().IsEmpty())
+    {
+        DrawWrapped(PC->GetPartyPreparationMessage(),
+                    PC->IsPartyPreparationPending()    ? Muted
+                    : PC->DidPartyPreparationSucceed() ? Mint
+                                                       : Warning,
+                    X + 24 * S, Y + 465 * S, 802 * S, .52f * S, 2);
+    }
 }
 
 /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
@@ -2132,87 +2282,10 @@ void AFableHUD::DrawQuestSelection(AFablePlayerController* PC, const AFablePlaye
 }
 
 /** 이동문 UI를 현재 상태에 맞게 그린다. */
-void AFableHUD::DrawPortal(AFablePlayerController* PC, const AFablePlayerState* State, float S)
+void AFableHUD::DrawPortal(AFablePlayerController* PC, const AFablePlayerState*, float S)
 {
-    // 지역·적·전투 진행에 필요한 값 준비
-    const float X = (Canvas->ClipX - 850 * S) / 2, Y = (Canvas->ClipY - 530 * S) / 2 - 12 * S;
-    const AFableGameState* Adventure = GetWorld()->GetGameState<AFableGameState>();
-    const EFableRegion Selected = PC->GetSelectedDungeonId();
-    const EFableDifficulty Difficulty = PC->GetSelectedDifficulty();
-    const bool bLocked = PC->IsDifficultySelectionLocked();
-    const bool bRunning = Adventure && Adventure->ActiveRegion != EFableRegion::Village;
-    const bool bDungeonRetry =
-        Adventure && Adventure->bRetryAvailable && Adventure->RetryRegion != EFableRegion::Village;
-    DrawPanel(TEXT("원정 지역과 난이도"), X, Y, 850 * S, 490 * S, S);
-    DrawFitted(TEXT("모든 동료의 의뢰 준비가 필요합니다 · 새 입장 때 선택한 난이도가 파티에 적용됩니다."), Cream,
-               X + 24 * S, Y + 67 * S, 800 * S, .61f * S);
-    const EFableRegion Regions[] = {EFableRegion::RootRuins, EFableRegion::Moonwell};
-    const EFableQuestId Quests[] = {EFableQuestId::RootRuins, EFableQuestId::Moonwell};
-
-    // 재화와 작업 비용 순회
-    for (int32 Index = 0; Index < 2; ++Index)
-    {
-        // 재화와 작업 비용에 필요한 값 준비
-        const EFableRegion Region = Regions[Index];
-        const float BX = X + (24 + Index * 407) * S;
-        const bool bSelected = Selected == Region;
-        DrawRect(bSelected ? FLinearColor(.18f, .34f, .24f) : FLinearColor(.07f, .14f, .10f), BX, Y + 106 * S, 395 * S,
-                 140 * S);
-        DrawRect(bSelected ? Gold : Muted * .4f, BX, Y + 106 * S, 395 * S, 3 * S);
-        DrawFitted((bSelected ? TEXT("선택 · ") : TEXT("")) + FableRPG::RegionName(Region), bSelected ? Gold : Cream,
-                   BX + 14 * S, Y + 117 * S, 367 * S, .82f * S);
-        DrawFitted(State->IsRegionEligible(Region) ? TEXT("내 의뢰 준비 완료")
-                                                   : FableRPG::QuestStageName(State->GetQuestStage(Quests[Index])),
-                   Mint, BX + 14 * S, Y + 152 * S, 367 * S, .62f * S);
-        DrawFitted(Index == 0 ? TEXT("두 무리 + 고대 수호자 · 뿌리 수호자 세트")
-                              : TEXT("세 봉인 + 달빛 수호자 · 달빛 세트"),
-                   Cream, BX + 14 * S, Y + 180 * S, 367 * S, .56f * S);
-        DrawFitted(Index == 0 ? TEXT("해금: 숲 순찰 보상") : TEXT("해금: 뿌리 유적 보상 1회"), Muted, BX + 14 * S,
-                   Y + 216 * S, 367 * S, .56f * S);
-        AddHitBox(FVector2D(BX, Y + 106 * S), FVector2D(395 * S, 140 * S),
-                  FName(*FString::Printf(TEXT("Dungeon_%d"), int32(Region))), true, 20);
-    }
-
-    // 재화와 작업 비용 처리
-    DrawButton((Difficulty == EFableDifficulty::Normal ? TEXT("● ") : TEXT("")) +
-                   FableRPG::DifficultyName(EFableDifficulty::Normal),
-               TEXT("DifficultyNormal"), X + 24 * S, Y + 259 * S, 154 * S, 34 * S, S, !bLocked);
-    DrawButton((Difficulty == EFableDifficulty::Hard ? TEXT("● ") : TEXT("")) +
-                   FableRPG::DifficultyName(EFableDifficulty::Hard),
-               TEXT("DifficultyHard"), X + 190 * S, Y + 259 * S, 154 * S, 34 * S, S, !bLocked);
-    const FString DifficultyState =
-        bRunning
-            ? TEXT("서버 현재: ") + FableRPG::DifficultyName(Adventure->ActiveDifficulty) + TEXT(" · 합류 난이도 고정")
-        : Adventure && Adventure->bPartyRecoveryPending ? TEXT("마을 구조 중 · 난이도 선택 대기")
-                                                        : TEXT("←→ 선택 · 새 입장은 이 난이도로 시작");
-    DrawFitted(DifficultyState, bLocked ? Gold : Muted, X + 360 * S, Y + 267 * S, 464 * S, .58f * S);
-    DrawFitted(Difficulty == EFableDifficulty::Hard
-                   ? TEXT("어려움: 적 체력 ×1.45 · 피해 ×1.25 · 처치 경험치 / 골드 / 광석 ×1.5")
-                   : TEXT("일반: 기본 전투와 보상 · 품질과 추가 옵션은 획득 시 결정됩니다"),
-               Cream, X + 24 * S, Y + 307 * S, 800 * S, .59f * S);
-    DrawFitted(Difficulty == EFableDifficulty::Hard ? TEXT("품질 확률: 하급 10% · 중급 35% · 상급 35% · 최상급 20%")
-                                                    : TEXT("품질 확률: 하급 30% · 중급 40% · 상급 23% · 최상급 7%"),
-               Mint, X + 24 * S, Y + 333 * S, 800 * S, .59f * S);
-    DrawWrapped(PC->GetDungeonReadinessText(Selected), PC->CanEnterDungeon(Selected) ? Mint : Warning, X + 24 * S,
-                Y + 363 * S, 800 * S, .60f * S, 2);
-    const FString Action = bRunning ? TEXT("E 합류 / 귀환 다시 시도 · ") + FableRPG::DifficultyName(Difficulty)
-                                    : TEXT("E 새 입장 · ") + FableRPG::RegionName(Selected) + TEXT(" · ") +
-                                          FableRPG::DifficultyName(Difficulty);
-    DrawButton(Action, TEXT("EnterRegion"), X + 24 * S, Y + 411 * S, (bDungeonRetry ? 438 : 800) * S, 40 * S, S,
-               PC->CanEnterDungeon(Selected));
-
-    // 지역·적·전투 진행 처리
-    if (bDungeonRetry)
-    {
-        DrawButton(TEXT("R 재도전 · ") + FableRPG::RegionName(Adventure->RetryRegion) + TEXT(" · ") +
-                       FableRPG::DifficultyName(Adventure->RetryDifficulty),
-                   TEXT("RetryEncounter"), X + 474 * S, Y + 411 * S, 350 * S, 40 * S, S, PC->CanRetryEncounter());
-    }
-
-    // 화면 표시와 사용자 안내 처리
-    DrawFitted(bDungeonRetry ? TEXT("↑↓ 지역 · ←→ 새 입장 난이도 · E 새 전투 / R 이전 난이도 재도전 · Esc 닫기")
-                             : TEXT("↑↓ 지역 · ←→ 난이도 · E / R 입장 · Esc 닫기"),
-               Muted, X + 24 * S, Y + 462 * S, 800 * S, .57f * S);
+    // 기존 포털 대화 경로도 G 파티 창과 같은 서버 준비 화면을 표시한다.
+    DrawPartyExpedition(PC, GetWorld()->GetGameState<AFableGameState>(), S);
 }
 
 /** 현재 열려 있는 대화 종류 UI를 현재 상태에 맞게 그린다. */
@@ -2396,6 +2469,31 @@ void AFableHUD::NotifyHitBoxClick(FName BoxName)
     if (BoxName == TEXT("PartyOpen"))
     {
         PC->UIToggleParty();
+        return;
+    }
+
+    if (BoxName == TEXT("PartyTabMembers") || BoxName == TEXT("PartyTabExpedition"))
+    {
+        PC->UISelectPartyTab(BoxName == TEXT("PartyTabMembers") ? EFablePartyPanelTab::Members
+                                                                : EFablePartyPanelTab::Expedition);
+        return;
+    }
+
+    if (BoxName == TEXT("PartyReadyTrue") || BoxName == TEXT("PartyReadyFalse"))
+    {
+        PC->UISetPartyReady(BoxName == TEXT("PartyReadyTrue"));
+        return;
+    }
+
+    if (BoxName == TEXT("PartyDepart"))
+    {
+        PC->UIEnterPreparedParty();
+        return;
+    }
+
+    if (BoxName == TEXT("PartyResume"))
+    {
+        PC->UIEnterSelectedDungeon();
         return;
     }
 

@@ -34,6 +34,13 @@ enum class EFableWorkshopTab : uint8
     Stash
 };
 
+/** 파티 구성과 원정 준비 화면을 구분한다. */
+enum class EFablePartyPanelTab : uint8
+{
+    Members,
+    Expedition
+};
+
 /** 플레이어 입력과 UI 요청을 서버 권한의 게임 동작으로 연결하는 컨트롤러. */
 UCLASS()
 class FABLEWOOD_API AFablePlayerController : public APlayerController
@@ -90,10 +97,7 @@ public:
     bool IsDifficultySelectionLocked() const;
 
     /** 선택한 던전 식별자 값을 반환한다. */
-    EFableRegion GetSelectedDungeonId() const
-    {
-        return SelectedDungeonId;
-    }
+    EFableRegion GetSelectedDungeonId() const;
 
     /** 입장 창 열림 여부를 확인한다. */
     bool IsPortalOpen() const
@@ -250,6 +254,73 @@ public:
 
     /** 현재 파티의 파티장 위임을 서버에 요청한다. */
     void UITransferPartyLeader(int32 TargetPlayerId);
+
+    /** 파티 창의 구성·원정 탭을 전환한다. */
+    void UISelectPartyTab(EFablePartyPanelTab Tab);
+
+    /** 포털과 G 키에서 공통으로 사용하는 원정 준비 창을 연다. */
+    void UIOpenPartyExpedition();
+
+    /** 원정 준비 화면이 열려 있는지 반환한다. */
+    bool IsPartyExpeditionOpen() const
+    {
+        return bPartyOpen && PartyPanelTab == EFablePartyPanelTab::Expedition;
+    }
+
+    /** 서버가 복제한 선택에 대해 자기 준비 의사를 명시한다. */
+    void UISetPartyReady(bool bReady);
+
+    /** 현재 서버 준비 명부로 파티장 출발을 요청한다. */
+    void UIEnterPreparedParty();
+
+    /** 선택할 던전·난이도와 관찰한 파티 리비전을 서버에 전달한다. */
+    void UIRequestPartySelection(FGuid PartyId, int32 PreparationRevision, EFableRegion Region,
+                                 EFableDifficulty Difficulty);
+
+    /** 준비할 파티 리비전과 자기 의사를 서버에 전달한다. */
+    void UIRequestPartyReady(FGuid PartyId, int32 PreparationRevision, bool bReady);
+
+    /** 입장할 파티 리비전만 전달하고 목적지는 서버가 결정한다. */
+    void UIRequestPartyEntry(FGuid PartyId, int32 PreparationRevision);
+
+    /** 현재 요청의 서버 응답을 기다리는지 반환한다. */
+    bool IsPartyPreparationPending() const
+    {
+        return PendingPartyRequestId.IsValid();
+    }
+
+    /** 마지막 서버 준비 결과의 안내를 반환한다. */
+    const FString& GetPartyPreparationMessage() const
+    {
+        return PartyPreparationMessage;
+    }
+
+    /** 마지막 준비 결과가 성공 안내인지 반환한다. */
+    bool DidPartyPreparationSucceed() const
+    {
+        return bPartyPreparationSucceeded;
+    }
+
+    /** 마지막 서버 응답이 확인한 준비 리비전을 반환한다. */
+    int32 GetPartyPreparationResultRevision() const
+    {
+        return PartyPreparationResultRevision;
+    }
+
+    /** 파티장이 원정 선택을 변경할 수 있는지 표시한다. */
+    bool CanSelectPartyExpedition() const;
+
+    /** 초대·접속·개인 자격상 준비 버튼을 누를 수 있는지 표시한다. */
+    bool CanSetPartyReady() const;
+
+    /** 현재 선택 리비전에 대한 자기 준비 상태를 반환한다. */
+    bool IsPartyReady() const;
+
+    /** 현재 화면에서 파티장 출발 버튼을 사용할 수 있는지 표시한다. */
+    bool CanEnterPreparedParty() const;
+
+    /** 파티 원정의 현재 준비 상태를 설명한다. */
+    FString GetPartyPreparationStatus() const;
 
     /** UI에서 선택한 선택 스킬 동작을 처리한다. */
     void UISelectSkill(int32 Slot);
@@ -499,6 +570,13 @@ private:
     bool bHelpOpen = false;
     bool bSkillsOpen = false;
     bool bPartyOpen = false;
+    EFablePartyPanelTab PartyPanelTab = EFablePartyPanelTab::Members;
+    FGuid PartyExpeditionAtOpen;
+    FGuid PendingPartyRequestId;
+    bool bPendingPartyEntry = false;
+    bool bPartyPreparationSucceeded = false;
+    FString PartyPreparationMessage;
+    int32 PartyPreparationResultRevision = 0;
     int32 SelectedSkillSlot = 0;
     int32 SkillPanelTab = 0;
     int32 SelectedTalentTier = 2;
@@ -578,6 +656,30 @@ private:
     /** 파티장 위임 권한과 대상의 현재 소속을 서버에서 검증한다. */
     UFUNCTION(Server, Reliable)
     void ServerTransferPartyLeader(int32 TargetPlayerId);
+
+    /** 선택 요청은 요청자 소유권·파티장·현재 리비전을 서버에서 검증한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerSelectPartyExpedition(FGuid RequestId, FGuid PartyId, int32 PreparationRevision, EFableRegion Region,
+                                     EFableDifficulty Difficulty);
+
+    /** 자기 준비 상태만 변경하며 다른 구성원의 준비를 대신 바꾸지 않는다. */
+    UFUNCTION(Server, Reliable)
+    void ServerSetPartyReady(FGuid RequestId, FGuid PartyId, int32 PreparationRevision, bool bReady);
+
+    /** 서버가 전원 준비·이동을 검증한 뒤 출발 결과를 보낸다. */
+    UFUNCTION(Server, Reliable)
+    void ServerEnterPreparedParty(FGuid RequestId, FGuid PartyId, int32 PreparationRevision);
+
+    /** 이미 발급된 자기 원정 참가 증서로 복귀하고 이동 결과를 확인한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerResumePartyExpedition(FGuid RequestId, FGuid PartyId, int32 PreparationRevision);
+
+    /** 해당 요청의 성공·거절 결과를 소유 클라이언트의 준비 화면에 반영한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientPartyPreparationResult(FGuid RequestId, bool bSuccess, int32 PreparationRevision, const FString& Reason);
+
+    /** 서버 요청 후 명부의 실제 리비전과 안내를 응답으로 전달한다. */
+    void ReplyPartyPreparation(FGuid RequestId, bool bSuccess, int32 NoticeBefore);
 
     /** 장비 분해 확인 절차 상태를 해제한다. */
     void ClearDismantleConfirmation();
