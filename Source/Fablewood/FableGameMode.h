@@ -3,11 +3,13 @@
 #include "GameFramework/GameModeBase.h"
 #include "TimerManager.h"
 #include "FableRPGTypes.h"
+#include "FableExpeditionTypes.h"
 #include "FableGameMode.generated.h"
 
 class AFableEnemy;
 class AFableDungeonWorld;
 class AFableMoonwellWorld;
+class AFablePlayerState;
 
 /** 서버의 접속·파티 이동·던전·보스·복구 진행을 관리하는 게임 규칙. */
 UCLASS()
@@ -86,7 +88,36 @@ public:
     /** 살아 있는 요청자가 마을 서비스 범위 안에 있는지 확인한다. */
     bool CanUseTownService(APlayerController* Requester, FVector Location, float Radius = 300.0f) const;
 
+    /** 파티 UUID와 준비 리비전으로 전원 입장을 서버에서 원자적으로 확정한다. */
+    bool RequestStartExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision);
+
+    /** 현재 단일 원정의 불변 참가 증서를 반환한다. */
+    const FFableExpeditionTicket& GetActiveExpedition() const
+    {
+        return ActiveExpedition;
+    }
+
+    /** 명부와 실제 플레이어 binding이 같은 원정 참가자를 나타내는지 확인한다. */
+    bool IsExpeditionParticipant(const AFablePlayerState* Profile) const;
+
+    /** 마을의 다른 파티 편집을 막지 않고 해당 참가 파티만 잠근다. */
+    bool IsPartyExpeditionActive(FGuid PartyId) const;
+
 private:
+    friend struct FFablePartyTestAccess;
+
+    /** 필드에서는 전체 연결, 원정에서는 확정한 키의 현재 연결만 조회한다. */
+    TArray<APlayerController*> GetEncounterPlayers() const;
+
+    /** 참가 증서의 모든 플레이어와 입장 조건을 다시 검사한다. */
+    bool ValidateAdmission(const FFableExpeditionTicket& Ticket, TArray<APlayerController*>& OutPlayers) const;
+
+    /** 회복 효과 없이 전원 도착을 확인하고 실패하면 기존 위치로 되돌린다. */
+    bool MoveAdmissionParticipants(const FFableExpeditionTicket& Ticket, const TArray<APlayerController*>& Players);
+
+    /** 원정이 끝난 참가자 binding과 다음 시도의 준비 상태를 초기화한다. */
+    void FinishExpedition();
+
     /** 현재 연결이 차지한 파티 슬롯 값을 반환한다. */
     int32 GetConnectionSlot(AController* Player) const;
 
@@ -148,6 +179,8 @@ private:
     bool MovePlayerToCheckpoint(AController* Player, EFableRegion Region, int32 Slot);
 
     TSet<TWeakObjectPtr<AFableEnemy>> ActiveEnemies;
+    // 처치된 표시 액터까지 해당 전투가 직접 정리하며 다른 지역의 적을 지우지 않는다.
+    TSet<TWeakObjectPtr<AFableEnemy>> SpawnedEncounterEnemies;
     TWeakObjectPtr<AFableEnemy> ActiveBoss;
     UPROPERTY()
     TObjectPtr<AFableDungeonWorld> DungeonWorld;
@@ -168,4 +201,6 @@ private:
     bool bRetryAfterRecovery = false;
     double NextRecoveryAttemptTime = 0.0;
     double NextIndividualRescueTime = 0.0;
+    FFableExpeditionTicket ActiveExpedition;
+    bool bAdmissionPending = false;
 };

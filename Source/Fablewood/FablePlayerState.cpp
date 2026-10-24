@@ -26,6 +26,7 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFablePlayerState, PartyPlayerKey);
     DOREPLIFETIME(AFablePlayerState, PartyId);
+    DOREPLIFETIME(AFablePlayerState, ActiveExpeditionId);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendPlayerId, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendReady, COND_OwnerOnly);

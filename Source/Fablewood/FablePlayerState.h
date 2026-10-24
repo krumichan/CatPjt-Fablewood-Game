@@ -13,6 +13,8 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
 {
     GENERATED_BODY()
 
+    friend struct FFablePartyTestAccess;
+
 public:
     /** 백엔드 식별자와 분리된 현재 서버의 공개 파티 식별 정보. */
     UPROPERTY(Replicated, BlueprintReadOnly)
@@ -20,6 +22,10 @@ public:
 
     UPROPERTY(Replicated, BlueprintReadOnly)
     FGuid PartyId;
+
+    /** 서버 참가 증서와 연결되는 현재 원정. 영구 저장 데이터에는 포함하지 않는다. */
+    UPROPERTY(Replicated, BlueprintReadOnly)
+    FGuid ActiveExpeditionId;
 
     /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFablePlayerState();

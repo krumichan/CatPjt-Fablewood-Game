@@ -1,6 +1,7 @@
 #include "FablePartyManager.h"
 #include "FableCharacter.h"
 #include "FableGameState.h"
+#include "FableGameMode.h"
 #include "FablePlayerState.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -178,6 +179,8 @@ void AFablePartyManager::RegisterPlayer(APlayerController* Player)
     }
 
     Profile->PartyPlayerKey = PublicKey;
+    const TWeakObjectPtr<APlayerController>* PreviousConnection = CurrentConnections.Find(PublicKey);
+    const bool bSameConnection = PreviousConnection && PreviousConnection->Get() == Player;
     CurrentConnections.Add(PublicKey, Player);
     ExpireEntries();
     for (FFablePartyRecord& Party : Parties)
@@ -186,11 +189,17 @@ void AFablePartyManager::RegisterPlayer(APlayerController* Player)
         {
             if (Member.PlayerKey == PublicKey)
             {
+                const bool bChanged =
+                    !bSameConnection || !Member.bConnected || Member.PlayerId != Profile->GetPlayerId();
                 Member.PlayerId = Profile->GetPlayerId();
                 Member.bConnected = true;
                 Member.ReconnectDeadline = 0;
-                ++Party.Revision;
-                Profile->SetNotice(TEXT("기존 파티에 다시 합류했습니다."));
+                if (bChanged)
+                {
+                    ++Party.Revision;
+                    ResetReadiness(Party);
+                    Profile->SetNotice(TEXT("기존 파티에 다시 합류했습니다."));
+                }
             }
         }
 
@@ -259,6 +268,7 @@ void AFablePartyManager::DisconnectPlayer(APlayerController* Player)
                 Member.PlayerId = INDEX_NONE;
                 Member.ReconnectDeadline = GetWorld()->GetTimeSeconds() + ReconnectGrace;
                 ++Party.Revision;
+                ResetReadiness(Party);
             }
         }
 
@@ -274,9 +284,20 @@ void AFablePartyManager::DisconnectPlayer(APlayerController* Player)
     Publish();
 }
 
-/** 1단계에서는 기존 전투가 진행 중이면 명부 변경을 막는다. */
-bool AFablePartyManager::CanEditMembership() const
+/** 원정 참가 파티는 잠그고 마을에 남은 다른 파티의 편집은 허용한다. */
+bool AFablePartyManager::CanEditMembership(const AFablePlayerState* Profile) const
 {
+    if (Profile && Profile->ActiveExpeditionId.IsValid())
+    {
+        return false;
+    }
+
+    const AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
+    if (Mode && Mode->GetActiveExpedition().IsValid())
+    {
+        return Profile && !Mode->IsPartyExpeditionActive(Profile->PartyId) && !Mode->IsExpeditionParticipant(Profile);
+    }
+
     const AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
     return !State || (State->ActiveRegion == EFableRegion::Village && !State->bPartyRecoveryPending &&
                       !(State->AdventureStage == EFableAdventureStage::Forest && !State->bObjectiveComplete));
@@ -346,6 +367,7 @@ void AFablePartyManager::ExpireEntries()
                 }) > 0)
         {
             ++Party.Revision;
+            ResetReadiness(Party);
             RepairLeader(Party);
             bChanged = true;
         }
@@ -367,7 +389,7 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
                                        FGuid InviteId)
 {
     AFablePlayerState* Profile = ValidatePlayer(Requester);
-    if (!Profile || Profile->PartyPlayerKey.IsEmpty())
+    if (!Profile || Profile->PartyPlayerKey.IsEmpty() || GetConnectedPlayer(Profile->PartyPlayerKey) != Requester)
     {
         return false;
     }
@@ -381,7 +403,7 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
 
     LastRequestTimes.Add(Requester, Now);
     ExpireEntries();
-    if (!CanEditMembership())
+    if (!CanEditMembership(Profile))
     {
         return Reject(Profile, TEXT("마을에서 파티를 변경할 수 있습니다."));
     }
@@ -439,6 +461,7 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
             Member.bConnected = true;
             TargetParty->Members.Add(Member);
             ++TargetParty->Revision;
+            ResetReadiness(*TargetParty);
         }
 
         Invitations.RemoveAll(
@@ -462,6 +485,7 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
                 return Member.PlayerKey == Key;
             });
         ++Party->Revision;
+        ResetReadiness(*Party);
         RepairLeader(*Party);
         Parties.RemoveAll(
             [](const FFablePartyRecord& Entry)
@@ -493,6 +517,7 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
 
             Party->LeaderKey = Other->PartyPlayerKey;
             ++Party->Revision;
+            ResetReadiness(*Party);
             Profile->SetNotice(TEXT("파티장을 위임했습니다."));
         }
         else
@@ -524,4 +549,226 @@ bool AFablePartyManager::ExecuteAction(APlayerController* Requester, EFableParty
 
     Publish();
     return true;
+}
+
+/** 명부나 선택이 바뀌면 이전 선택에 대한 동의를 재사용하지 않는다. */
+void AFablePartyManager::ResetReadiness(FFablePartyRecord& Party)
+{
+    Party.PreparationRevision = Party.PreparationRevision < MAX_int32 ? Party.PreparationRevision + 1 : 1;
+
+    for (FFablePartyMember& Member : Party.Members)
+    {
+        Member.ReadyRevision = 0;
+    }
+}
+
+/** 준비 상태 초기화는 서버의 원정 종료 경로만 호출한다. */
+void AFablePartyManager::InvalidatePreparation(FGuid PartyId)
+{
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    for (FFablePartyRecord& Party : Parties)
+    {
+        if (Party.PartyId == PartyId)
+        {
+            ResetReadiness(Party);
+            Publish();
+            return;
+        }
+    }
+}
+
+/** 이전 접속 객체를 배제하고 실제로 인증된 현재 연결만 반환한다. */
+APlayerController* AFablePartyManager::GetConnectedPlayer(const FString& PlayerKey) const
+{
+    const TWeakObjectPtr<APlayerController>* Current = CurrentConnections.Find(PlayerKey);
+    APlayerController* Player = Current ? Current->Get() : nullptr;
+    const AFablePlayerState* Profile = ValidatePlayer(Player);
+    return Profile && Profile->PartyPlayerKey == PlayerKey ? Player : nullptr;
+}
+
+/** 클라이언트가 알고 있던 파티·선택 리비전을 서버 정본과 비교한다. */
+FFablePartyRecord* AFablePartyManager::ValidatePreparation(APlayerController* Requester, FGuid PartyId,
+                                                           int32 ExpectedRevision, bool bLeaderOnly)
+{
+    // 이전 접속 객체와 저장 중인 프로필은 새 동의를 제출하지 못한다.
+    AFablePlayerState* Profile = ValidatePlayer(Requester);
+    if (!Profile || Profile->PartyPlayerKey.IsEmpty() || GetConnectedPlayer(Profile->PartyPlayerKey) != Requester)
+    {
+        return nullptr;
+    }
+    if (Profile->IsBackendSavePending())
+    {
+        Reject(Profile, TEXT("캐릭터 저장을 마친 뒤 다시 요청하세요."));
+        return nullptr;
+    }
+
+    // UUID와 준비 리비전 모두 서버의 현재 정본과 일치해야 한다.
+    ExpireEntries();
+    FFablePartyRecord* Party = const_cast<FFablePartyRecord*>(GetPartyForMember(Profile->PartyPlayerKey));
+    if (!Party || !PartyId.IsValid() || Party->PartyId != PartyId || Profile->PartyId != PartyId)
+    {
+        Reject(Profile, TEXT("현재 파티 정보와 요청한 파티가 일치하지 않습니다."));
+        return nullptr;
+    }
+    if (Party->PreparationRevision != ExpectedRevision)
+    {
+        Reject(Profile, TEXT("파티 준비 상태가 바뀌었습니다. 새 상태를 확인하세요."));
+        return nullptr;
+    }
+    if (!CanEditMembership(Profile) || Profile->ActiveExpeditionId.IsValid())
+    {
+        Reject(Profile, TEXT("원정 중에는 파티 준비를 변경할 수 없습니다."));
+        return nullptr;
+    }
+    if (bLeaderOnly && Party->LeaderKey != Profile->PartyPlayerKey)
+    {
+        Reject(Profile, TEXT("파티장만 원정을 선택하거나 시작할 수 있습니다."));
+        return nullptr;
+    }
+
+    return Party;
+}
+
+/** 같은 선택을 반복한 요청은 다른 구성원의 동의를 지우지 않는다. */
+bool AFablePartyManager::SelectExpedition(APlayerController* Requester, FGuid PartyId,
+                                          int32 ExpectedPreparationRevision, EFableRegion Region,
+                                          EFableDifficulty Difficulty)
+{
+    FFablePartyRecord* Party = ValidatePreparation(Requester, PartyId, ExpectedPreparationRevision, true);
+    if (!Party)
+    {
+        return false;
+    }
+    if ((Region != EFableRegion::RootRuins && Region != EFableRegion::Moonwell) ||
+        (Difficulty != EFableDifficulty::Normal && Difficulty != EFableDifficulty::Hard))
+    {
+        return Reject(ValidatePlayer(Requester), TEXT("유효한 던전과 난이도를 선택하세요."));
+    }
+
+    if (Party->SelectedRegion != Region || Party->SelectedDifficulty != Difficulty)
+    {
+        Party->SelectedRegion = Region;
+        Party->SelectedDifficulty = Difficulty;
+        ResetReadiness(*Party);
+    }
+
+    ValidatePlayer(Requester)->SetNotice(TEXT("원정 목적지를 선택했습니다. 모두 준비를 확인하세요."));
+    Publish();
+    return true;
+}
+
+/** 준비 확인 자체는 선택 리비전을 변경하지 않는 멱등 요청이다. */
+bool AFablePartyManager::SetExpeditionReady(APlayerController* Requester, FGuid PartyId,
+                                            int32 ExpectedPreparationRevision, bool bReady)
+{
+    FFablePartyRecord* Party = ValidatePreparation(Requester, PartyId, ExpectedPreparationRevision, false);
+    AFablePlayerState* Profile = ValidatePlayer(Requester);
+    if (!Party || !Profile)
+    {
+        return false;
+    }
+
+    // 초대 수락으로 명부가 바뀔 수 있는 동안에는 새 동의를 확정하지 않는다.
+    if (bReady && Invitations.ContainsByPredicate(
+                      [&](const FFablePartyInvite& Invite)
+                      {
+                          return Invite.PartyId == PartyId;
+                      }))
+    {
+        return Reject(Profile, TEXT("남아 있는 초대를 먼저 처리한 뒤 준비하세요."));
+    }
+
+    FFablePartyMember* Member = Party->Members.FindByPredicate(
+        [&](const FFablePartyMember& Entry)
+        {
+            return Entry.PlayerKey == Profile->PartyPlayerKey;
+        });
+    const AFableCharacter* Hero = Requester->GetPawn<AFableCharacter>();
+    if (!Member || !Member->bConnected || GetConnectedPlayer(Member->PlayerKey) != Requester ||
+        (bReady &&
+         (!Hero || !Hero->IsAlive() || Hero->GetController() != Requester ||
+          Hero->GetPlayerState<AFablePlayerState>() != Profile || !Profile->IsRegionEligible(Party->SelectedRegion) ||
+          !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))))
+    {
+        return Reject(Profile, TEXT("마을에서 생존 상태와 해당 던전 의뢰를 확인한 뒤 준비하세요."));
+    }
+
+    Member->ReadyRevision = bReady ? Party->PreparationRevision : 0;
+    Profile->SetNotice(bReady ? TEXT("현재 원정 선택에 준비했습니다.") : TEXT("원정 준비를 취소했습니다."));
+    Publish();
+    return true;
+}
+
+/** 완성된 명부의 모든 현재 연결과 동의를 한 번 더 검사한다. */
+bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid PartyId,
+                                            int32 ExpectedPreparationRevision, FFableExpeditionTicket& OutTicket)
+{
+    // 완료되지 않은 초대와 정원을 먼저 검사해 입장 도중 명부가 늘어나지 않도록 한다.
+    OutTicket = FFableExpeditionTicket();
+    FFablePartyRecord* Party = ValidatePreparation(Requester, PartyId, ExpectedPreparationRevision, true);
+    AFablePlayerState* Profile = ValidatePlayer(Requester);
+    if (!Party || !Profile)
+    {
+        return false;
+    }
+
+    if (Party->Members.IsEmpty() || Party->Members.Num() > MaxMembers ||
+        Invitations.ContainsByPredicate(
+            [&](const FFablePartyInvite& Invite)
+            {
+                return Invite.PartyId == PartyId;
+            }))
+    {
+        return Reject(Profile, TEXT("파티 명부와 남아 있는 초대를 먼저 확인하세요."));
+    }
+
+    // 파티 UI의 준비 표시는 신뢰하지 않고 전원의 현재 연결·의뢰·생존을 재검사한다.
+    TSet<FString> UniqueKeys;
+    for (const FFablePartyMember& Member : Party->Members)
+    {
+        APlayerController* Player = GetConnectedPlayer(Member.PlayerKey);
+        const AFablePlayerState* Other = ValidatePlayer(Player);
+        const AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
+        if (!Member.bConnected || !Other || !Hero || !Hero->IsAlive() || Hero->GetController() != Player ||
+            Hero->GetPlayerState<AFablePlayerState>() != Other || Other->PartyId != PartyId ||
+            Other->IsBackendSavePending() || Other->ActiveExpeditionId.IsValid() ||
+            !Other->IsRegionEligible(Party->SelectedRegion) ||
+            !FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) || Member.PlayerKey.IsEmpty() ||
+            UniqueKeys.Contains(Member.PlayerKey))
+        {
+            return Reject(Profile, TEXT("모든 파티원이 접속·생존·저장·던전 의뢰 조건을 만족해야 합니다."));
+        }
+        if (Member.ReadyRevision != Party->PreparationRevision)
+        {
+            return Reject(Profile, TEXT("모든 파티원이 현재 선택에 준비해야 합니다."));
+        }
+
+        UniqueKeys.Add(Member.PlayerKey);
+        OutTicket.MemberKeys.Add(Member.PlayerKey);
+    }
+
+    // 전원 동의가 확인된 뒤에만 서버가 새 원정 UUID와 불변 키 명부를 발급한다.
+    OutTicket.ExpeditionId = FGuid::NewGuid();
+    OutTicket.PartyId = PartyId;
+    OutTicket.Region = Party->SelectedRegion;
+    OutTicket.Difficulty = Party->SelectedDifficulty;
+    OutTicket.PreparationRevision = Party->PreparationRevision;
+    return true;
+}
+
+/** 실제 서버 GameMode만 이동·입장 잠금·전투 시작을 확정한다. */
+bool AFablePartyManager::StartExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision)
+{
+    if (!ValidatePlayer(Requester))
+    {
+        return false;
+    }
+
+    AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
+    return Mode ? Mode->RequestStartExpedition(Requester, PartyId, ExpectedPreparationRevision)
+                : Reject(ValidatePlayer(Requester), TEXT("원정 서버가 아직 준비되지 않았습니다."));
 }

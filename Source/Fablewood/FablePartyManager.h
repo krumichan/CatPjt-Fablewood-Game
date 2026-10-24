@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "FableExpeditionTypes.h"
 #include "TimerManager.h"
 #include "FablePartyManager.generated.h"
 
@@ -40,6 +41,10 @@ struct FFablePartyMember
 
     UPROPERTY()
     float ReconnectDeadline = 0;
+
+    /** 이번 준비 리비전에 명시적으로 동의한 경우에만 준비 상태가 된다. */
+    UPROPERTY()
+    int32 ReadyRevision = 0;
 };
 
 /** 서버가 소유하는 2인 파티의 식별자와 구성원 명부. */
@@ -59,6 +64,15 @@ struct FFablePartyRecord
 
     UPROPERTY()
     int32 Revision = 1;
+
+    UPROPERTY()
+    EFableRegion SelectedRegion = EFableRegion::RootRuins;
+
+    UPROPERTY()
+    EFableDifficulty SelectedDifficulty = EFableDifficulty::Normal;
+
+    UPROPERTY()
+    int32 PreparationRevision = 1;
 };
 
 /** 수신자·파티·유효 시간이 고정된 일회성 초대장. */
@@ -119,6 +133,27 @@ public:
     bool ExecuteAction(APlayerController* Requester, EFablePartyAction Action, int32 TargetPlayerId = INDEX_NONE,
                        FGuid InviteId = FGuid());
 
+    /** 파티장만 현재 준비 리비전의 목적지와 난이도를 선택한다. */
+    bool SelectExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                          EFableRegion Region, EFableDifficulty Difficulty);
+
+    /** 토글 대신 명시한 준비 값을 같은 리비전에 적용한다. */
+    bool SetExpeditionReady(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                            bool bReady);
+
+    /** 파티장의 입장 의도를 실제 서버 원정 규칙에 전달한다. */
+    bool StartExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision);
+
+    /** 연결·명부·동의를 재검사한 뒤 새 불변 참가 증서를 발급한다. */
+    bool BuildReadySnapshot(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
+                            FFableExpeditionTicket& OutTicket);
+
+    /** 서버가 소유한 현재 연결만 불변 키로 반환한다. */
+    APlayerController* GetConnectedPlayer(const FString& PlayerKey) const;
+
+    /** 전멸·귀환 뒤 다음 시도에 이전 동의가 재사용되지 않도록 초기화한다. */
+    void InvalidatePreparation(FGuid PartyId);
+
     /** 공개 식별자로 구성원이 속한 파티를 찾는다. */
     const FFablePartyRecord* GetPartyForMember(const FString& PlayerKey) const;
 
@@ -165,7 +200,14 @@ private:
     void RepairLeader(FFablePartyRecord& Party);
 
     /** 전투 중 구성 변경을 제한한다. */
-    bool CanEditMembership() const;
+    bool CanEditMembership(const AFablePlayerState* Profile) const;
+
+    /** 선택·구성·연결 변경을 이전 동의와 구분한다. */
+    void ResetReadiness(FFablePartyRecord& Party);
+
+    /** 소유권·파티 UUID·현재 리비전과 편집 가능 상태를 공통 검사한다. */
+    FFablePartyRecord* ValidatePreparation(APlayerController* Requester, FGuid PartyId, int32 ExpectedRevision,
+                                           bool bLeaderOnly);
 
     FTimerHandle ExpiryTimer;
     TMap<TWeakObjectPtr<APlayerController>, double> LastRequestTimes;
