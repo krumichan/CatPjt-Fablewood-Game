@@ -1,4 +1,4 @@
-#include "FablePlayerController.h"
+﻿#include "FablePlayerController.h"
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
 #include "FableGameMode.h"
@@ -355,6 +355,31 @@ namespace
                Adventure->ActiveRegion == EFableRegion::Village && !Adventure->bPartyRecoveryPending &&
                !(Adventure->AdventureStage == EFableAdventureStage::Forest && !Adventure->bObjectiveComplete);
     }
+
+    /** 종료 결과와 현재 명부가 같은 재도전 준비에서만 기존 원정 위치를 허용한다. */
+    bool IsRetryPreparationSafe(const AFablePlayerController* PC)
+    {
+        const FFablePartyRecord* Party = FindControllerParty(PC);
+        const AFablePlayerState* Profile = PC ? PC->GetPlayerState<AFablePlayerState>() : nullptr;
+        const auto* Result = PC ? PC->GetDisplayedExpeditionResult() : nullptr;
+        if (!Party || !Profile || !Result || !Result->IsTerminal() || !Result->bSaveReady ||
+            (Result->bRequiresBackendCommit && !Result->bAllGrantsCommitted) ||
+            Party->RetrySourceExpeditionId != Result->Ticket.ExpeditionId ||
+            Party->RetrySourceCompletionId != Result->CompletionId || Party->PartyId != Result->Ticket.PartyId)
+        {
+            return false;
+        }
+        if (!Profile->ActiveExpeditionId.IsValid())
+        {
+            return IsExpeditionPreparationSafe(PC);
+        }
+
+        const auto View = FableAdventure::For(PC);
+        const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+        return Profile->ActiveExpeditionId == Party->RetrySourceExpeditionId && Encounter &&
+               !Encounter->IsReturning() && View->AdventureStage == EFableAdventureStage::Cleared &&
+               !View->bPartyRecoveryPending;
+    }
 }
 
 /** 플레이어의 UI·상호작용·전투 입력을 등록한다. */
@@ -412,6 +437,13 @@ bool AFablePlayerController::InputKey(const FInputKeyEventArgs& Params)
     if (Params.Key == EKeys::G && Params.Event == IE_Pressed && !bFrontEndOpen)
     {
         UIToggleParty();
+        return true;
+    }
+
+    // 파티 탭과 결과 장비 선택 키는 창 내부에서만 소비한다.
+    if (bPartyOpen && Params.Event == IE_Pressed && Params.Key == EKeys::Tab)
+    {
+        UISelectPartyTab(static_cast<EFablePartyPanelTab>((int32(PartyPanelTab) + 1) % 3));
         return true;
     }
 
@@ -710,6 +742,21 @@ void AFablePlayerController::UIClosePanels()
 void AFablePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
+
+    // 종료 결과의 자동 열기는 로컬 표시만 바꾸며 지급·확인 요청을 대신하지 않는다.
+    const AFablePlayerState* ResultProfile = GetPlayerState<AFablePlayerState>();
+    const auto* PersonalResult = GetDisplayedExpeditionResult();
+    const auto* OnlineFlow = GetGameInstance() ? GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>() : nullptr;
+    if (IsLocalController() && !bFrontEndOpen && !bOnlineLeaveInputBlocked && ResultProfile &&
+        ResultProfile->bProfileLoaded && !ResultProfile->IsBackendClosing() && GetPawn() && PersonalResult &&
+        PersonalResult->IsTerminal() && !PersonalResult->bAcknowledged &&
+        !AutoOpenedCompletionIds.Contains(PersonalResult->CompletionId) &&
+        (!OnlineFlow || !OnlineFlow->IsOverlayBlocking()))
+    {
+        AutoOpenedCompletionIds.Add(PersonalResult->CompletionId);
+        SelectedResultItemIndex = 0;
+        OpenExpeditionResultPanel();
+    }
 
     // 파티원도 서버가 전원 입장 후 발급한 증서와 실제 도착을 확인해야 창을 닫는다.
     if (bPartyOpen)
@@ -1251,12 +1298,17 @@ void AFablePlayerController::UIToggleParty()
 /** 파티 창의 구성·원정 탭을 전환한다. */
 void AFablePlayerController::UISelectPartyTab(EFablePartyPanelTab Tab)
 {
-    if (!bPartyOpen || (Tab != EFablePartyPanelTab::Members && Tab != EFablePartyPanelTab::Expedition))
+    if (!bPartyOpen || (Tab != EFablePartyPanelTab::Members && Tab != EFablePartyPanelTab::Expedition &&
+                        Tab != EFablePartyPanelTab::Result))
     {
         return;
     }
 
     PartyPanelTab = Tab;
+    if (Tab == EFablePartyPanelTab::Result)
+    {
+        UIOpenExpeditionResult();
+    }
 }
 
 /** 포털과 G 키에서 공통으로 사용하는 원정 준비 창을 연다. */
@@ -1286,6 +1338,12 @@ void AFablePlayerController::UISetPartyReady(bool bReady)
 void AFablePlayerController::UIEnterPreparedParty()
 {
     const FFablePartyRecord* Party = FindControllerParty(this);
+    if (Party && IsPartyRetryPreparation())
+    {
+        UIRequestRetryExpedition(Party->PartyId, Party->PreparationRevision, Party->RetrySourceExpeditionId,
+                                 Party->RetrySourceCompletionId);
+        return;
+    }
     UIRequestPartyEntry(Party ? Party->PartyId : FGuid(), Party ? Party->PreparationRevision : 0);
 }
 
@@ -1341,8 +1399,8 @@ bool AFablePlayerController::CanSelectPartyExpedition() const
 {
     const FFablePartyRecord* Party = FindControllerParty(this);
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
-    return Party && Profile && Party->LeaderKey == Profile->PartyPlayerKey && !IsPartyPreparationPending() &&
-           IsExpeditionPreparationSafe(this);
+    return Party && Profile && !IsPartyRetryPreparation() && Party->LeaderKey == Profile->PartyPlayerKey &&
+           !IsPartyPreparationPending() && IsExpeditionPreparationSafe(this);
 }
 
 /** 초대·접속·개인 자격상 준비 버튼을 누를 수 있는지 표시한다. */
@@ -1353,8 +1411,9 @@ bool AFablePlayerController::CanSetPartyReady() const
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
     if (!Party || !Profile || !Hero || !Hero->IsAlive() || !Profile->bProfileLoaded ||
-        !Profile->IsRegionEligible(Party->SelectedRegion) || IsPartyPreparationPending() ||
-        !IsExpeditionPreparationSafe(this) || HasExpeditionInvitation(Manager, Party) ||
+        !Profile->IsExpeditionEligible(Party->SelectedRegion) || IsPartyPreparationPending() ||
+        !(IsPartyRetryPreparation() ? IsRetryPreparationSafe(this) : IsExpeditionPreparationSafe(this)) ||
+        HasExpeditionInvitation(Manager, Party) ||
         (Profile->IsBackendEnabled() && (!Profile->IsBackendReady() || Profile->IsBackendSavePending())))
     {
         return false;
@@ -1385,7 +1444,13 @@ bool AFablePlayerController::IsPartyReady() const
 bool AFablePlayerController::CanEnterPreparedParty() const
 {
     const FFablePartyRecord* Party = FindControllerParty(this);
-    if (!Party || !CanSelectPartyExpedition() || !CanSetPartyReady() || NearestService(this) != EFableService::Portal)
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!Party || !Profile || Party->LeaderKey != Profile->PartyPlayerKey || !CanSetPartyReady())
+    {
+        return false;
+    }
+    if ((!IsPartyRetryPreparation() && !CanSelectPartyExpedition()) ||
+        (!Profile->ActiveExpeditionId.IsValid() && NearestService(this) != EFableService::Portal))
     {
         return false;
     }
@@ -1409,9 +1474,10 @@ FString AFablePlayerController::GetPartyPreparationStatus() const
         return TEXT("먼저 파티 구성 탭에서 파티를 만드세요. 혼자 만든 파티도 준비 후 출발할 수 있습니다.");
     }
 
-    if (Profile && Profile->ActiveExpeditionId.IsValid())
+    if (Profile && Profile->ActiveExpeditionId.IsValid() && !IsPartyRetryPreparation())
     {
-        return TEXT("현재 원정이 진행 중입니다. 새 던전 선택과 준비 변경은 원정을 마친 뒤 이용하세요.");
+        return CanSetAbandonConsent() ? GetAbandonConsentStatus()
+                                      : TEXT("원정이 끝났습니다. 결과 탭에서 보상과 재도전을 확인하세요.");
     }
 
     if (HasExpeditionInvitation(Manager, Party))
@@ -1419,7 +1485,7 @@ FString AFablePlayerController::GetPartyPreparationStatus() const
         return TEXT("보낸 초대의 응답을 기다리고 있습니다. 수락·거절 또는 만료 후 준비할 수 있습니다.");
     }
 
-    if (!IsExpeditionPreparationSafe(this))
+    if (!(IsPartyRetryPreparation() ? IsRetryPreparationSafe(this) : IsExpeditionPreparationSafe(this)))
     {
         return TEXT("마을의 안전한 상태에서 원정을 준비하세요. 다른 전투와 구조가 끝날 때까지 기다리세요.");
     }
@@ -1440,6 +1506,13 @@ FString AFablePlayerController::GetPartyPreparationStatus() const
         return FString::Printf(
             TEXT("준비 %d / %d명 · 각자 준비 버튼을 누르세요. 선택이나 구성이 바뀌면 준비가 해제됩니다."), ReadyCount,
             Party->Members.Num());
+    }
+
+    if (IsPartyRetryPreparation())
+    {
+        return Profile && !Profile->ActiveExpeditionId.IsValid() && NearestService(this) != EFableService::Portal
+                   ? TEXT("전원 재도전 준비 완료 · 파티장이 마을의 원정 포털 가까이에서 출발하세요.")
+                   : TEXT("전원 재도전 준비 완료 · 파티장이 출발하면 새로운 원정으로 함께 이동합니다.");
     }
 
     return NearestService(this) == EFableService::Portal
@@ -1643,6 +1716,495 @@ void AFablePlayerController::ClientPartyPreparationResult_Implementation(FGuid R
     {
         UIClosePanels();
     }
+}
+
+/** 보상 조회 없이 결과 창에 입력 초점만 둔다. */
+void AFablePlayerController::OpenExpeditionResultPanel()
+{
+    if (bFrontEndOpen || bOnlineLeaveInputBlocked)
+    {
+        return;
+    }
+
+    UIClosePanels();
+    bPartyOpen = true;
+    PartyPanelTab = EFablePartyPanelTab::Result;
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    PartyExpeditionAtOpen = Profile ? Profile->ActiveExpeditionId : FGuid();
+    ApplyUIMode();
+}
+
+/** 본인에게 복제된 결과만 반환하고 잘못된 수신자 정보는 표시하지 않는다. */
+const FFablePersonalExpeditionResult* AFablePlayerController::GetDisplayedExpeditionResult() const
+{
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!Profile)
+    {
+        return nullptr;
+    }
+
+    const FFablePersonalExpeditionResult& Result = Profile->GetExpeditionResult();
+    return Result.IsValid() && Result.RecipientPublicKey == Profile->PartyPlayerKey ? &Result : nullptr;
+}
+
+/** 화면 확인용 식별자는 자동 검증에서만 사용하고 플레이어에게 출력하지 않는다. */
+FGuid AFablePlayerController::GetDisplayedResultCompletionId() const
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    return Result ? Result->CompletionId : FGuid();
+}
+
+/** 실제 개인 영수증을 조회하는 결과 창을 열고 이전 화면의 보상을 재계산하지 않는다. */
+void AFablePlayerController::UIOpenExpeditionResult(FGuid ExpeditionId)
+{
+    OpenExpeditionResultPanel();
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    if (!ExpeditionId.IsValid())
+    {
+        ExpeditionId = Result ? Result->Ticket.ExpeditionId : Profile ? Profile->ActiveExpeditionId : FGuid();
+    }
+    if (ExpeditionId.IsValid())
+    {
+        UIRequestExpeditionResult(ExpeditionId);
+    }
+}
+
+/** 별도 결과 요청의 상관 ID와 안내를 준비한다. */
+bool AFablePlayerController::BeginExpeditionAction(const FString& Message)
+{
+    if (!bPartyOpen || bOnlineLeaveInputBlocked || IsExpeditionActionPending())
+    {
+        return false;
+    }
+
+    PendingExpeditionActionId = FGuid::NewGuid();
+    bExpeditionActionSucceeded = false;
+    ExpeditionActionMessage = Message;
+    return true;
+}
+
+/** 현재 개인 결과를 명시한 원정 UUID로 다시 요청한다. */
+void AFablePlayerController::UIRequestExpeditionResult(FGuid ExpeditionId)
+{
+    if (BeginExpeditionAction(TEXT("원정 기록을 확인하고 있습니다.")))
+    {
+        ServerRequestExpeditionResult(PendingExpeditionActionId, ExpeditionId);
+    }
+}
+
+/** 현재 보이는 종료 결과를 읽었다는 확인만 서버에 보낸다. */
+void AFablePlayerController::UIAcknowledgeExpeditionResult()
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    if (Result)
+    {
+        UIRequestAcknowledgeExpeditionResult(Result->Ticket.ExpeditionId, Result->CompletionId, Result->ResultRevision);
+    }
+}
+
+/** 지연된 화면의 결과 확인도 같은 제품 RPC를 사용한다. */
+void AFablePlayerController::UIRequestAcknowledgeExpeditionResult(FGuid ExpeditionId, FGuid CompletionId,
+                                                                  int32 ResultRevision)
+{
+    if (BeginExpeditionAction(TEXT("결과 확인을 기록하고 있습니다.")))
+    {
+        ServerAcknowledgeExpeditionResult(PendingExpeditionActionId, ExpeditionId, CompletionId, ResultRevision);
+    }
+}
+
+/** 현재 서버 선택이 명시적인 재도전 준비인지 반환한다. */
+bool AFablePlayerController::IsPartyRetryPreparation() const
+{
+    const FFablePartyRecord* Party = FindControllerParty(this);
+    return Party && Party->RetrySourceExpeditionId.IsValid() && Party->RetrySourceCompletionId.IsValid();
+}
+
+/** 표시된 개인 결과로 재도전 준비를 시작할 수 있는지 안내한다. */
+bool AFablePlayerController::CanPrepareExpeditionRetry() const
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    const FFablePartyRecord* Party = FindControllerParty(this);
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
+    const auto View = FableAdventure::For(this);
+    const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+    if (Profile && Profile->ActiveExpeditionId.IsValid() &&
+        (!Result || Profile->ActiveExpeditionId != Result->Ticket.ExpeditionId || !Encounter ||
+         Encounter->IsReturning() || View->AdventureStage != EFableAdventureStage::Cleared))
+    {
+        return false;
+    }
+
+    return Result && Result->IsTerminal() && Result->bAcknowledged && Result->bSaveReady &&
+           (!Result->bRequiresBackendCommit || Result->bAllGrantsCommitted) && !Result->RetryExpeditionId.IsValid() &&
+           Party && Profile && Hero && Hero->IsAlive() && Party->PartyId == Result->Ticket.PartyId &&
+           (Party->LeaderKey == Profile->PartyPlayerKey ||
+            (Party->RetrySourceExpeditionId == Result->Ticket.ExpeditionId &&
+             Party->RetrySourceCompletionId == Result->CompletionId)) &&
+           !IsPartyPreparationPending() && !IsExpeditionActionPending() &&
+           (!Profile->IsBackendEnabled() || (Profile->IsBackendReady() && !Profile->IsBackendSavePending()));
+}
+
+/** 표시된 결과를 바탕으로 별도의 명시적 재도전 준비 창을 연다. */
+void AFablePlayerController::UIBeginExpeditionRetry()
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    const FFablePartyRecord* Party = FindControllerParty(this);
+    if (!Result || !Party)
+    {
+        return;
+    }
+
+    // 재도전 키 입력도 본인이 결과를 명시적으로 확인하기 전에는 준비 요청을 보내지 않는다.
+    if (!Result->bAcknowledged)
+    {
+        OpenExpeditionResultPanel();
+        ExpeditionActionMessage = TEXT("재도전하려면 먼저 E 결과 확인을 누르세요. 받은 보상은 다시 지급되지 않습니다.");
+        return;
+    }
+
+    const FGuid SourceId = Result->Ticket.ExpeditionId, CompletionId = Result->CompletionId;
+    const FGuid PartyId = Party->PartyId;
+    const int32 Revision = Party->PreparationRevision;
+    const bool bAlreadyPrepared =
+        Party->RetrySourceExpeditionId == SourceId && Party->RetrySourceCompletionId == CompletionId;
+    UIOpenPartyExpedition();
+    if (!bAlreadyPrepared)
+    {
+        UIRequestPrepareExpeditionRetry(PartyId, Revision, SourceId, CompletionId);
+    }
+}
+
+/** 이전 완료 원정과 현재 명부 리비전으로 재도전을 준비한다. */
+void AFablePlayerController::UIRequestPrepareExpeditionRetry(FGuid PartyId, int32 PreparationRevision,
+                                                             FGuid OldExpeditionId, FGuid CompletionId)
+{
+    if (!bPartyOpen || bOnlineLeaveInputBlocked || IsPartyPreparationPending())
+    {
+        return;
+    }
+
+    PartyPanelTab = EFablePartyPanelTab::Expedition;
+    PendingPartyRequestId = FGuid::NewGuid();
+    bPendingPartyEntry = false;
+    bPartyPreparationSucceeded = false;
+    PartyPreparationMessage = TEXT("파티의 재도전 준비를 확인하고 있습니다.");
+    ServerPrepareExpeditionRetry(PendingPartyRequestId, PartyId, PreparationRevision, OldExpeditionId, CompletionId);
+}
+
+/** 새 출발도 기존 원정과 다른 증서가 발급될 때까지 기다린다. */
+void AFablePlayerController::UIRequestRetryExpedition(FGuid PartyId, int32 PreparationRevision, FGuid OldExpeditionId,
+                                                      FGuid CompletionId)
+{
+    if (!bPartyOpen || bOnlineLeaveInputBlocked || IsPartyPreparationPending())
+    {
+        return;
+    }
+
+    PendingPartyRequestId = FGuid::NewGuid();
+    bPendingPartyEntry = true;
+    bPartyPreparationSucceeded = false;
+    PartyPreparationMessage = TEXT("모두의 준비와 재도전 입장을 확인하고 있습니다.");
+    ServerRetryExpedition(PendingPartyRequestId, PartyId, PreparationRevision, OldExpeditionId, CompletionId);
+}
+
+/** 결과에 포함된 실제 지급 장비를 반환한다. */
+TArray<FFableItem> AFablePlayerController::GetExpeditionResultItems() const
+{
+    TArray<FFableItem> Items;
+    if (const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult())
+    {
+        for (const FFablePersonalGrantReceipt& Receipt : Result->Receipts)
+        {
+            if (Receipt.ExpeditionId == Result->Ticket.ExpeditionId &&
+                Receipt.RecipientPublicKey == Result->RecipientPublicKey)
+            {
+                Items.Append(Receipt.GrantedItems);
+            }
+        }
+    }
+    return Items;
+}
+
+/** 장비 목록의 현재 행을 선택하고 지급 당시 옵션을 읽는다. */
+void AFablePlayerController::UISelectResultItem(int32 Index)
+{
+    const TArray<FFableItem> Items = GetExpeditionResultItems();
+    SelectedResultItemIndex = FMath::Clamp(Index, 0, FMath::Max(0, Items.Num() - 1));
+}
+
+/** 현재 선택한 결과 장비의 행을 반환한다. */
+int32 AFablePlayerController::GetSelectedResultItemIndex() const
+{
+    return FMath::Clamp(SelectedResultItemIndex, 0, FMath::Max(0, GetExpeditionResultItems().Num() - 1));
+}
+
+/** 메모리 전용 기록을 영구 저장 완료라고 판정하지 않는다. */
+bool AFablePlayerController::IsExpeditionResultSaved() const
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    return Result && Result->bRequiresBackendCommit && Result->bAllGrantsCommitted;
+}
+
+/** 해당 지급 영수증의 실제 저장 확인 상태를 표시한다. */
+FString AFablePlayerController::GetExpeditionResultSaveText() const
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!Result)
+    {
+        return TEXT("기록 확인 중");
+    }
+    if (!Result->bRequiresBackendCommit)
+    {
+        return TEXT("임시 기록");
+    }
+    if (IsExpeditionResultSaved())
+    {
+        return TEXT("저장 완료");
+    }
+    if (Profile && !Profile->bLastSaveSucceeded && !Profile->IsBackendSavePending())
+    {
+        return TEXT("저장 오류");
+    }
+    return TEXT("저장 중");
+}
+
+/** 현재 완료 원정의 기존 포털 가까이 있는지 표시한다. */
+bool AFablePlayerController::CanReturnFromExpeditionResult() const
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
+    const auto View = FableAdventure::For(this);
+    return Result && Result->Outcome == EFableExpeditionOutcome::Cleared && Profile && Hero && Hero->IsAlive() &&
+           Profile->ActiveExpeditionId == Result->Ticket.ExpeditionId && View &&
+           View->AdventureStage == EFableAdventureStage::Cleared &&
+           NearestService(this) == EFableService::ReturnPortal && !IsExpeditionActionPending();
+}
+
+/** 결과에서 기존 귀환 포털 정책을 유지하며 이동 안내 또는 귀환을 요청한다. */
+void AFablePlayerController::UIReturnFromExpeditionResult()
+{
+    const FFablePersonalExpeditionResult* Result = GetDisplayedExpeditionResult();
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!Result || !Profile || Profile->ActiveExpeditionId != Result->Ticket.ExpeditionId)
+    {
+        return;
+    }
+    if (CanReturnFromExpeditionResult())
+    {
+        UIRequestExpeditionReturn(Result->Ticket.ExpeditionId, Result->CompletionId);
+        return;
+    }
+
+    // 포털을 건너뛰어 귀환하지 않고 기존 월드의 포털 위치로 안내한다.
+    ResultPortalGuidanceExpeditionId = Result->Ticket.ExpeditionId;
+    UIClosePanels();
+}
+
+/** 관찰한 원정·완료 식별자로 같은 귀환 제품 요청을 보낸다. */
+void AFablePlayerController::UIRequestExpeditionReturn(FGuid ExpeditionId, FGuid CompletionId)
+{
+    if (BeginExpeditionAction(TEXT("함께 마을로 돌아갈 수 있는지 확인하고 있습니다.")))
+    {
+        ServerReturnExpeditionResult(PendingExpeditionActionId, ExpeditionId, CompletionId);
+    }
+}
+
+/** 철수 버튼이 현재 진행에서 사용 가능한지 표시한다. */
+bool AFablePlayerController::CanSetAbandonConsent() const
+{
+    const auto View = FableAdventure::For(this);
+    const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    const auto* Hero = GetPawn<AFableCharacter>();
+    return Encounter && !Encounter->IsReturning() && Profile && Hero && Hero->IsAlive() &&
+           !View->bPartyRecoveryPending &&
+           (View->AdventureStage == EFableAdventureStage::Dungeon ||
+            View->AdventureStage == EFableAdventureStage::Boss) &&
+           (!Profile->IsBackendEnabled() || (Profile->IsBackendReady() && !Profile->IsBackendSavePending())) &&
+           !bOnlineLeaveInputBlocked && !IsExpeditionActionPending();
+}
+
+/** 현재 캐릭터가 서버에 철수 동의를 제출했는지 반환한다. */
+bool AFablePlayerController::HasAbandonConsent() const
+{
+    const auto View = FableAdventure::For(this);
+    const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    return Encounter && Profile && Encounter->GetDepartureVote().ConsentingMemberKeys.Contains(Profile->PartyPlayerKey);
+}
+
+/** 철수 연결 명부가 바뀌면 과거 동의 리비전을 사용하지 않는다. */
+int32 AFablePlayerController::GetAbandonVoteRevision() const
+{
+    const auto View = FableAdventure::For(this);
+    const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+    return Encounter ? Encounter->GetDepartureVote().Revision : 0;
+}
+
+/** 공개 참가 증서의 철수 동의 수와 연결 상태를 설명한다. */
+FString AFablePlayerController::GetAbandonConsentStatus() const
+{
+    const auto View = FableAdventure::For(this);
+    const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+    if (!Encounter)
+    {
+        return TEXT("현재 원정 정보를 기다리고 있습니다.");
+    }
+    const int32 Required = Encounter->GetTicket().MemberKeys.Num();
+    return FString::Printf(
+        TEXT(
+            "철수 동의 %d / %d명 · 원래 참가자 전원이 동의하면 함께 마을로 돌아갑니다.\n동료의 연결이 바뀌면 동의가 해제됩니다."),
+        Encounter->GetDepartureVote().ConsentingMemberKeys.Num(), Required);
+}
+
+/** 진행 중인 현재 원정의 철수 동의를 명시한다. */
+void AFablePlayerController::UISetAbandonConsent(bool bConsent)
+{
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    UIRequestAbandonConsent(Profile ? Profile->ActiveExpeditionId : FGuid(), GetAbandonVoteRevision(), bConsent);
+}
+
+/** 지연되거나 다른 원정의 동의도 서버에서 판정할 수 있는 공통 요청이다. */
+void AFablePlayerController::UIRequestAbandonConsent(FGuid ExpeditionId, int32 DepartureRevision, bool bConsent)
+{
+    if (BeginExpeditionAction(TEXT("철수 동의를 확인하고 있습니다.")))
+    {
+        ServerSetAbandonConsent(PendingExpeditionActionId, ExpeditionId, DepartureRevision, bConsent);
+    }
+}
+
+/** 보상 조회와 확인은 각각 읽기·확인 경로만 호출한다. */
+void AFablePlayerController::ServerRequestExpeditionResult_Implementation(FGuid RequestId, FGuid ExpeditionId)
+{
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    const bool bSuccess = Mode && Mode->RequestExpeditionResult(this, ExpeditionId);
+    if (Profile && Profile->NoticeSerial == Before)
+    {
+        Profile->SetNotice(bSuccess ? TEXT("모험 기록을 불러왔습니다.")
+                                    : TEXT("본인의 모험 기록을 찾지 못했습니다. 원정 정보를 다시 확인하세요."));
+    }
+    ReplyExpeditionAction(RequestId, bSuccess, Before);
+}
+
+/** 結果確認は読んだ印だけを変更し、報酬を再適用しない。 */
+void AFablePlayerController::ServerAcknowledgeExpeditionResult_Implementation(FGuid RequestId, FGuid ExpeditionId,
+                                                                              FGuid CompletionId, int32 ResultRevision)
+{
+    AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    const bool bSuccess = Mode && Mode->AcknowledgeExpeditionResult(this, ExpeditionId, CompletionId, ResultRevision);
+    if (Profile && Profile->NoticeSerial == Before)
+    {
+        Profile->SetNotice(bSuccess ? TEXT("결과를 확인했습니다. 받은 보상은 다시 지급되지 않습니다.")
+                                    : TEXT("모험 결과가 갱신되었습니다. 현재 기록을 다시 확인하세요."));
+    }
+    ReplyExpeditionAction(RequestId, bSuccess, Before);
+}
+
+/** 재도전 준비는 원래 완료 원정과 명부를 서버에서 검증한다. */
+void AFablePlayerController::ServerPrepareExpeditionRetry_Implementation(FGuid RequestId, FGuid PartyId,
+                                                                         int32 PreparationRevision,
+                                                                         FGuid OldExpeditionId, FGuid CompletionId)
+{
+    auto* Manager = AFablePartyManager::Find(GetWorld());
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    const bool bSuccess =
+        Manager && Manager->PrepareExpeditionRetry(this, PartyId, PreparationRevision, OldExpeditionId, CompletionId);
+    ReplyPartyPreparation(RequestId, bSuccess, Before);
+}
+
+/** 전원의 명시적 동의로 새 원정에 입장한다. */
+void AFablePlayerController::ServerRetryExpedition_Implementation(FGuid RequestId, FGuid PartyId,
+                                                                  int32 PreparationRevision, FGuid OldExpeditionId,
+                                                                  FGuid CompletionId)
+{
+    auto* Mode = AFableGameMode::Find(GetWorld());
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    const bool bSuccess =
+        Mode && Mode->RequestRetryExpedition(this, PartyId, PreparationRevision, OldExpeditionId, CompletionId);
+    ReplyPartyPreparation(RequestId, bSuccess, Before);
+}
+
+/** 원래 완료 원정의 기존 귀환 포털 검사를 사용한다. */
+void AFablePlayerController::ServerReturnExpeditionResult_Implementation(FGuid RequestId, FGuid ExpeditionId,
+                                                                         FGuid CompletionId)
+{
+    auto* Mode = AFableGameMode::Find(GetWorld());
+    auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    auto* Encounter = Mode ? Mode->FindExpedition(ExpeditionId) : nullptr;
+    const auto* Result = Mode && Profile ? Mode->GetResultByExpedition(Profile, ExpeditionId) : nullptr;
+    bool bSuccess = false;
+
+    // 원정 UUID와 개인 완료 결과를 먼저 묶고 기존 포털 거리·봉인 조사를 그대로 검사한다.
+    if (Encounter && Profile && Result && Result->IsTerminal() && Result->CompletionId == CompletionId &&
+        Profile->ActiveExpeditionId == ExpeditionId && Encounter->IsParticipant(Profile))
+    {
+        Encounter->RequestReturnVillage(this);
+        const auto* Hero = GetPawn<AFableCharacter>();
+        bSuccess = (IsValid(Encounter) && Encounter->IsReturning()) ||
+                   (!Profile->ActiveExpeditionId.IsValid() && Hero && Hero->IsAlive() &&
+                    FableAdventure::For(Profile).IsInRegion(EFableRegion::Village, Hero->GetActorLocation()));
+    }
+    else if (Profile)
+    {
+        Profile->SetNotice(TEXT("현재 완료 원정의 귀환 정보를 다시 확인하세요."));
+    }
+    ReplyExpeditionAction(RequestId, bSuccess, Before);
+}
+
+/** 철수는 원래 참가 증서의 전원 동의로만 처리한다. */
+void AFablePlayerController::ServerSetAbandonConsent_Implementation(FGuid RequestId, FGuid ExpeditionId,
+                                                                    int32 DepartureRevision, bool bConsent)
+{
+    auto* Mode = AFableGameMode::Find(GetWorld());
+    auto* Profile = GetPlayerState<AFablePlayerState>();
+    const int32 Before = Profile ? Profile->NoticeSerial : INDEX_NONE;
+    auto* Encounter = Mode ? Mode->FindExpedition(ExpeditionId) : nullptr;
+    const bool bSuccess = Encounter && Encounter->SetAbandonConsent(this, ExpeditionId, DepartureRevision, bConsent);
+    if (Profile && Profile->NoticeSerial == Before)
+    {
+        Profile->SetNotice(bSuccess
+                               ? (bConsent ? TEXT("철수에 동의했습니다. 동료의 동의를 기다립니다.")
+                                           : TEXT("철수 동의를 취소했습니다."))
+                               : TEXT("철수 동의를 처리하지 못했습니다. 연결 상태와 현재 원정을 다시 확인하세요."));
+    }
+    ReplyExpeditionAction(RequestId, bSuccess, Before);
+}
+
+/** 현재 개인 결과 리비전과 서버 거절 사유를 응답한다. */
+void AFablePlayerController::ReplyExpeditionAction(FGuid RequestId, bool bSuccess, int32 NoticeBefore)
+{
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    const auto* Result = GetDisplayedExpeditionResult();
+    const FString Message = Profile && Profile->NoticeSerial != NoticeBefore ? Profile->LastNotice
+                            : bSuccess ? TEXT("모험 기록을 확인했습니다.")
+                                       : TEXT("요청을 처리하지 못했습니다. 현재 모험 상태를 다시 확인하세요.");
+    ClientExpeditionActionResult(RequestId, bSuccess, Result ? Result->ResultRevision : 0, Message);
+}
+
+/** 결과 요청도 현재 소유 요청과 일치하는 서버 응답만 반영한다. */
+void AFablePlayerController::ClientExpeditionActionResult_Implementation(FGuid RequestId, bool bSuccess,
+                                                                         int32 ResultRevision, const FString& Reason)
+{
+    if (!PendingExpeditionActionId.IsValid() || RequestId != PendingExpeditionActionId)
+    {
+        return;
+    }
+    PendingExpeditionActionId.Invalidate();
+    LastExpeditionActionRequestId = RequestId;
+    bExpeditionActionSucceeded = bSuccess;
+    ExpeditionActionResultRevision = ResultRevision;
+    ExpeditionActionMessage = Reason;
 }
 
 /** UI에서 선택한 선택 스킬 동작을 처리한다. */
@@ -2149,6 +2711,12 @@ void AFablePlayerController::UISelectItem(int32 ItemId)
 /** UI에서 선택한 선택 이전 동작을 처리한다. */
 void AFablePlayerController::UISelectPrevious()
 {
+    if (IsExpeditionResultOpen())
+    {
+        UISelectResultItem(GetSelectedResultItemIndex() + (-1));
+        return;
+    }
+
     // 검증 입력과 키 유지 상태 처리
     if (bWorkshopOpen)
     {
@@ -2210,6 +2778,12 @@ void AFablePlayerController::UISelectPrevious()
 /** UI에서 선택한 선택 다음 동작을 처리한다. */
 void AFablePlayerController::UISelectNext()
 {
+    if (IsExpeditionResultOpen())
+    {
+        UISelectResultItem(GetSelectedResultItemIndex() + (1));
+        return;
+    }
+
     // 검증 입력과 키 유지 상태 처리
     if (bWorkshopOpen)
     {
@@ -2349,6 +2923,15 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         return false;
     }
 
+    if (ResultPortalGuidanceExpeditionId.IsValid() && Adventure.ExpeditionId() == ResultPortalGuidanceExpeditionId &&
+        Adventure->AdventureStage == EFableAdventureStage::Cleared &&
+        Adventure.IsInRegion(Adventure->ActiveRegion, Hero->GetActorLocation()))
+    {
+        OutLocation = Adventure.ToWorld(Adventure->ActiveRegion, FableRPG::RegionReturnPortal(Adventure->ActiveRegion));
+        OutLabel = TEXT("마을 귀환 포털");
+        return true;
+    }
+
     // 생존 상태와 부활 진행에 필요한 값 준비
     const EFableRegion Region = PawnRegion(this);
     float Nearest = TNumericLimits<float>::Max();
@@ -2448,6 +3031,16 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
 /** 현재 상호작용 대상의 안내 문구 값을 반환한다. */
 FString AFablePlayerController::GetContextActionText() const
 {
+    if (IsExpeditionResultOpen())
+    {
+        return TEXT("↑↓ 지급 장비 · E 결과 확인 · R 재도전 준비 · Tab 탭 전환 · Esc 닫기");
+    }
+    if (bPartyOpen)
+    {
+        return IsPartyExpeditionOpen() ? TEXT("E 준비 / 철수 동의 · R 출발 · Tab 탭 전환 · Esc 닫기")
+                                       : TEXT("버튼으로 파티 구성 · Tab 탭 전환 · G / Esc 닫기");
+    }
+
     // 직업·스킬·특성 빌드 조건 검사
     if (bWorkshopOpen)
     {
@@ -2628,13 +3221,33 @@ void AFablePlayerController::UIInteract()
     // 파티 화면의 E 입력은 현재 탭에서만 처리하고 뒤의 주민·포털로 보내지 않는다.
     if (bPartyOpen)
     {
+        if (IsExpeditionResultOpen())
+        {
+            const auto* Result = GetDisplayedExpeditionResult();
+            if (Result && Result->IsTerminal() && !Result->bAcknowledged)
+            {
+                UIAcknowledgeExpeditionResult();
+            }
+            else
+            {
+                UIClosePanels();
+            }
+            return;
+        }
         if (IsPartyExpeditionOpen())
         {
             const FFablePartyRecord* Party = FindControllerParty(this);
             const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
-            if (Profile && Profile->ActiveExpeditionId.IsValid())
+            if (Profile && Profile->ActiveExpeditionId.IsValid() && !IsPartyRetryPreparation())
             {
-                UIEnterSelectedDungeon();
+                if (CanSetAbandonConsent())
+                {
+                    UISetAbandonConsent(!HasAbandonConsent());
+                }
+                else
+                {
+                    UIEnterSelectedDungeon();
+                }
             }
             else if (Party && Profile && Party->LeaderKey == Profile->PartyPlayerKey && IsPartyReady())
             {
@@ -2789,6 +3402,13 @@ AFableCharacter* AFablePlayerController::GetNearbyReviveTarget() const
 /** UI에서 선택한 전투 재도전 동작을 처리한다. */
 void AFablePlayerController::UIRetryEncounter()
 {
+    const auto* RetryResult = GetDisplayedExpeditionResult();
+    if (RetryResult && RetryResult->IsTerminal() && !RetryResult->RetryExpeditionId.IsValid())
+    {
+        UIBeginExpeditionRetry();
+        return;
+    }
+
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (bFrontEndOpen)
     {
@@ -3025,6 +3645,12 @@ void AFablePlayerController::UIEnterSelectedDungeon()
         UIOpenPartyExpedition();
     }
 
+    if (IsPartyRetryPreparation())
+    {
+        UIEnterPreparedParty();
+        return;
+    }
+
     // 진행 중인 원정의 참가자는 새 출발 대신 기존 서버 증서로만 복귀한다.
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const FFablePartyRecord* Party = FindControllerParty(this);
@@ -3053,6 +3679,11 @@ bool AFablePlayerController::CanEnterDungeon(EFableRegion Region) const
     if (Region != GetSelectedDungeonId())
     {
         return false;
+    }
+
+    if (IsPartyRetryPreparation())
+    {
+        return CanEnterPreparedParty();
     }
 
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
@@ -3570,6 +4201,14 @@ void AFablePlayerController::ServerAdvanceClass_Implementation()
 /** 선택한 전직 시험을 다시 시작하도록 요청한다. */
 void AFablePlayerController::RestartTrial()
 {
+    const auto* RetryResult = GetDisplayedExpeditionResult();
+    if (!IsPartyExpeditionOpen() && RetryResult && RetryResult->IsTerminal() &&
+        !RetryResult->RetryExpeditionId.IsValid())
+    {
+        UIBeginExpeditionRetry();
+        return;
+    }
+
     const FFableAdventureView Adventure = FableAdventure::For(this);
 
     if (!Adventure)

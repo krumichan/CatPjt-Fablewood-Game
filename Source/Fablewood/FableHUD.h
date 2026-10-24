@@ -88,6 +88,12 @@ private:
     /** 서버 선택·개별 준비·파티장 출발을 원정 탭에 표시한다. */
     void DrawPartyExpedition(AFablePlayerController* PC, const AFableGameState* GameState, float Scale);
 
+    /** 지급 영수증의 실제 보상·장비·저장 상태와 후속 동작을 표시한다. */
+    void DrawExpeditionResult(AFablePlayerController* PC, const AFablePlayerState* State, float Scale);
+
+    /** 세 파티 탭은 같은 위치에서 열고 현재 탭만 비활성으로 표시한다. */
+    void DrawPartyTabs(AFablePlayerController* PC, float X, float Y, float Scale);
+
     /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
     void DrawRecoveryStatus(AFablePlayerController* PC, const FFableAdventureView& Adventure, float Scale);
 

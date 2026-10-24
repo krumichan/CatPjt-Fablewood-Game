@@ -1,5 +1,6 @@
-#include "FableHUD.h"
+﻿#include "FableHUD.h"
 #include "FableAdventure.h"
+#include "FablePartyEncounter.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
@@ -778,6 +779,12 @@ void AFableHUD::DrawPartyStatus(AFablePlayerController* PC, const FFableAdventur
 /** 접속자 목록·초대장·파티 권한을 관리 창에 표시한다. */
 void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGameState* GS, float S)
 {
+    if (PC->IsExpeditionResultOpen())
+    {
+        DrawExpeditionResult(PC, PC->GetPlayerState<AFablePlayerState>(), S);
+        return;
+    }
+
     // 구성 화면과 원정 화면은 같은 파티 창의 입력 모드를 공유한다.
     if (PC->IsPartyExpeditionOpen())
     {
@@ -792,8 +799,7 @@ void AFableHUD::DrawPartyManagement(AFablePlayerController* PC, const AFableGame
     const AFablePlayerState* Mine = PC->GetPlayerState<AFablePlayerState>();
     const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
     DrawPanel(TEXT("파티 관리 · G 키로 닫기"), X, Y, 850 * S, 500 * S, S);
-    DrawButton(TEXT("파티 구성"), TEXT("PartyTabMembers"), X + 470 * S, Y + 14 * S, 110 * S, 35 * S, S, false);
-    DrawButton(TEXT("원정 준비"), TEXT("PartyTabExpedition"), X + 592 * S, Y + 14 * S, 142 * S, 35 * S, S);
+    DrawPartyTabs(PC, X, Y, S);
 
     if (!Mine || !Manager || !GS)
     {
@@ -956,8 +962,7 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
     const AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
     const FFablePartyRecord* Party = Manager && Mine ? Manager->GetPartyForMember(Mine->GetPlayerId()) : nullptr;
     DrawPanel(TEXT("파티 원정 준비 · G 키로 닫기"), X, Y, 850 * S, 500 * S, S);
-    DrawButton(TEXT("파티 구성"), TEXT("PartyTabMembers"), X + 470 * S, Y + 14 * S, 110 * S, 35 * S, S);
-    DrawButton(TEXT("원정 준비"), TEXT("PartyTabExpedition"), X + 592 * S, Y + 14 * S, 142 * S, 35 * S, S, false);
+    DrawPartyTabs(PC, X, Y, S);
 
     if (!Mine || !Manager || !GS)
     {
@@ -982,11 +987,54 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
     }
 
     const bool bLeader = Party->LeaderKey == Mine->PartyPlayerKey;
-    const bool bActive = Mine->ActiveExpeditionId.IsValid();
+    const bool bRetry = PC->IsPartyRetryPreparation();
+    const bool bActive = Mine->ActiveExpeditionId.IsValid() && !bRetry;
+    if (bActive)
+    {
+        const auto View = FableAdventure::For(PC);
+        const auto* Encounter = View ? Cast<AFablePartyEncounter>(View.ReplicationOwner()) : nullptr;
+        DrawFitted(View ? FableRPG::RegionName(View->ActiveRegion) + TEXT(" · ") +
+                              FableRPG::StageName(View->AdventureStage)
+                        : TEXT("현재 원정을 불러오는 중"),
+                   Gold, X + 24 * S, Y + 77 * S, 802 * S, .84f * S);
+        DrawWrapped(
+            TEXT("진행 중인 원정은 원래 참가자 전원이 직접 동의해야 철수합니다. 획득한 보상과 의뢰 보고는 유지됩니다."),
+            Cream, X + 24 * S, Y + 119 * S, 802 * S, .65f * S, 3);
+        for (int32 Index = 0; Index < Party->Members.Num(); ++Index)
+        {
+            const auto& Member = Party->Members[Index];
+            const bool bConsent =
+                Encounter && Encounter->GetDepartureVote().ConsentingMemberKeys.Contains(Member.PlayerKey);
+            const float RowY = Y + (205 + Index * 57) * S;
+            DrawRect(FLinearColor(.07f, .14f, .10f), X + 24 * S, RowY, 802 * S, 45 * S);
+            DrawFitted(Member.DisplayName + (Member.PlayerKey == Mine->PartyPlayerKey ? TEXT(" · 나") : TEXT("")),
+                       Cream, X + 36 * S, RowY + 11 * S, 410 * S, .63f * S);
+            DrawFitted(!Member.bConnected ? TEXT("재접속 대기 · 동의 초기화")
+                       : bConsent         ? TEXT("철수 동의")
+                                          : TEXT("계속 모험 중"),
+                       bConsent ? Gold : Muted, X + 464 * S, RowY + 11 * S, 346 * S, .61f * S);
+        }
+        DrawWrapped(PC->GetAbandonConsentStatus(), Muted, X + 24 * S, Y + 333 * S, 802 * S, .60f * S, 3);
+        const bool bConsent = PC->HasAbandonConsent();
+        DrawButton(bConsent ? TEXT("철수 동의 취소") : TEXT("철수에 동의"),
+                   bConsent ? TEXT("AbandonFalse") : TEXT("AbandonTrue"), X + 24 * S, Y + 418 * S, 250 * S, 36 * S, S,
+                   PC->CanSetAbandonConsent());
+        DrawButton(TEXT("현재 원정으로 복귀"), TEXT("PartyResume"), X + 286 * S, Y + 418 * S, 270 * S, 36 * S, S,
+                   PC->CanEnterDungeon(Party->SelectedRegion));
+        DrawButton(TEXT("내 획득 기록"), TEXT("PartyTabResult"), X + 568 * S, Y + 418 * S, 258 * S, 36 * S, S);
+        if (!PC->GetExpeditionActionMessage().IsEmpty())
+        {
+            DrawWrapped(PC->GetExpeditionActionMessage(), PC->DidExpeditionActionSucceed() ? Mint : Warning, X + 24 * S,
+                        Y + 465 * S, 802 * S, .52f * S, 2);
+        }
+        return;
+    }
+
     const bool bSelecting = PC->CanSelectPartyExpedition();
     const EFableRegion Regions[] = {EFableRegion::RootRuins, EFableRegion::Moonwell};
-    DrawFitted(bLeader ? TEXT("파티장이 목적지와 난이도를 선택합니다 · 선택이 바뀌면 모두 다시 준비해야 합니다.")
-                       : TEXT("파티장의 선택을 확인하고 준비하세요 · 최종 자격과 이동은 서버가 확인합니다."),
+    DrawFitted(bRetry    ? TEXT("같은 지역·난이도로 재도전합니다 · 각자 새 준비를 확인해야 출발합니다.")
+               : bLeader ? TEXT("파티장이 목적지와 난이도를 선택합니다 · 선택이 바뀌면 모두 다시 준비해야 합니다.")
+                         : TEXT("파티장의 선택을 확인하고 준비하세요 · 최종 자격과 이동은 서버가 확인합니다."),
                Cream, X + 24 * S, Y + 69 * S, 802 * S, .59f * S);
 
     // 목적지와 난이도는 로컬 선택을 예상하지 않고 복제된 값을 표시한다.
@@ -1003,9 +1051,9 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
         DrawFitted(Index == 0 ? TEXT("두 무리 + 고대 수호자 · 뿌리 수호자 세트")
                               : TEXT("세 봉인 + 달빛 수호자 · 달빛 세트"),
                    Cream, CardX + 14 * S, Y + 143 * S, 367 * S, .54f * S);
-        DrawFitted(Mine->IsRegionEligible(Region) ? TEXT("내 의뢰 자격 충족")
-                                                  : TEXT("로완에게 이 지역 의뢰를 준비하세요"),
-                   Mine->IsRegionEligible(Region) ? Mint : Warning, CardX + 14 * S, Y + 171 * S, 367 * S, .54f * S);
+        DrawFitted(Mine->IsExpeditionEligible(Region) ? TEXT("내 원정 자격 충족")
+                                                      : TEXT("먼저 이 지역 의뢰를 해금하세요"),
+                   Mine->IsExpeditionEligible(Region) ? Mint : Warning, CardX + 14 * S, Y + 171 * S, 367 * S, .54f * S);
         if (bSelecting)
         {
             AddHitBox(FVector2D(CardX, Y + 100 * S), FVector2D(395 * S, 100 * S),
@@ -1045,7 +1093,7 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
         const AFableCharacter* Hero = Profile ? Cast<AFableCharacter>(Profile->GetPawn()) : nullptr;
         const bool bMine = Member.PlayerKey == Mine->PartyPlayerKey;
         const bool bEligible = Profile && Profile->bProfileLoaded && Hero && Hero->IsAlive() &&
-                               Profile->IsRegionEligible(Party->SelectedRegion);
+                               Profile->IsExpeditionEligible(Party->SelectedRegion);
         const bool bReady = Member.bConnected && Member.ReadyRevision == Party->PreparationRevision;
         FString Connection = !Member.bConnected                     ? TEXT("접속 끊김")
                              : !Profile || !Profile->bProfileLoaded ? TEXT("불러오는 중")
@@ -1086,6 +1134,151 @@ void AFableHUD::DrawPartyExpedition(AFablePlayerController* PC, const AFableGame
                                                        : Warning,
                     X + 24 * S, Y + 465 * S, 802 * S, .52f * S, 2);
     }
+}
+
+/** 세 파티 탭은 같은 위치에서 열고 현재 탭만 비활성으로 표시한다. */
+void AFableHUD::DrawPartyTabs(AFablePlayerController* PC, float X, float Y, float S)
+{
+    DrawButton(TEXT("파티 구성"), TEXT("PartyTabMembers"), X + 400 * S, Y + 14 * S, 100 * S, 35 * S, S,
+               PC->IsPartyExpeditionOpen() || PC->IsExpeditionResultOpen());
+    DrawButton(TEXT("원정 준비"), TEXT("PartyTabExpedition"), X + 510 * S, Y + 14 * S, 100 * S, 35 * S, S,
+               !PC->IsPartyExpeditionOpen());
+    DrawButton(TEXT("원정 결과"), TEXT("PartyTabResult"), X + 620 * S, Y + 14 * S, 100 * S, 35 * S, S,
+               !PC->IsExpeditionResultOpen());
+}
+
+/** 지급 영수증의 실제 보상·장비·저장 상태와 후속 동작을 표시한다. */
+void AFableHUD::DrawExpeditionResult(AFablePlayerController* PC, const AFablePlayerState* State, float S)
+{
+    const float X = (Canvas->ClipX - 850 * S) * .5f, Y = (Canvas->ClipY - 540 * S) * .5f;
+    DrawPanel(TEXT("나의 원정 결과"), X, Y, 850 * S, 540 * S, S);
+    DrawPartyTabs(PC, X, Y, S);
+    const FFablePersonalExpeditionResult* Result = PC->GetDisplayedExpeditionResult();
+    if (!State || !Result)
+    {
+        DrawWrapped(
+            TEXT("표시할 원정 기록이 없습니다. 원정에 참가하면 실제 획득한 보상을 이곳에서 확인할 수 있습니다."), Cream,
+            X + 24 * S, Y + 101 * S, 802 * S, .75f * S, 3);
+        DrawButton(TEXT("원정 준비 보기"), TEXT("PartyTabExpedition"), X + 24 * S, Y + 245 * S, 340 * S, 44 * S, S);
+        if (!PC->GetExpeditionActionMessage().IsEmpty())
+        {
+            DrawWrapped(PC->GetExpeditionActionMessage(), Warning, X + 24 * S, Y + 359 * S, 802 * S, .65f * S, 3);
+        }
+        return;
+    }
+
+    // 예상 보상표나 현재 지갑 차액 대신 개인 지급 영수증의 실제 합계만 표시한다.
+    int32 GoldTotal = 0, OreTotal = 0, ExperienceTotal = 0, RootTotal = 0, MoonTotal = 0;
+    for (const FFablePersonalGrantReceipt& Receipt : Result->Receipts)
+    {
+        if (Receipt.ExpeditionId != Result->Ticket.ExpeditionId ||
+            Receipt.RecipientPublicKey != Result->RecipientPublicKey)
+        {
+            continue;
+        }
+        GoldTotal += Receipt.ActualGold;
+        OreTotal += Receipt.ActualOre;
+        ExperienceTotal += Receipt.ActualExperience;
+        RootTotal += Receipt.ActualRootCores;
+        MoonTotal += Receipt.ActualMoonCrystals;
+    }
+    const FString Outcome = Result->Outcome == EFableExpeditionOutcome::Cleared     ? TEXT("수호자 격파")
+                            : Result->Outcome == EFableExpeditionOutcome::Recovered ? TEXT("전멸 후 마을 구조")
+                            : Result->Outcome == EFableExpeditionOutcome::Abandoned ? TEXT("전원 동의 철수")
+                                                                                    : TEXT("진행 중 획득 기록");
+    DrawFitted(FableRPG::RegionName(Result->Ticket.Region) + TEXT(" · ") +
+                   FableRPG::DifficultyName(Result->Ticket.Difficulty) + TEXT(" · ") + Outcome,
+               Gold, X + 24 * S, Y + 69 * S, 576 * S, .76f * S);
+    DrawFitted(PC->GetExpeditionResultSaveText(), PC->IsExpeditionResultSaved() ? Mint : Warning, X + 606 * S,
+               Y + 75 * S, 220 * S, .58f * S);
+    DrawFitted(FString::Printf(TEXT("골드 %d · 광석 %d · 경험치 %d"), GoldTotal, OreTotal, ExperienceTotal), Cream,
+               X + 24 * S, Y + 106 * S, 802 * S, .83f * S);
+    DrawFitted(FString::Printf(TEXT("뿌리 핵 %d · 달빛 결정 %d"), RootTotal, MoonTotal), Mint, X + 24 * S, Y + 139 * S,
+               802 * S, .65f * S);
+
+    // 획득 뒤 강화·판매·창고 이동을 했더라도 지급 당시 품질과 옵션은 그대로 보여 준다.
+    const TArray<FFableItem> Items = PC->GetExpeditionResultItems();
+    DrawFitted(FString::Printf(TEXT("획득 장비 %d개 · 지급 당시의 성능"), Items.Num()), Cream, X + 24 * S, Y + 174 * S,
+               802 * S, .63f * S);
+    const int32 Selected = PC->GetSelectedResultItemIndex(), Page = Selected / 3;
+    if (Items.IsEmpty())
+    {
+        DrawRect(FLinearColor(.07f, .14f, .10f), X + 24 * S, Y + 205 * S, 802 * S, 141 * S);
+        DrawWrapped(
+            TEXT("이번 원정에서 지급된 장비가 없습니다. 장비가 광석으로 전환되었다면 실제 광석 합계에 포함됩니다."),
+            Muted, X + 42 * S, Y + 237 * S, 766 * S, .67f * S, 3);
+    }
+    else
+    {
+        for (int32 Row = 0; Row < 3; ++Row)
+        {
+            const int32 Index = Page * 3 + Row;
+            if (!Items.IsValidIndex(Index))
+            {
+                break;
+            }
+            const float RowY = Y + (203 + Row * 47) * S;
+            DrawRect(Index == Selected ? FLinearColor(.18f, .31f, .22f) : FLinearColor(.07f, .14f, .10f), X + 24 * S,
+                     RowY, 324 * S, 41 * S);
+            DrawFitted(Items[Index].GetDisplayName(), RarityColor(Items[Index].Rarity), X + 34 * S, RowY + 8 * S,
+                       304 * S, .56f * S);
+            AddHitBox(FVector2D(X + 24 * S, RowY), FVector2D(324 * S, 41 * S),
+                      FName(*FString::Printf(TEXT("ResultItem_%d"), Index)), true, 30);
+        }
+        const FFableItem& Item = Items[Selected];
+        DrawRect(FLinearColor(.07f, .14f, .10f), X + 362 * S, Y + 203 * S, 464 * S, 141 * S);
+        DrawFitted(Item.GetDisplayName(), RarityColor(Item.Rarity), X + 375 * S, Y + 208 * S, 438 * S, .66f * S);
+        DrawFitted(TEXT("품질 ") + FableRPG::QualityName(Item.Quality) + TEXT(" · ") +
+                       FableRPG::RarityName(Item.Rarity),
+                   Gold, X + 375 * S, Y + 236 * S, 438 * S, .58f * S);
+        DrawFitted(
+            FString::Printf(TEXT("기본 성능 %d · 내구도 %d / %d"), Item.Power, Item.Durability, Item.MaxDurability),
+            Cream, X + 375 * S, Y + 261 * S, 438 * S, .56f * S);
+        if (Item.Affixes.IsEmpty())
+        {
+            DrawFitted(TEXT("추가 옵션 없음"), Muted, X + 375 * S, Y + 285 * S, 438 * S, .53f * S);
+        }
+        for (int32 Index = 0; Index < FMath::Min(3, Item.Affixes.Num()); ++Index)
+        {
+            DrawFitted(FableRPG::AffixDescription(Item.Affixes[Index]), Mint, X + 375 * S, Y + (282 + Index * 18) * S,
+                       438 * S, .50f * S);
+        }
+        DrawButton(TEXT("이전 장비"), TEXT("ResultItemPrevious"), X + 24 * S, Y + 351 * S, 148 * S, 29 * S, S,
+                   Selected > 0);
+        DrawButton(TEXT("다음 장비"), TEXT("ResultItemNext"), X + 184 * S, Y + 351 * S, 164 * S, 29 * S, S,
+                   Selected + 1 < Items.Num());
+    }
+
+    const EFableQuestStage Quest =
+        Result->Ticket.Region == EFableRegion::Moonwell ? State->MoonwellQuest : State->DungeonQuest;
+    DrawWrapped(Quest == EFableQuestStage::Ready
+                    ? TEXT("로완 의뢰 보상은 별도입니다. 마을에서 완료한 의뢰를 보고하세요.")
+                    : TEXT("원정에서 실제 받은 보상입니다. 로완 의뢰 보고 보상은 별도로 지급됩니다."),
+                Muted, X + 362 * S, Y + 353 * S, 464 * S, .54f * S, 2);
+
+    // 화면을 확인했다는 표시는 저장 성공과 구분한다.
+    const bool bSaveError = Result->bRequiresBackendCommit && !PC->IsExpeditionResultSaved() &&
+                            !State->bLastSaveSucceeded && !State->IsBackendSavePending();
+    const FString Status =
+        bSaveError ? TEXT("보상 저장을 확인하지 못했습니다. 연결을 유지하고 저장 상태를 다시 확인하세요.")
+        : !PC->GetExpeditionActionMessage().IsEmpty() ? PC->GetExpeditionActionMessage()
+        : Result->bAcknowledged ? TEXT("결과를 확인했습니다. 나중에 다시 열어볼 수 있습니다.")
+                                : TEXT("재도전하려면 먼저 E 결과 확인을 누르세요. 받은 보상은 다시 지급되지 않습니다.");
+    DrawWrapped(Status, PC->IsExpeditionActionPending() ? Muted : Cream, X + 24 * S, Y + 395 * S, 802 * S, .57f * S, 2);
+    DrawButton(Result->bAcknowledged ? TEXT("결과 확인 완료") : TEXT("E 결과 확인"), TEXT("ResultAcknowledge"),
+               X + 24 * S, Y + 450 * S, 180 * S, 38 * S, S,
+               Result->IsTerminal() && !Result->bAcknowledged && !PC->IsExpeditionActionPending());
+    DrawButton(TEXT("R 재도전 준비"), TEXT("ResultRetry"), X + 216 * S, Y + 450 * S, 250 * S, 38 * S, S,
+               PC->CanPrepareExpeditionRetry());
+    const bool bCurrentCleared =
+        Result->Outcome == EFableExpeditionOutcome::Cleared && State->ActiveExpeditionId == Result->Ticket.ExpeditionId;
+    DrawButton(bCurrentCleared
+                   ? (PC->CanReturnFromExpeditionResult() ? TEXT("함께 마을로 귀환") : TEXT("귀환 포털 안내"))
+                   : TEXT("원정 준비 화면"),
+               bCurrentCleared ? TEXT("ResultReturn") : TEXT("PartyTabExpedition"), X + 478 * S, Y + 450 * S, 348 * S,
+               38 * S, S, !PC->IsExpeditionActionPending());
+    DrawFitted(TEXT("↑↓ 장비 선택 · Tab 탭 전환 · Esc 닫기 · 다시 열어도 받은 보상은 유지됩니다"), Muted, X + 24 * S,
+               Y + 503 * S, 802 * S, .54f * S);
 }
 
 /** 복구 상태 UI를 현재 상태에 맞게 그린다. */
@@ -2506,10 +2699,43 @@ void AFableHUD::NotifyHitBoxClick(FName BoxName)
         return;
     }
 
-    if (BoxName == TEXT("PartyTabMembers") || BoxName == TEXT("PartyTabExpedition"))
+    if (BoxName == TEXT("PartyTabMembers") || BoxName == TEXT("PartyTabExpedition") ||
+        BoxName == TEXT("PartyTabResult"))
     {
-        PC->UISelectPartyTab(BoxName == TEXT("PartyTabMembers") ? EFablePartyPanelTab::Members
-                                                                : EFablePartyPanelTab::Expedition);
+        PC->UISelectPartyTab(BoxName == TEXT("PartyTabMembers")  ? EFablePartyPanelTab::Members
+                             : BoxName == TEXT("PartyTabResult") ? EFablePartyPanelTab::Result
+                                                                 : EFablePartyPanelTab::Expedition);
+        return;
+    }
+
+    if (BoxName == TEXT("ResultAcknowledge"))
+    {
+        PC->UIAcknowledgeExpeditionResult();
+        return;
+    }
+    if (BoxName == TEXT("ResultRetry"))
+    {
+        PC->UIBeginExpeditionRetry();
+        return;
+    }
+    if (BoxName == TEXT("ResultReturn"))
+    {
+        PC->UIReturnFromExpeditionResult();
+        return;
+    }
+    if (BoxName == TEXT("AbandonTrue") || BoxName == TEXT("AbandonFalse"))
+    {
+        PC->UISetAbandonConsent(BoxName == TEXT("AbandonTrue"));
+        return;
+    }
+    if (BoxName == TEXT("ResultItemPrevious") || BoxName == TEXT("ResultItemNext"))
+    {
+        PC->UISelectResultItem(PC->GetSelectedResultItemIndex() + (BoxName == TEXT("ResultItemPrevious") ? -1 : 1));
+        return;
+    }
+    if (Name.StartsWith(TEXT("ResultItem_")))
+    {
+        PC->UISelectResultItem(FCString::Atoi(*Name.Mid(11)));
         return;
     }
 

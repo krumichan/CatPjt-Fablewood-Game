@@ -5,6 +5,7 @@
 #include "FablePlayerController.generated.h"
 
 class AFableCharacter;
+struct FFablePersonalExpeditionResult;
 
 /** 현재 열려 있는 NPC 대화 종류 값의 종류를 정의한다. */
 enum class EFableDialogue : uint8
@@ -38,7 +39,8 @@ enum class EFableWorkshopTab : uint8
 enum class EFablePartyPanelTab : uint8
 {
     Members,
-    Expedition
+    Expedition,
+    Result
 };
 
 /** 플레이어 입력과 UI 요청을 서버 권한의 게임 동작으로 연결하는 컨트롤러. */
@@ -322,6 +324,118 @@ public:
     /** 파티 원정의 현재 준비 상태를 설명한다. */
     FString GetPartyPreparationStatus() const;
 
+    /** 실제 개인 영수증을 조회하는 결과 창을 열고 이전 화면의 보상을 재계산하지 않는다. */
+    void UIOpenExpeditionResult(FGuid ExpeditionId = FGuid());
+
+    /** 결과 탭의 실제 열림 상태를 반환한다. */
+    bool IsExpeditionResultOpen() const
+    {
+        return bPartyOpen && PartyPanelTab == EFablePartyPanelTab::Result;
+    }
+
+    /** 본인에게 복제된 결과만 반환하고 잘못된 수신자 정보는 표시하지 않는다. */
+    const FFablePersonalExpeditionResult* GetDisplayedExpeditionResult() const;
+
+    /** 화면 확인용 식별자는 자동 검증에서만 사용하고 플레이어에게 출력하지 않는다. */
+    FGuid GetDisplayedResultCompletionId() const;
+
+    /** 현재 개인 결과를 명시한 원정 UUID로 다시 요청한다. */
+    void UIRequestExpeditionResult(FGuid ExpeditionId);
+
+    /** 현재 보이는 종료 결과를 읽었다는 확인만 서버에 보낸다. */
+    void UIAcknowledgeExpeditionResult();
+
+    /** 지연된 화면의 결과 확인도 같은 제품 RPC를 사용한다. */
+    void UIRequestAcknowledgeExpeditionResult(FGuid ExpeditionId, FGuid CompletionId, int32 ResultRevision);
+
+    /** 표시된 결과를 바탕으로 별도의 명시적 재도전 준비 창을 연다. */
+    void UIBeginExpeditionRetry();
+
+    /** 이전 완료 원정과 현재 명부 리비전으로 재도전을 준비한다. */
+    void UIRequestPrepareExpeditionRetry(FGuid PartyId, int32 PreparationRevision, FGuid OldExpeditionId,
+                                         FGuid CompletionId);
+
+    /** 새 출발도 기존 원정과 다른 증서가 발급될 때까지 기다린다. */
+    void UIRequestRetryExpedition(FGuid PartyId, int32 PreparationRevision, FGuid OldExpeditionId, FGuid CompletionId);
+
+    /** 현재 서버 선택이 명시적인 재도전 준비인지 반환한다. */
+    bool IsPartyRetryPreparation() const;
+
+    /** 표시된 개인 결과로 재도전 준비를 시작할 수 있는지 안내한다. */
+    bool CanPrepareExpeditionRetry() const;
+
+    /** 장비 목록의 현재 행을 선택하고 지급 당시 옵션을 읽는다. */
+    void UISelectResultItem(int32 Index);
+
+    /** 결과에 포함된 실제 지급 장비를 반환한다. */
+    TArray<FFableItem> GetExpeditionResultItems() const;
+
+    /** 현재 선택한 결과 장비의 행을 반환한다. */
+    int32 GetSelectedResultItemIndex() const;
+
+    /** 해당 지급 영수증의 실제 저장 확인 상태를 표시한다. */
+    FString GetExpeditionResultSaveText() const;
+
+    /** 메모리 전용 기록을 영구 저장 완료라고 판정하지 않는다. */
+    bool IsExpeditionResultSaved() const;
+
+    /** 결과에서 기존 귀환 포털 정책을 유지하며 이동 안내 또는 귀환을 요청한다. */
+    void UIReturnFromExpeditionResult();
+
+    /** 현재 완료 원정의 기존 포털 가까이 있는지 표시한다. */
+    bool CanReturnFromExpeditionResult() const;
+
+    /** 관찰한 원정·완료 식별자로 같은 귀환 제품 요청을 보낸다. */
+    void UIRequestExpeditionReturn(FGuid ExpeditionId, FGuid CompletionId);
+
+    /** 진행 중인 현재 원정의 철수 동의를 명시한다. */
+    void UISetAbandonConsent(bool bConsent);
+
+    /** 지연되거나 다른 원정의 동의도 서버에서 판정할 수 있는 공통 요청이다. */
+    void UIRequestAbandonConsent(FGuid ExpeditionId, int32 DepartureRevision, bool bConsent);
+
+    /** 철수 버튼이 현재 진행에서 사용 가능한지 표시한다. */
+    bool CanSetAbandonConsent() const;
+
+    /** 현재 캐릭터가 서버에 철수 동의를 제출했는지 반환한다. */
+    bool HasAbandonConsent() const;
+
+    /** 철수 연결 명부가 바뀌면 과거 동의 리비전을 사용하지 않는다. */
+    int32 GetAbandonVoteRevision() const;
+
+    /** 공개 참가 증서의 철수 동의 수와 연결 상태를 설명한다. */
+    FString GetAbandonConsentStatus() const;
+
+    /** 결과·철수 요청은 준비 요청과 별도 상관 식별자로 응답을 기다린다. */
+    bool IsExpeditionActionPending() const
+    {
+        return PendingExpeditionActionId.IsValid();
+    }
+
+    /** 마지막 결과 요청의 성공 여부를 읽는다. */
+    bool DidExpeditionActionSucceed() const
+    {
+        return bExpeditionActionSucceeded;
+    }
+
+    /** 마지막으로 확인한 응답 식별자는 자동 검증용이며 화면에 표시하지 않는다. */
+    FGuid GetLastExpeditionActionRequestId() const
+    {
+        return LastExpeditionActionRequestId;
+    }
+
+    /** 마지막 응답의 결과 리비전을 자동 검증에서 읽는다. */
+    int32 GetExpeditionActionResultRevision() const
+    {
+        return ExpeditionActionResultRevision;
+    }
+
+    /** 결과와 철수 요청의 서버 안내를 반환한다. */
+    const FString& GetExpeditionActionMessage() const
+    {
+        return ExpeditionActionMessage;
+    }
+
     /** UI에서 선택한 선택 스킬 동작을 처리한다. */
     void UISelectSkill(int32 Slot);
 
@@ -577,6 +691,55 @@ private:
     bool bPartyPreparationSucceeded = false;
     FString PartyPreparationMessage;
     int32 PartyPreparationResultRevision = 0;
+    FGuid PendingExpeditionActionId;
+    FGuid LastExpeditionActionRequestId;
+    TSet<FGuid> AutoOpenedCompletionIds;
+    bool bExpeditionActionSucceeded = false;
+    FGuid ResultPortalGuidanceExpeditionId;
+    FString ExpeditionActionMessage;
+    int32 ExpeditionActionResultRevision = 0;
+    int32 SelectedResultItemIndex = 0;
+
+    /** 보상 조회 없이 결과 창에 입력 초점만 둔다. */
+    void OpenExpeditionResultPanel();
+
+    /** 별도 결과 요청의 상관 ID와 안내를 준비한다. */
+    bool BeginExpeditionAction(const FString& Message);
+
+    /** 현재 개인 결과 리비전과 서버 거절 사유를 응답한다. */
+    void ReplyExpeditionAction(FGuid RequestId, bool bSuccess, int32 NoticeBefore);
+
+    /** 보상 조회와 확인은 각각 읽기·확인 경로만 호출한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerRequestExpeditionResult(FGuid RequestId, FGuid ExpeditionId);
+
+    /** 결과 확인으로 지급 함수를 재실행하지 않는다. */
+    UFUNCTION(Server, Reliable)
+    void ServerAcknowledgeExpeditionResult(FGuid RequestId, FGuid ExpeditionId, FGuid CompletionId,
+                                           int32 ResultRevision);
+
+    /** 재도전 준비는 원래 완료 원정과 명부를 서버에서 검증한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerPrepareExpeditionRetry(FGuid RequestId, FGuid PartyId, int32 PreparationRevision, FGuid OldExpeditionId,
+                                      FGuid CompletionId);
+
+    /** 전원의 명시적 동의로 새 원정에 입장한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerRetryExpedition(FGuid RequestId, FGuid PartyId, int32 PreparationRevision, FGuid OldExpeditionId,
+                               FGuid CompletionId);
+
+    /** 원래 완료 원정의 기존 귀환 포털 검사를 사용한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerReturnExpeditionResult(FGuid RequestId, FGuid ExpeditionId, FGuid CompletionId);
+
+    /** 철수는 원래 참가 증서의 전원 동의로만 처리한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerSetAbandonConsent(FGuid RequestId, FGuid ExpeditionId, int32 DepartureRevision, bool bConsent);
+
+    /** 결과 요청도 현재 소유 요청과 일치하는 서버 응답만 반영한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientExpeditionActionResult(FGuid RequestId, bool bSuccess, int32 ResultRevision, const FString& Reason);
+
     int32 SelectedSkillSlot = 0;
     int32 SkillPanelTab = 0;
     int32 SelectedTalentTier = 2;
