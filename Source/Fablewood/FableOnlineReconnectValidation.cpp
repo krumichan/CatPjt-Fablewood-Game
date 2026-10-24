@@ -4,6 +4,9 @@
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
+#include "FableGameMode.h"
+#include "FablePartyEncounter.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Dom/JsonObject.h"
@@ -11,15 +14,18 @@
 namespace
 {
     /** 역할별 재접속 대기 지점의 좌표를 반환한다. */
-    FVector SafeReconnectLocation(const AFableCharacter* Hero)
+    FVector SafeReconnectLocation(const AFableCharacter* Hero, bool bSoloParty = false)
     {
-        return Hero && Hero->GetHeroClass() == EFableClass::Archer ? FVector(6480, -1700, 100)
-                                                                   : FVector(6300, -1580, 100);
+        const auto View = FableAdventure::For(Hero);
+        const FVector Canonical = !bSoloParty && Hero && Hero->GetHeroClass() == EFableClass::Archer
+                                      ? FVector(6480, -1700, 100)
+                                      : FVector(6300, -1580, 100);
+        return View.ToWorld(EFableRegion::RootRuins, Canonical);
     }
 }
 
 /** 일반 이동·회피 입력으로 재접속 검증의 안전 경로를 따라 이동한다. */
-bool UFableOnlineValidationDriver::ReconnectWalkSafe(AFablePlayerController* PC)
+bool UFableOnlineValidationDriver::ReconnectWalkSafe(AFablePlayerController* PC, bool bSoloParty)
 {
     auto* Hero = PC ? Cast<AFableCharacter>(PC->GetPawn()) : nullptr;
 
@@ -59,16 +65,17 @@ bool UFableOnlineValidationDriver::ReconnectWalkSafe(AFablePlayerController* PC)
     // 위치·방향·거리 계산 처리
     if (ReconnectWaypoint < 3)
     {
-        // Keep moving around the perimeter until the short-range pursuit has broken.
-        // Distinct inner/outer lanes avoid parking one pawn across the other's path.
+        // 두 명이 같은 원정에 있을 때만 서로 다른 이동선을 사용한다.
+        // 솔로 원정은 각자 다른 공간이므로 검증된 안쪽 경로를 함께 사용한다.
         // 위치·방향·거리 계산에 필요한 값 준비
         const FVector MageRoute[] = {FVector(9200, -1300, 100), FVector(9200, 1200, 100), FVector(6500, 1200, 100)};
         const FVector ArcherRoute[] = {FVector(9500, -1650, 100), FVector(9500, 1500, 100), FVector(6800, 1500, 100)};
-        const FVector Waypoint =
-            Hero->GetHeroClass() == EFableClass::Archer ? ArcherRoute[ReconnectWaypoint] : MageRoute[ReconnectWaypoint];
+        const FVector Waypoint = !bSoloParty && Hero->GetHeroClass() == EFableClass::Archer
+                                     ? ArcherRoute[ReconnectWaypoint]
+                                     : MageRoute[ReconnectWaypoint];
 
         // 이 단계에서 일반 이동·회피 입력으로 재접속 검증의 안전 경로를 따라 이동한다.
-        if (Walk(Waypoint, 80))
+        if (Walk(FableAdventure::For(Hero).ToWorld(EFableRegion::RootRuins, Waypoint), 80))
         {
             ++ReconnectWaypoint;
         }
@@ -76,7 +83,7 @@ bool UFableOnlineValidationDriver::ReconnectWalkSafe(AFablePlayerController* PC)
         return false;
     }
 
-    return Walk(SafeReconnectLocation(Hero), 60) && Hero->GetVelocity().Size2D() < 10;
+    return Walk(SafeReconnectLocation(Hero, bSoloParty), 60) && Hero->GetVelocity().Size2D() < 10;
 }
 
 /** 서버가 관찰한 전투·파티·저장 상태를 JSON으로 만든다. */
@@ -84,17 +91,28 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::ReconnectServerSnapshot(UW
 {
     // 생존 상태와 부활 진행에 필요한 값 준비
     auto J = MakeShared<FJsonObject>();
-    const auto* GS = World->GetGameState<AFableGameState>();
-    J->SetNumberField(TEXT("encounterSerial"), GS ? GS->EncounterSerial : 0);
-    J->SetNumberField(TEXT("wave"), GS ? GS->DungeonWave : 0);
-    J->SetNumberField(TEXT("defeated"), GS ? GS->DefeatedEnemies : 0);
-    J->SetNumberField(TEXT("required"), GS ? GS->RequiredEnemies : 0);
+    FFableAdventureView Progress;
+    for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+    {
+        const auto* Controller = It->Get();
+        const auto* Participant = Controller ? Controller->GetPlayerState<AFablePlayerState>() : nullptr;
+        if (Participant && Participant->ActiveExpeditionId.IsValid())
+        {
+            Progress = FableAdventure::For(Participant);
+            break;
+        }
+    }
+    J->SetNumberField(TEXT("encounterSerial"), Progress ? Progress->EncounterSerial : 0);
+    J->SetNumberField(TEXT("wave"), Progress ? Progress->DungeonWave : 0);
+    J->SetNumberField(TEXT("defeated"), Progress ? Progress->DefeatedEnemies : 0);
+    J->SetNumberField(TEXT("required"), Progress ? Progress->RequiredEnemies : 0);
     TArray<AFableEnemy*> Living;
 
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(World); It; ++It)
     {
-        if (It->IsAlive() && It->GetEncounterRegion() == EFableRegion::RootRuins)
+        if (It->IsAlive() && It->GetEncounterRegion() == EFableRegion::RootRuins &&
+            FableAdventure::For(*It).ExpeditionId() == Progress.ExpeditionId())
         {
             Living.Add(*It);
         }
@@ -131,7 +149,7 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::ReconnectServerSnapshot(UW
         const auto* Hero = Controller ? Cast<AFableCharacter>(Controller->GetPawn()) : nullptr;
 
         // 이 단계에서 서버가 관찰한 전투·파티·저장 상태를 JSON으로 만든다.
-        if (!P || !Hero)
+        if (!P || !Hero || !Progress || P->ActiveExpeditionId != Progress.ExpeditionId())
         {
             Saved = Safe = false;
             continue;
@@ -140,7 +158,7 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::ReconnectServerSnapshot(UW
         // 접속 권한·저장 리비전·멱등 키 처리
         Saved &= P->IsBackendReady() && !P->IsBackendSavePending() && P->bLastSaveSucceeded &&
                  P->GetBackendRevision() == P->GetBackendAcknowledgedRevision();
-        Safe &= Hero->IsAlive() && FableRPG::IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()) &&
+        Safe &= Hero->IsAlive() && Progress.IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()) &&
                 FVector::Dist2D(Hero->GetActorLocation(), SafeReconnectLocation(Hero)) < 220;
 
         // 지역·적·전투 진행 순회
@@ -163,10 +181,13 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::ReconnectServerSnapshot(UW
 /** 같은 서버에서 이탈과 복귀 전후의 적·파티 상태를 기록한다. */
 void UFableOnlineValidationDriver::ObserveReconnectServer(UWorld* World)
 {
-    const auto* GS = World->GetGameState<AFableGameState>();
+    const auto* ServerMode = World->GetAuthGameMode<AFableGameMode>();
+    const auto Encounters = ServerMode ? ServerMode->GetExpeditions() : TArray<AFablePartyEncounter*>();
+    const auto Progress = Encounters.Num() == 1 ? FableAdventure::For(Encounters[0]) : FFableAdventureView();
 
     // 생존 상태와 부활 진행 조건 검사
-    if (!GS || GS->ActiveRegion != EFableRegion::RootRuins || GS->DungeonWave != 1 || GS->DefeatedEnemies != 1)
+    if (!Progress || Progress->ActiveRegion != EFableRegion::RootRuins || Progress->DungeonWave != 1 ||
+        Progress->DefeatedEnemies != 1)
     {
         return;
     }
@@ -231,10 +252,10 @@ void UFableOnlineValidationDriver::ObserveReconnectServer(UWorld* World)
 bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFablePlayerState* P,
                                                  AFableCharacter* Hero, double Now)
 {
-    auto* GS = Hero->GetWorld()->GetGameState<AFableGameState>();
+    const auto Progress = FableAdventure::For(Hero);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!GS)
+    if (!Progress)
     {
         return false;
     }
@@ -243,7 +264,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     if (ReconnectStarted == 0)
     {
         ReconnectStarted = Now;
-        ReconnectSerial = GS->EncounterSerial;
+        ReconnectSerial = Progress->EncounterSerial;
         if (bResumeExpedition)
         {
             if (!Expected || Expected->GetIntegerField(TEXT("encounterSerial")) != ReconnectSerial)
@@ -263,16 +284,18 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     }
 
     // 생존 상태와 부활 진행 처리
-    if (GS->ActiveRegion != EFableRegion::RootRuins || GS->EncounterSerial != ReconnectSerial || GS->DungeonWave != 1 ||
-        GS->DefeatedEnemies > 1 || GS->bPartyRecoveryPending || !Hero->IsAlive())
+    if (Progress->ActiveRegion != EFableRegion::RootRuins || Progress->EncounterSerial != ReconnectSerial ||
+        Progress->DungeonWave != 1 || Progress->DefeatedEnemies > 1 || Progress->bPartyRecoveryPending ||
+        !Hero->IsAlive())
     {
         Finish(
             false,
             FString::Printf(
                 TEXT(
                     "Reconnect checkpoint changed (region=%d serial=%d/%d wave=%d defeated=%d recovery=%d health=%.1f location=%s)."),
-                int32(GS->ActiveRegion), GS->EncounterSerial, ReconnectSerial, GS->DungeonWave, GS->DefeatedEnemies,
-                GS->bPartyRecoveryPending ? 1 : 0, Hero->GetHealth(), *Hero->GetActorLocation().ToCompactString()));
+                int32(Progress->ActiveRegion), Progress->EncounterSerial, ReconnectSerial, Progress->DungeonWave,
+                Progress->DefeatedEnemies, Progress->bPartyRecoveryPending ? 1 : 0, Hero->GetHealth(),
+                *Hero->GetActorLocation().ToCompactString()));
         return false;
     }
 
@@ -281,7 +304,8 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(Hero->GetWorld()); It; ++It)
     {
-        if (It->IsAlive() && It->GetEncounterRegion() == EFableRegion::RootRuins)
+        if (It->IsAlive() && It->GetEncounterRegion() == EFableRegion::RootRuins &&
+            FableAdventure::For(*It).ExpeditionId() == Progress.ExpeditionId())
         {
             Living.Add(*It);
         }
@@ -307,7 +331,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     TArray<TSharedPtr<FJsonValue>> Positions;
 
     // 체력·마나·보호막·피해량 순회
-    for (APlayerState* Member : GS->PlayerArray)
+    for (APlayerState* Member : Progress.Players())
     {
         const auto* Pawn = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
 
@@ -334,7 +358,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     if (ReconnectStep == 0)
     {
         // 생존 상태와 부활 진행 조건 검사
-        if (GS->DefeatedEnemies == 1 && Living.Num() == 2)
+        if (Progress->DefeatedEnemies == 1 && Living.Num() == 2)
         {
             DungeonHold(PC, EKeys::W, false);
             DungeonHold(PC, EKeys::S, false);
@@ -393,7 +417,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     }
 
     // 생존 상태와 부활 진행 조건 검사
-    if (GS->DefeatedEnemies != 1 || Living.Num() != 2)
+    if (Progress->DefeatedEnemies != 1 || Living.Num() != 2)
     {
         Finish(false, TEXT("More than one guardian was credited before reconnection."));
         return false;
@@ -433,7 +457,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     }
 
     // 이 단계에서 보상 저장·클라이언트 중단·동일 캐릭터 복귀의 검증 단계를 진행한다.
-    if (GS->PlayerArray.Num() == 1 && Role == TEXT("client1") && !bResumeExpedition)
+    if (Progress.Players().Num() == 1 && Role == TEXT("client1") && !bResumeExpedition)
     {
         if (!bReconnectPeerGone)
         {
@@ -444,10 +468,10 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
         return false;
     }
 
-    bool BothSafe = GS->PlayerArray.Num() == 2;
+    bool BothSafe = Progress.Players().Num() == 2;
 
     // 현재 월드와 플레이어 참조 순회
-    for (APlayerState* Member : GS->PlayerArray)
+    for (APlayerState* Member : Progress.Players())
     {
         const auto* Other = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr;
         BothSafe &=

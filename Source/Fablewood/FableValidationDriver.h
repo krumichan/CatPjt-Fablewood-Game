@@ -7,7 +7,7 @@
 
 class AFableCharacter;
 class AFableEnemy;
-class AFableGameState;
+struct FFableAdventureView;
 class APlayerController;
 class FJsonObject;
 
@@ -138,7 +138,7 @@ private:
     bool ServerCooldownsPassed() const;
 
     /** 복구 확인 지점 결과를 검증 이력에 기록한다. */
-    void RecordCheckpoint(FCheckpoint& Checkpoint, const AFableGameState* State);
+    void RecordCheckpoint(FCheckpoint& Checkpoint, const FFableAdventureView& State);
 
     /** 대기열 화면 캡처에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
     void QueueScreenshot(const FString& Name);

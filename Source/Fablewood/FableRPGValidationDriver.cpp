@@ -1,5 +1,6 @@
 #include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
@@ -185,6 +186,12 @@ void UFableRPGValidationDriver::Fight()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         const float D = FVector::Dist2D(Hero->GetActorLocation(), It->GetActorLocation());
         if (It->IsAlive() && D < Distance)
         {
@@ -218,6 +225,11 @@ void UFableRPGValidationDriver::Fight()
             AFableCharacter* Mage = nullptr;
             for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
             {
+                if (!FableAdventure::SameScope(PC.Get(), *It))
+                {
+                    continue;
+                }
+
                 if (It->GetHeroClass() == EFableClass::Mage && It->GetPlayerState())
                 {
                     Mage = *It;
@@ -365,6 +377,12 @@ void UFableRPGValidationDriver::ObserveSkills()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (It->GetSlowTimeRemaining() > 0 && It->GetSlowMultiplier() < 0.99f)
         {
             bSlowObserved = true;
@@ -374,6 +392,12 @@ void UFableRPGValidationDriver::ObserveSkills()
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableProjectile> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (It->GetOwner() == Hero && It->IsPiercingShot())
         {
             bPiercingObserved = true;
@@ -1012,6 +1036,12 @@ bool UFableRPGValidationDriver::PreparePotions()
         // 지역·적·전투 진행 순회
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(PC.Get(), *It))
+            {
+                continue;
+            }
+
             const float D = FVector::Dist2D(Hero->GetActorLocation(), It->GetActorLocation());
             if (It->IsAlive() && D < Distance)
             {
@@ -1185,7 +1215,7 @@ bool UFableRPGValidationDriver::SerializeReport(const FString& Status, const FSt
     Object->SetNumberField(TEXT("step"), Step);
 
     // 생존 상태와 부활 진행 처리
-    if (const AFableGameState* State = GetWorld()->GetGameState<AFableGameState>())
+    if (const FFableAdventureView State = FableAdventure::For(PC.Get()))
     {
         Object->SetNumberField(TEXT("active_region"), uint8(State->ActiveRegion));
         Object->SetNumberField(TEXT("adventure_stage"), uint8(State->AdventureStage));
@@ -1525,8 +1555,8 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
     }
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
-    if (!PS || !PS->bProfileLoaded || !Hero || !GS || GS->PlayerArray.Num() != 2)
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!PS || !PS->bProfileLoaded || !Hero || !GS || GS.Players().Num() != 2)
     {
         return;
     }
@@ -1542,6 +1572,11 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
     PreviousLocation = Position;
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (*It != Hero && It->GetPlayerState())
         {
             if (!PreviousRemote.IsZero())
@@ -1576,6 +1611,11 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
         bool bRecoveryPriority = GS->bPartyRecoveryPending || !Hero->IsAlive();
         for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
         {
+            if (!FableAdventure::SameScope(PC.Get(), *It))
+            {
+                continue;
+            }
+
             if (It->GetPlayerState() && (It->IsDowned() || It->GetReviveTarget() || It->GetReviver()))
             {
                 bRecoveryPriority = true;
@@ -1699,7 +1739,7 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
         bool bAllAccepted = true;
 
         // 퀘스트와 이야기 진행 순회
-        for (APlayerState* Other : GS->PlayerArray)
+        for (APlayerState* Other : GS.Players())
         {
             const AFablePlayerState* P = Cast<AFablePlayerState>(Other);
             bAllAccepted &= P && P->ForestQuest != EFableQuestStage::Available;
@@ -1864,7 +1904,7 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
     case 17:
     {
         bool bReady = true;
-        for (APlayerState* Other : GS->PlayerArray)
+        for (APlayerState* Other : GS.Players())
         {
             const AFablePlayerState* P = Cast<AFablePlayerState>(Other);
             bReady &= P && P->IsDungeonEligible();
@@ -1881,11 +1921,8 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
             Advance(19);
             break;
         }
-        if (WalkTo(FableRPG::PortalLocation() + FVector(0, -100, 100)) && Now - LastAction > 1)
-        {
-            Key(EKeys::E);
-            LastAction = Now;
-        }
+        // 일반 클라이언트와 같은 명부·선택·개별 준비 경로로 입장한다.
+        AdventurePortal(EFableRegion::RootRuins);
         break;
     case 19:
         if (!bBossCaptured && GS->AdventureStage == EFableAdventureStage::Boss)
@@ -1906,12 +1943,14 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
         }
         break;
     case 20:
-        if (GS->AdventureStage == EFableAdventureStage::Village || Hero->GetActorLocation().X < 4000)
+        if (GS->AdventureStage == EFableAdventureStage::Village ||
+            GS.IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
         {
             Advance(21);
             break;
         }
-        if (WalkTo(FableRPG::DungeonEntrance()) && Now - LastAction > 1)
+        if (WalkTo(FableAdventure::For(PC.Get()).ToWorld(EFableRegion::RootRuins, FableRPG::DungeonEntrance())) &&
+            Now - LastAction > 1)
         {
             Key(EKeys::E);
             LastAction = Now;
@@ -2281,7 +2320,7 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
     case 162:
     {
         bool bAllReady = true;
-        for (APlayerState* Other : GS->PlayerArray)
+        for (APlayerState* Other : GS.Players())
         {
             const AFablePlayerState* Profile = Cast<AFablePlayerState>(Other);
             bAllReady &= Profile && Profile->IsDungeonEligible();
@@ -2300,12 +2339,8 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
             Advance(164);
             break;
         }
-        if (WalkTo(FableRPG::PortalLocation() + FVector(Role == TEXT("host") ? -80 : 80, -120, 100), 110) &&
-            Now - LastAction > 1)
-        {
-            Key(EKeys::E);
-            LastAction = Now;
-        }
+        // 일반 클라이언트와 같은 명부·선택·개별 준비 경로로 입장한다.
+        AdventurePortal(EFableRegion::RootRuins);
         break;
     case 164:
         if (!Hero->IsAlive())
@@ -2331,12 +2366,14 @@ void UFableRPGValidationDriver::TickComponent(float DeltaTime, ELevelTick TickTy
         }
         break;
     case 165:
-        if (GS->AdventureStage == EFableAdventureStage::Village || Hero->GetActorLocation().X < 4000)
+        if (GS->AdventureStage == EFableAdventureStage::Village ||
+            GS.IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
         {
             Advance(166);
             break;
         }
-        if (WalkTo(FableRPG::DungeonEntrance()) && Now - LastAction > 1)
+        if (WalkTo(FableAdventure::For(PC.Get()).ToWorld(EFableRegion::RootRuins, FableRPG::DungeonEntrance())) &&
+            Now - LastAction > 1)
         {
             Key(EKeys::E);
             LastAction = Now;

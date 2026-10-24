@@ -426,16 +426,16 @@ bool FFableTalentSelectionTest::RunTest(const FString& Parameters)
     for (EFableAdventureStage Stage :
          {EFableAdventureStage::Forest, EFableAdventureStage::Dungeon, EFableAdventureStage::Boss})
     {
-        F.GS->AdventureStage = Stage;
+        F.GS->FieldProgress.AdventureStage = Stage;
         F.Select(2, EFableTalentPath::First);
         TestEqual(TEXT("An ongoing encounter rejects build changes"), int32(S->GetTalentChoice(2)), 0);
     }
 
     // 직업·스킬·특성 빌드 처리
-    F.GS->AdventureStage = EFableAdventureStage::Village;
-    F.GS->bPartyRecoveryPending = true;
+    F.GS->FieldProgress.AdventureStage = EFableAdventureStage::Village;
+    F.GS->FieldProgress.bPartyRecoveryPending = true;
     F.Select(2, EFableTalentPath::First);
-    F.GS->bPartyRecoveryPending = false;
+    F.GS->FieldProgress.bPartyRecoveryPending = false;
     TestEqual(TEXT("Party recovery rejects selection"), int32(S->GetTalentChoice(2)), 0);
     F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(330, 0, 299));
     F.Select(2, EFableTalentPath::First);

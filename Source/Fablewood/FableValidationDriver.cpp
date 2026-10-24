@@ -1,4 +1,5 @@
 #include "FableValidationDriver.h"
+#include "FableAdventure.h"
 
 #include "FableCharacter.h"
 #include "FableEnemy.h"
@@ -411,7 +412,7 @@ void UFableValidationDriver::DriveCombat(AFableCharacter* Pawn, int32 Round, flo
 }
 
 /** 복구 확인 지점 결과를 검증 이력에 기록한다. */
-void UFableValidationDriver::RecordCheckpoint(FCheckpoint& Checkpoint, const AFableGameState* State)
+void UFableValidationDriver::RecordCheckpoint(FCheckpoint& Checkpoint, const FFableAdventureView& State)
 {
     Checkpoint.Round = State->Round;
     Checkpoint.Defeated = State->DefeatedEnemies;
@@ -690,16 +691,18 @@ void UFableValidationDriver::TickComponent(float DeltaTime, ELevelTick TickType,
         return;
     }
     AFableCharacter* Pawn = Cast<AFableCharacter>(PC->GetPawn());
-    AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
-    if (State)
+    // 초기 프로토타입은 사설 원정 없이 공유 필드의 두 라운드만 검증한다.
+    const AFableGameState* RootState = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView State = FableAdventure::Field(GetWorld());
+    if (RootState)
     {
-        MaximumPlayerCount = FMath::Max(MaximumPlayerCount, State->PlayerArray.Num());
+        MaximumPlayerCount = FMath::Max(MaximumPlayerCount, RootState->PlayerArray.Num());
     }
     if (PC->PlayerState)
     {
         LocalPlayerId = PC->PlayerState->GetPlayerId();
     }
-    if (!State || !Pawn || !PC->PlayerInput)
+    if (!RootState || !State || !Pawn || !PC->PlayerInput)
     {
         ReleaseInputs();
         if (Now - LastReportAt > 0.25)
@@ -722,7 +725,7 @@ void UFableValidationDriver::TickComponent(float DeltaTime, ELevelTick TickType,
             ++PawnCount;
         }
     }
-    bReady = State->PlayerArray.Num() == 2 && PawnCount == 2 && Pawn->IsAlive();
+    bReady = RootState->PlayerArray.Num() == 2 && PawnCount == 2 && Pawn->IsAlive();
     if (ScenarioStartedAt == 0.0)
     {
         Phase = TEXT("awaiting_quorum");
@@ -739,7 +742,7 @@ void UFableValidationDriver::TickComponent(float DeltaTime, ELevelTick TickType,
         return;
     }
     ObserveMovement(Pawn);
-    ObserveCooldown(Pawn, LocalCooldown, State->GetServerWorldTimeSeconds());
+    ObserveCooldown(Pawn, LocalCooldown, RootState->GetServerWorldTimeSeconds());
     if (Pawn->GetDodgeCooldownRemaining() > 0.1f)
     {
         LastDodgeRound = State->Round;
@@ -751,7 +754,7 @@ void UFableValidationDriver::TickComponent(float DeltaTime, ELevelTick TickType,
             if (const APlayerState* OwnerState = It->GetPlayerState())
             {
                 ObserveCooldown(*It, ServerCooldowns.FindOrAdd(OwnerState->GetPlayerId()),
-                                State->GetServerWorldTimeSeconds());
+                                RootState->GetServerWorldTimeSeconds());
             }
         }
     }

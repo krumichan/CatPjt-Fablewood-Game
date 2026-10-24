@@ -4,6 +4,9 @@
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
+#include "FableGameMode.h"
+#include "FablePartyEncounter.h"
 #include "FableInventorySnapshot.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -11,6 +14,52 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "Dom/JsonObject.h"
+
+/** 완료된 해당 파티의 보스·부활·보상만 서버에서 보존한다. */
+void UFableOnlineValidationDriver::ObserveDungeonServer(UWorld* World)
+{
+    const auto* ServerMode = World ? World->GetAuthGameMode<AFableGameMode>() : nullptr;
+    if (ServerDungeonObservation || !ServerMode)
+    {
+        return;
+    }
+    for (const auto* Encounter : ServerMode->GetExpeditions())
+    {
+        const auto Progress = FableAdventure::For(Encounter);
+        if (!Progress || Progress->ActiveRegion != EFableRegion::RootRuins ||
+            Progress->AdventureStage != EFableAdventureStage::Cleared)
+        {
+            continue;
+        }
+        TArray<TSharedPtr<FJsonValue>> Members;
+        bool Reviver = false, Revived = false;
+        for (APlayerState* Entry : Progress.Players())
+        {
+            const auto* Participant = Cast<AFablePlayerState>(Entry);
+            const auto* Hero = Participant ? Cast<AFableCharacter>(Participant->GetPawn()) : nullptr;
+            if (!Participant || !Hero || !Hero->IsAlive() || !Participant->IsBackendReady() ||
+                Participant->IsBackendSavePending() || Participant->DungeonQuest != EFableQuestStage::Ready ||
+                !Progress.IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()))
+            {
+                continue;
+            }
+            Reviver |= Hero->GetRevivesPerformedCount() > 0;
+            Revived |= Hero->GetTimesRevivedCount() > 0;
+            Members.Add(MakeShared<FJsonValueObject>(Profile(Participant)));
+        }
+        if (Members.Num() == 2 && Reviver && Revived)
+        {
+            ServerDungeonObservation = MakeShared<FJsonObject>();
+            ServerDungeonObservation->SetArrayField(TEXT("members"), Members);
+            ServerDungeonObservation->SetNumberField(TEXT("encounterSerial"), Progress->EncounterSerial);
+            ServerDungeonObservation->SetNumberField(TEXT("dungeonWave"), Progress->DungeonWave);
+            ServerDungeonObservation->SetBoolField(TEXT("bossDefeated"),
+                                                   Progress->bObjectiveComplete && Progress->BossHealth == 0);
+            Checks.Add(TEXT("server_observed_dungeon_completion"), true);
+            return;
+        }
+    }
+}
 
 /** 던전 입력 유지에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
 void UFableOnlineValidationDriver::DungeonHold(AFablePlayerController* PC, const FKey& Key, bool Held)
@@ -87,10 +136,10 @@ AFableEnemy* UFableOnlineValidationDriver::DungeonTarget(AFableCharacter* Hero) 
     // 지역·적·전투 진행에 필요한 값 준비
     AFableEnemy* Target = nullptr;
     float Distance = MAX_flt;
-    const auto* GS = Hero ? Hero->GetWorld()->GetGameState<AFableGameState>() : nullptr;
+    const auto Progress = FableAdventure::For(Hero);
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!GS)
+    if (!Progress)
     {
         return nullptr;
     }
@@ -99,7 +148,8 @@ AFableEnemy* UFableOnlineValidationDriver::DungeonTarget(AFableCharacter* Hero) 
     for (TActorIterator<AFableEnemy> It(Hero->GetWorld()); It; ++It)
     {
         const float D = FVector::Dist2D(Hero->GetActorLocation(), It->GetActorLocation());
-        if (It->IsAlive() && It->GetEncounterRegion() == GS->ActiveRegion && D < Distance)
+        if (It->IsAlive() && It->GetEncounterRegion() == Progress->ActiveRegion &&
+            FableAdventure::For(*It).ExpeditionId() == Progress.ExpeditionId() && D < Distance)
         {
             Distance = D;
             Target = *It;
@@ -203,10 +253,16 @@ void UFableOnlineValidationDriver::DungeonFight(AFablePlayerController* PC, doub
 bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFablePlayerState* P, AFableCharacter* Hero,
                                                double Now)
 {
-    auto* GS = Hero->GetWorld()->GetGameState<AFableGameState>();
+    if (Scenario == TEXT("party-isolation") && DungeonStep >= 6)
+    {
+        return TickPartyIsolation(PC, P, Hero, Now);
+    }
+
+    const auto Progress = FableAdventure::For(Hero);
+    const auto* WorldState = Hero->GetWorld()->GetGameState<AFableGameState>();
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!GS)
+    if (!Progress || !WorldState)
     {
         return false;
     }
@@ -235,11 +291,11 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
     };
     const auto Party = [&](EFableQuestId Quest, EFableQuestStage Stage)
     {
-        if (GS->PlayerArray.Num() != 2)
+        if (WorldState->PlayerArray.Num() != 2)
         {
             return false;
         }
-        for (APlayerState* Entry : GS->PlayerArray)
+        for (APlayerState* Entry : WorldState->PlayerArray)
         {
             const auto* Other = Cast<AFablePlayerState>(Entry);
             if (!Other || Other->GetQuestStage(Quest) != Stage)
@@ -256,7 +312,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         Finish(false, FString::Printf(TEXT("Online dungeon step %d timed out."), DungeonStep));
         return false;
     }
-    if (GS->bPartyRecoveryPending || Hero->IsDefeated())
+    if (Progress->bPartyRecoveryPending || Hero->IsDefeated())
     {
         Finish(false, TEXT("The online dungeon party required automatic recovery."));
         return false;
@@ -344,7 +400,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
             {
                 Checks.Add(TEXT("entry_forest_only_totals"),
                            P->Gold == 135 && P->Ore == 7 && P->Level == 2 && P->Experience == 105 &&
-                               P->Inventory.Num() == 5 && P->DungeonCompletions == 0 && GS->DefeatedEnemies == 0);
+                               P->Inventory.Num() == 5 && P->DungeonCompletions == 0 && Progress->DefeatedEnemies == 0);
                 if (!Checks.FindRef(TEXT("entry_forest_only_totals")))
                 {
                     Finish(false, TEXT("Entry-only checkpoint included an unexpected dungeon reward."));
@@ -362,11 +418,11 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         {
             return TickReconnect(PC, P, Hero, Now);
         }
-        if (GS->DungeonWave >= 2)
+        if (Progress->DungeonWave >= 2)
         {
             Checks.Add(TEXT("second_wave"), true);
         }
-        if (GS->AdventureStage == EFableAdventureStage::Boss)
+        if (Progress->AdventureStage == EFableAdventureStage::Boss)
         {
             Checks.Add(TEXT("boss_seen"), true);
             if (Target && Target->IsBoss() && Target->GetHealth() <= Target->GetMaxHealth() * .70f)
@@ -383,7 +439,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         AFableCharacter* Fallen = nullptr;
 
         // 현재 월드와 플레이어 참조 순회
-        for (APlayerState* Entry : GS->PlayerArray)
+        for (APlayerState* Entry : WorldState->PlayerArray)
         {
             auto* Other = Cast<AFablePlayerState>(Entry);
             if (Other && Other->HeroClass == EFableClass::Archer)
@@ -423,13 +479,16 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         }
         else
         {
-            DungeonWalk(PC, FableRPG::RegionEntrance(EFableRegion::RootRuins) + FVector(-350, -300, 100), 100);
+            DungeonWalk(PC,
+                        Progress.ToWorld(EFableRegion::RootRuins,
+                                         FableRPG::RegionEntrance(EFableRegion::RootRuins) + FVector(-350, -300, 100)),
+                        100);
         }
 
         break;
     }
     case 9:
-        if (GS->AdventureStage != EFableAdventureStage::Cleared)
+        if (Progress->AdventureStage != EFableAdventureStage::Cleared)
         {
             DungeonFight(PC, Now);
             break;
@@ -442,7 +501,7 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         AFableCharacter* Fallen = nullptr;
 
         // 현재 월드와 플레이어 참조 순회
-        for (APlayerState* Entry : GS->PlayerArray)
+        for (APlayerState* Entry : WorldState->PlayerArray)
         {
             auto* Other = Cast<AFablePlayerState>(Entry);
             if (Other && Other->HeroClass == EFableClass::Archer)
@@ -521,8 +580,8 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         }
         break;
     case 12:
-        if (GS->ActiveRegion == EFableRegion::Village &&
-            FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
+        if (Progress->ActiveRegion == EFableRegion::Village &&
+            Progress.IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
         {
             Advance(13);
             break;

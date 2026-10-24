@@ -69,8 +69,8 @@ private:
     /** 보상 저장·클라이언트 중단·동일 캐릭터 복귀의 검증 단계를 진행한다. */
     bool TickReconnect(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
 
-    /** 일반 이동·회피 입력으로 재접속 검증의 안전 경로를 따라 이동한다. */
-    bool ReconnectWalkSafe(AFablePlayerController* PC);
+    /** 일반 이동·회피 경로를 사용하며 솔로 원정만 직업과 무관하게 같은 안전 경로를 선택한다. */
+    bool ReconnectWalkSafe(AFablePlayerController* PC, bool bSoloParty = false);
 
     /** 같은 서버에서 이탈과 복귀 전후의 적·파티 상태를 기록한다. */
     void ObserveReconnectServer(UWorld* World);
@@ -97,6 +97,23 @@ private:
     FString ExpeditionSelfKey, ExpeditionPeerKey, ExpeditionRequestFingerprint;
     TSharedPtr<FJsonObject> ExpeditionReport, ServerExpeditionArrival;
 
+    /** 두 솔로 파티의 처치·전멸·귀환이 서로에게 전파되지 않는지 실제 입력으로 검증한다. */
+    bool TickPartyIsolation(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
+
+    /** 서버가 관찰한 두 독립 원정의 단계별 정본 스냅숏을 보존한다. */
+    void ObserveIsolationServer(UWorld* World);
+
+    /** 지정한 두 캐릭터의 원정·적·저장 상태를 서버에서 관찰한다. */
+    TSharedPtr<FJsonObject> IsolationServerSnapshot(UWorld* World) const;
+
+    int32 IsolationStep = 0;
+    double IsolationStepAt = 0, IsolationLastSentAt = -10;
+    bool bIsolationRequestSent = false;
+    FString IsolationSelfKey, IsolationPeerKey;
+    FGuid IsolationPartyId, IsolationExpeditionId;
+    TWeakObjectPtr<AFableEnemy> IsolationVictim;
+    TSharedPtr<FJsonObject> IsolationReport, ServerIsolationReport;
+
     /** 파티 UI 입력과 서버 복제 결과를 단계별로 관찰한다. */
     bool TickParty(AFablePlayerController* PC, AFablePlayerState* Profile, double Now);
 
@@ -114,6 +131,9 @@ private:
 
     /** 협동 던전의 입장·웨이브·부활·보스 검증을 순서대로 진행한다. */
     bool TickDungeon(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
+
+    /** 완료된 해당 파티의 보스·부활·보상만 서버에서 보존한다. */
+    void ObserveDungeonServer(UWorld* World);
 
     /** 던전 입력 유지에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
     void DungeonHold(AFablePlayerController* PC, const FKey& Key, bool Held);

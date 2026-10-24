@@ -109,7 +109,8 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
-            Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry"))
+            Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry") &&
+            Scenario != TEXT("party-isolation"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -280,6 +281,15 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     {
         J->SetObjectField(TEXT("serverExpeditionArrival"), ServerExpeditionArrival);
     }
+    if (IsolationReport)
+    {
+        J->SetObjectField(TEXT("partyIsolation"), IsolationReport);
+    }
+    if (ServerIsolationReport)
+    {
+        J->SetObjectField(TEXT("serverIsolation"), ServerIsolationReport);
+    }
+    J->SetNumberField(TEXT("isolationStep"), IsolationStep);
     J->SetNumberField(TEXT("expeditionStep"), ExpeditionStep);
     J->SetNumberField(TEXT("dungeonStep"), DungeonStep);
     J->SetNumberField(TEXT("processId"), FPlatformProcess::GetCurrentProcessId());
@@ -583,6 +593,10 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (Scenario == TEXT("party-isolation"))
+        {
+            ObserveIsolationServer(World);
+        }
         if (Scenario == TEXT("party-entry") || Scenario == TEXT("dungeon") || Scenario == TEXT("growth") ||
             Scenario == TEXT("reconnect"))
         {
@@ -600,47 +614,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
             ObserveReconnectServer(World);
         }
 
-        // 생존 상태와 부활 진행 처리
-        if (!ServerDungeonObservation)
-        {
-            const auto* GS = World->GetGameState<AFableGameState>();
-            if (GS && GS->ActiveRegion == EFableRegion::RootRuins &&
-                GS->AdventureStage == EFableAdventureStage::Cleared)
-            {
-                TArray<TSharedPtr<FJsonValue>> Members;
-                bool Reviver = false, Revived = false;
-                for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
-                {
-                    // 현재 월드와 플레이어 참조에 필요한 값 준비
-                    const auto* Controller = It->Get();
-                    const auto* State = Controller ? Controller->GetPlayerState<AFablePlayerState>() : nullptr;
-                    const auto* Hero = Controller ? Cast<AFableCharacter>(Controller->GetPawn()) : nullptr;
-
-                    // 퀘스트와 이야기 진행 처리
-                    if (!State || !Hero || !Hero->IsAlive() || !State->IsBackendReady() ||
-                        State->IsBackendSavePending() || State->DungeonQuest != EFableQuestStage::Ready ||
-                        !FableRPG::IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()))
-                    {
-                        continue;
-                    }
-
-                    // 생존 상태와 부활 진행 처리
-                    Reviver |= Hero->GetRevivesPerformedCount() > 0;
-                    Revived |= Hero->GetTimesRevivedCount() > 0;
-                    Members.Add(MakeShared<FJsonValueObject>(Profile(State)));
-                }
-                if (Members.Num() == 2 && Reviver && Revived)
-                {
-                    ServerDungeonObservation = MakeShared<FJsonObject>();
-                    ServerDungeonObservation->SetArrayField(TEXT("members"), Members);
-                    ServerDungeonObservation->SetNumberField(TEXT("encounterSerial"), GS->EncounterSerial);
-                    ServerDungeonObservation->SetNumberField(TEXT("dungeonWave"), GS->DungeonWave);
-                    ServerDungeonObservation->SetBoolField(TEXT("bossDefeated"),
-                                                           GS->bObjectiveComplete && GS->BossHealth == 0);
-                    Checks.Add(TEXT("server_observed_dungeon_completion"), true);
-                }
-            }
-        }
+        ObserveDungeonServer(World);
         // Retain one simultaneous server observation, even after both clients leave.
         // Client PlayerArray counts alone cannot prove two distinct authenticated owners.
 
@@ -950,10 +924,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         {
             Checkpoint = Profile(P);
             Capture(Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
-                    : Scenario == TEXT("party-entry") ? TEXT("party-entry-finished")
-                    : Scenario == TEXT("growth")      ? TEXT("growth-finished")
-                    : Scenario == TEXT("reconnect")   ? TEXT("reconnected-dungeon")
-                                                      : TEXT("dungeon-cleared"));
+                    : Scenario == TEXT("party-entry")     ? TEXT("party-entry-finished")
+                    : Scenario == TEXT("party-isolation") ? TEXT("party-isolation-finished")
+                    : Scenario == TEXT("growth")          ? TEXT("growth-finished")
+                    : Scenario == TEXT("reconnect")       ? TEXT("reconnected-dungeon")
+                                                          : TEXT("dungeon-cleared"));
             Advance(30);
         }
         break;

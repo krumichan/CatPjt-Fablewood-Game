@@ -3,6 +3,7 @@
 #include "FableEnemy.h"
 #include "FableEnemyBolt.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FablePartyManager.h"
 #include "FableGameState.h"
@@ -207,6 +208,11 @@ AFableCharacter* UFableCoopValidationDriver::Partner() const
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableCharacter> It(GetWorld()); It; ++It)
     {
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (*It != Own && It->GetPlayerState<AFablePlayerState>())
         {
             return *It;
@@ -221,7 +227,7 @@ AFableEnemy* UFableCoopValidationDriver::NearestEnemy(bool bBossOnly, bool bPref
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     const APawn* Hero = PC.IsValid() ? PC->GetPawn() : nullptr;
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!Hero || !GS)
@@ -236,6 +242,12 @@ AFableEnemy* UFableCoopValidationDriver::NearestEnemy(bool bBossOnly, bool bPref
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (!It->IsAlive() || It->GetEncounterRegion() != GS->ActiveRegion || (bBossOnly && !It->IsBoss()))
         {
             continue;
@@ -256,12 +268,18 @@ AFableEnemy* UFableCoopValidationDriver::NearestEnemy(bool bBossOnly, bool bPref
 int32 UFableCoopValidationDriver::EnemyCount() const
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
     int32 Count = 0;
 
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (It->IsAlive() && GS && It->GetEncounterRegion() == GS->ActiveRegion)
         {
             ++Count;
@@ -283,6 +301,12 @@ bool UFableCoopValidationDriver::EnemiesAreFresh() const
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (It->IsAlive() && !FMath::IsNearlyEqual(It->GetHealth(), It->GetMaxHealth(), .1f))
         {
             return false;
@@ -295,16 +319,16 @@ bool UFableCoopValidationDriver::EnemiesAreFresh() const
 /** 파티원이 협동 검증의 입장 조건을 모두 충족하는지 확인한다. */
 bool UFableCoopValidationDriver::PartyEligible(EFableRegion Region) const
 {
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-    if (!GS || GS->PlayerArray.Num() != (bSolo ? 1 : 2))
+    if (!GS || GS.Players().Num() != (bSolo ? 1 : 2))
     {
         return false;
     }
 
     // 퀘스트와 이야기 진행 순회
-    for (const APlayerState* Entry : GS->PlayerArray)
+    for (const APlayerState* Entry : GS.Players())
     {
         const AFablePlayerState* Profile = Cast<AFablePlayerState>(Entry);
         if (!Profile || !Profile->bProfileLoaded)
@@ -402,8 +426,8 @@ void UFableCoopValidationDriver::EnterRegion(EFableRegion Region, bool bRetry)
 
     AFablePlayerState* Profile = PC->GetPlayerState<AFablePlayerState>();
     AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
-    AFableGameState* State = GetWorld()->GetGameState<AFableGameState>();
-    if (!Profile || !Manager || !State || State->PlayerArray.Num() != (bSolo ? 1 : 2))
+    const FFableAdventureView State = FableAdventure::For(PC.Get());
+    if (!Profile || !Manager || !State || State.Players().Num() != (bSolo ? 1 : 2))
     {
         LastAction = Now;
         return;
@@ -434,7 +458,7 @@ void UFableCoopValidationDriver::EnterRegion(EFableRegion Region, bool bRetry)
     {
         if (bLeader)
         {
-            for (APlayerState* Entry : State->PlayerArray)
+            for (APlayerState* Entry : State.Players())
             {
                 AFablePlayerState* Peer = Cast<AFablePlayerState>(Entry);
                 if (Peer && Peer != Profile && !Peer->PartyPlayerKey.IsEmpty() &&
@@ -629,7 +653,12 @@ void UFableCoopValidationDriver::TickSetup()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds();
     const EFableClass Wanted = Role == TEXT("host") ? EFableClass::Mage : EFableClass::Archer;
     const bool bRoot = Scenario == TEXT("root-boss-wipe"), bMoon = Scenario == TEXT("moon-seal-wipe");
@@ -640,7 +669,7 @@ void UFableCoopValidationDriver::TickSetup()
     // 지역·적·전투 진행 처리
     if (Step == 0)
     {
-        if (GS->PlayerArray.Num() != (bSolo ? 1 : 2))
+        if (GS.Players().Num() != (bSolo ? 1 : 2))
         {
             return;
         }
@@ -739,7 +768,12 @@ void UFableCoopValidationDriver::TickRescue()
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     AFableCharacter* Other = Partner();
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds(), Wait = Now - StepAt;
     AFableCharacter* Fallen = Role == TEXT("host") ? Hero : Other;
 
@@ -922,7 +956,7 @@ void UFableCoopValidationDriver::TickRescue()
         }
 
         // 생존 상태와 부활 진행 조건 검사
-        if (Scenario == TEXT("disconnect") && GS->PlayerArray.Num() == 1 && GS->PartyRecoveryCount > InitialRecovery &&
+        if (Scenario == TEXT("disconnect") && GS.Players().Num() == 1 && GS->PartyRecoveryCount > InitialRecovery &&
             Hero->IsAlive())
         {
             Checks.Add(TEXT("disconnect_recovered"), !Hero->GetReviver() && !Hero->GetReviveTarget());
@@ -953,7 +987,7 @@ void UFableCoopValidationDriver::TickRescue()
         }
 
         // 생존 상태와 부활 진행 처리
-        if ((Scenario != TEXT("disconnect") || (GS->PlayerArray.Num() == 2 && !GS->bPartyRecoveryPending)) &&
+        if ((Scenario != TEXT("disconnect") || (GS.Players().Num() == 2 && !GS->bPartyRecoveryPending)) &&
             (Fallen->IsDefeated() || (Fallen->IsAlive() && Hero->GetTimesRevivedCount() == 0)))
         {
             Finish(false, TEXT("Revive window expired or automatic recovery replaced ally revival."));
@@ -1259,7 +1293,11 @@ void UFableCoopValidationDriver::TickTimeout()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     AFableCharacter* Fallen = Role == TEXT("host") ? Hero : Partner();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
     if (!Fallen)
@@ -1341,7 +1379,12 @@ void UFableCoopValidationDriver::TickWipe()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds();
     const bool bRoot = Scenario == TEXT("root-boss-wipe"), bMoon = Scenario == TEXT("moon-seal-wipe");
     const EFableRegion Region = bRoot   ? EFableRegion::RootRuins
@@ -1393,7 +1436,8 @@ void UFableCoopValidationDriver::TickWipe()
             Fight();
             return;
         }
-        if (WalkTo(FableRPG::MoonSealLocation(0), 180) && Now - LastAction > .8)
+        if (WalkTo(FableAdventure::For(PC.Get()).ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(0)), 180) &&
+            Now - LastAction > .8)
         {
             Key(EKeys::E);
             LastAction = Now;
@@ -1503,7 +1547,12 @@ void UFableCoopValidationDriver::TickCompletion()
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds();
 
     // 검증 입력과 키 유지 상태 처리
@@ -1532,7 +1581,7 @@ void UFableCoopValidationDriver::TickCompletion()
     // Both observers must record fresh enemies / full boss health before cleanup can attack.
 
     // 검증 입력과 키 유지 상태 조건 검사
-    if (GS->PlayerArray.Num() != ExpectedPlayers || (ExpectedPlayers == 2 && PeerStep() < 60))
+    if (GS.Players().Num() != ExpectedPlayers || (ExpectedPlayers == 2 && PeerStep() < 60))
     {
         CompletionQuietSince = -1;
         Stop();
@@ -1565,6 +1614,12 @@ void UFableCoopValidationDriver::TickCompletion()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         bHasEnemyBolt = true;
         break;
     }
@@ -1694,7 +1749,7 @@ void UFableCoopValidationDriver::TickComponent(float DeltaTime, ELevelTick TickT
     Release();
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
 
     // 프로필과 저장 스냅숏 조건 검사
     if (!Hero || !PS || !PS->bProfileLoaded || !GS)
@@ -1736,7 +1791,7 @@ void UFableCoopValidationDriver::TickComponent(float DeltaTime, ELevelTick TickT
     if (Phase == TEXT("resume"))
     {
         // 생존 상태와 부활 진행 조건 검사
-        if (Now - StepAt < 4 || GS->PlayerArray.Num() != (bSolo ? 1 : 2))
+        if (Now - StepAt < 4 || GS.Players().Num() != (bSolo ? 1 : 2))
         {
             return;
         }
@@ -1907,7 +1962,7 @@ FString UFableCoopValidationDriver::SerializeReport(const FString& Status, const
     // JSON 계약과 검증 기록에 필요한 값 준비
     const AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
     const AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
-    const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
     TSharedRef<FJsonObject> J = MakeShared<FJsonObject>();
     J->SetBoolField(TEXT("report_snapshot_frozen"), Status == TEXT("passed") || Status == TEXT("failed"));
     J->SetStringField(TEXT("run_id"), RunId);
@@ -1922,7 +1977,7 @@ FString UFableCoopValidationDriver::SerializeReport(const FString& Status, const
                                                                                         : TEXT("client"));
     J->SetNumberField(TEXT("step"), Step);
     J->SetNumberField(TEXT("substep"), Substep);
-    J->SetNumberField(TEXT("player_count"), GS ? GS->PlayerArray.Num() : 0);
+    J->SetNumberField(TEXT("player_count"), GS ? GS.Players().Num() : 0);
     J->SetNumberField(TEXT("movement_cm"), Movement);
     J->SetNumberField(TEXT("attack_inputs"), AttackInputs);
     J->SetStringField(TEXT("profile_signature"), Signature(PS));
@@ -1986,6 +2041,12 @@ FString UFableCoopValidationDriver::SerializeReport(const FString& Status, const
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemyBolt> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         ++EnemyBoltCount;
     }
 

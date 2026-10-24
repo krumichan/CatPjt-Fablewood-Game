@@ -1,5 +1,6 @@
 #include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
 #include "FableGameState.h"
@@ -93,7 +94,11 @@ bool UFableRPGValidationDriver::TickStory()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFablePlayerState* P = PC->GetPlayerState<AFablePlayerState>();
     AFableCharacter* H = PC->GetPawn<AFableCharacter>();
-    AFableGameState* G = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView G = FableAdventure::For(PC.Get());
+    if (!G)
+    {
+        return false;
+    }
     const double Now = GetWorld()->GetTimeSeconds();
     const bool bPrologue = Phase == TEXT("prologue");
     const EFableClass Wanted =
@@ -248,7 +253,10 @@ bool UFableRPGValidationDriver::TickStory()
         if (StoryCheck == 0)
         {
             // 이동 입력과 속도 제한 조건 검사
-            if (!WalkTo(FableRPG::StoryObjectLocation(I) + FVector(Role == TEXT("host") ? -60 : 60, -90, 100), 90) ||
+            if (!WalkTo(FableAdventure::For(PC.Get()).ToWorld(FableRPG::StoryObjectRegion(I),
+                                                              FableRPG::StoryObjectLocation(I)) +
+                            FVector(Role == TEXT("host") ? -60 : 60, -90, 100),
+                        90) ||
                 H->GetVelocity().Size2D() > 10)
             {
                 return true;
@@ -428,7 +436,10 @@ bool UFableRPGValidationDriver::TickStory()
             if ((G->MoonSealMask & (1 << I)) && !(P->StorySealMask & (1 << I)))
             {
                 PC->UIClosePanels();
-                if (WalkTo(FableRPG::MoonSealLocation(I) + FVector(Role == TEXT("host") ? -60 : 60, -90, 100), 90) &&
+                if (WalkTo(
+                        FableAdventure::For(PC.Get()).ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(I)) +
+                            FVector(Role == TEXT("host") ? -60 : 60, -90, 100),
+                        90) &&
                     H->GetVelocity().Size2D() < 10 && Now - LastAction > .8)
                 {
                     Key(EKeys::E);
@@ -708,7 +719,7 @@ bool UFableRPGValidationDriver::TickStory()
     // 퀘스트와 이야기 진행 처리
     if (G->ActiveRegion == EFableRegion::Moonwell && Step == 23)
     {
-        for (APlayerState* Member : G->PlayerArray)
+        for (APlayerState* Member : G.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(Member);
             if (!Other || Other->StorySealMask != 7)
@@ -724,7 +735,7 @@ bool UFableRPGValidationDriver::TickStory()
     if (G->ActiveRegion == EFableRegion::Village && ((Step >= 9 && Step <= 10) || (Step >= 18 && Step <= 20)))
     {
         const int32 Minimum = Step <= 10 ? 3 : 4;
-        for (APlayerState* Member : G->PlayerArray)
+        for (APlayerState* Member : G.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(Member);
             if (!Other || Other->StoryChapter < Minimum)
@@ -738,7 +749,7 @@ bool UFableRPGValidationDriver::TickStory()
     // 퀘스트와 이야기 진행 처리
     if (P->StoryChapter == 2 && Step <= 4)
     {
-        for (APlayerState* Member : G->PlayerArray)
+        for (APlayerState* Member : G.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(Member);
             if (!Other || Other->StoryChapter < 2)

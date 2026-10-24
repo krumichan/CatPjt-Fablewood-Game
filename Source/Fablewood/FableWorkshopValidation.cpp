@@ -1,5 +1,6 @@
-﻿#include "FableRPGValidationDriver.h"
+#include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
 #include "FableGameState.h"
@@ -163,7 +164,12 @@ void UFableRPGValidationDriver::TickWorkshop()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFablePlayerState* P = PC->GetPlayerState<AFablePlayerState>();
     AFableCharacter* H = PC->GetPawn<AFableCharacter>();
-    AFableGameState* G = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView G = FableAdventure::For(PC.Get());
+    if (!G)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds(), Wait = Now - StepAt;
     const auto Fail = [&](const FString& Why)
     {

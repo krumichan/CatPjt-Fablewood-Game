@@ -1,5 +1,6 @@
 #include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FablePartyManager.h"
 #include "FableCharacter.h"
@@ -101,6 +102,12 @@ bool UFableRPGValidationDriver::LootEnemyStats(EFableRegion Region, EFableDiffic
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *It))
+        {
+            continue;
+        }
+
         if (!It->IsAlive() || It->GetEncounterRegion() != Region)
         {
             continue;
@@ -138,7 +145,12 @@ void UFableRPGValidationDriver::TickLoot()
     // 지역·적·전투 진행에 필요한 값 준비
     AFablePlayerState* PS = PC->GetPlayerState<AFablePlayerState>();
     AFableCharacter* Hero = PC->GetPawn<AFableCharacter>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds(), Wait = Now - StepAt;
     const EFableRegion Region = LootCycle < 2 ? EFableRegion::RootRuins : EFableRegion::Moonwell;
     const EFableDifficulty Difficulty = LootCycle % 2 == 0 ? EFableDifficulty::Normal : EFableDifficulty::Hard;
@@ -257,6 +269,12 @@ void UFableRPGValidationDriver::TickLoot()
     {
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(PC.Get(), *It))
+            {
+                continue;
+            }
+
             if (It->IsBoss() && It->GetEnemyState() == EFableEnemyState::Windup)
             {
                 bMoonRipple |= It->GetAttackPattern() == EFableEnemyAttack::MoonRing;
@@ -312,7 +330,7 @@ void UFableRPGValidationDriver::TickLoot()
     case 2:
     {
         bool Ready = true;
-        for (APlayerState* P : GS->PlayerArray)
+        for (APlayerState* P : GS.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(P);
             Ready &= Other && Other->IsRegionEligible(Region);
@@ -325,7 +343,7 @@ void UFableRPGValidationDriver::TickLoot()
     }
     case 3:
         if (GS->ActiveRegion == Region && GS->AdventureStage != EFableAdventureStage::Cleared &&
-            FableRPG::IsInRegion(Region, Hero->GetActorLocation()) && GS->RequiredEnemies > 0)
+            FableAdventure::For(PC.Get()).IsInRegion(Region, Hero->GetActorLocation()) && GS->RequiredEnemies > 0)
         {
             Go(4);
             break;
@@ -378,7 +396,9 @@ void UFableRPGValidationDriver::TickLoot()
         {
             const int32 Seal = GS->ActiveSealIndex;
             if (Seal >= 0 && Seal < 3 &&
-                WalkTo(FableRPG::MoonSealLocation(Seal) + FVector(Role == TEXT("host") ? -80 : 80, -100, 100), 110) &&
+                WalkTo(FableAdventure::For(PC.Get()).ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(Seal)) +
+                           FVector(Role == TEXT("host") ? -80 : 80, -100, 100),
+                       110) &&
                 Now - LastAction > .8)
             {
                 Key(EKeys::E);
@@ -521,7 +541,7 @@ void UFableRPGValidationDriver::TickLoot()
         {
             // A duplicate trusted server callback is a rejection probe only.
             // It must not change any hero's profile, roll or currency.
-            for (APlayerState* P : GS->PlayerArray)
+            for (APlayerState* P : GS.Players())
             {
                 if (AFablePlayerState* Other = Cast<AFablePlayerState>(P))
                 {
@@ -545,12 +565,14 @@ void UFableRPGValidationDriver::TickLoot()
         Go(10);
         break;
     case 10:
-        if (FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
+        if (FableAdventure::For(PC.Get()).IsInRegion(EFableRegion::Village, Hero->GetActorLocation()))
         {
             Go(11);
             break;
         }
-        if (WalkTo(FableRPG::RegionReturnPortal(Region) + FVector(Role == TEXT("host") ? -80 : 80, 0, 100), 100) &&
+        if (WalkTo(FableAdventure::For(PC.Get()).ToWorld(Region, FableRPG::RegionReturnPortal(Region)) +
+                       FVector(Role == TEXT("host") ? -80 : 80, 0, 100),
+                   100) &&
             Now - LastAction > .8)
         {
             Key(EKeys::E);
@@ -748,6 +770,12 @@ void UFableRPGValidationDriver::TickLoot()
         // 지역·적·전투 진행 순회
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(PC.Get(), *It))
+            {
+                continue;
+            }
+
             if (It->IsAlive() && It->GetEncounterRegion() == Region)
             {
                 const float D = FVector::Dist2D(Hero->GetActorLocation(), It->GetActorLocation());
@@ -788,7 +816,7 @@ void UFableRPGValidationDriver::TickLoot()
         break;
     case 32:
         if (GS->EncounterSerial > LootSerialBefore && GS->ActiveRegion == Region &&
-            FableRPG::IsInRegion(Region, Hero->GetActorLocation()))
+            FableAdventure::For(PC.Get()).IsInRegion(Region, Hero->GetActorLocation()))
         {
             Go(33);
             break;
@@ -1084,7 +1112,7 @@ void UFableRPGValidationDriver::AppendLootReport(TSharedRef<FJsonObject> Object)
     Object->SetNumberField(TEXT("max_health_bonus"), PS->GetMaxHealthBonus());
 
     // JSON 계약과 검증 기록 처리
-    if (const AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>())
+    if (const FFableAdventureView GS = FableAdventure::For(PC.Get()))
     {
         Object->SetNumberField(TEXT("active_difficulty"), int32(GS->ActiveDifficulty));
         Object->SetNumberField(TEXT("retry_difficulty"), int32(GS->RetryDifficulty));

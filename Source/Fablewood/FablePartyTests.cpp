@@ -1,5 +1,9 @@
 #include "FablePartyManager.h"
 #include "FableCharacter.h"
+#include "FableAdventure.h"
+#include "FablePartyEncounter.h"
+#include "FableProjectile.h"
+#include "FableEnemyBolt.h"
 #include "FableEnemy.h"
 #include "FableGameMode.h"
 #include "FableGameState.h"
@@ -35,6 +39,26 @@ struct FFablePartyTestAccess
     {
         Mode->GameState = State;
         Mode->GetWorld()->SetGameState(State);
+    }
+
+    /** 완료 상태의 거절 검사는 실제 진행 소유 Actor만 제어한다. */
+    static void SetEncounterStage(AFablePartyEncounter* Encounter, EFableAdventureStage Stage)
+    {
+        Encounter->Progress.AdventureStage = Stage;
+    }
+
+    /** 실시간 대기 대신 원정의 실제 생존 감시를 호출한다. */
+    static void MonitorEncounter(AFablePartyEncounter* Encounter)
+    {
+        Encounter->CheckPartyState();
+    }
+
+    /** 구조 타이머 경계만 앞당기고 실제 구조·귀환 경로를 검증한다. */
+    static void CompleteRecovery(AFablePartyEncounter* Encounter)
+    {
+        Encounter->Progress.PartyRecoveryEndServerTime = 0;
+        Encounter->NextRecoveryAttemptTime = 0;
+        Encounter->CheckPartyState();
     }
 
     /** 서로 다른 사용자 동작 사이의 요청 간격만 초기화한다. */
@@ -74,6 +98,55 @@ struct FFablePartyTestAccess
                 }
             }
         }
+    }
+};
+
+/** 실제 전투 적용점의 권한을 격리 월드에서 호출하는 검증 접근자. */
+struct FFableExpeditionCombatTestAccess
+{
+    /** 범위·시야·원정 조건을 포함한 실제 광역 스킬 경로를 호출한다. */
+    static void Area(AFableCharacter* Hero, float Damage, bool bSlow = false)
+    {
+        Hero->ApplySkillArea(Damage, 600, false, bSlow, FFableTrialCastContext());
+    }
+
+    /** 같은 원정의 실제 동료 보호막 경로를 호출한다. */
+    static void ShareShield(AFableCharacter* Hero)
+    {
+        Hero->ShareGuardianShield(1);
+    }
+
+    /** 피해 모양을 만족한 다른 파티도 적의 실제 광역 판정에서 제외한다. */
+    static void EnemyArea(AFableEnemy* Enemy)
+    {
+        Enemy->AttackPattern = EFableEnemyAttack::Stomp;
+        Enemy->ApplyAreaAttack();
+    }
+
+    /** 거리와 위치가 같은 적의 실제 추적 선택 결과를 반환한다. */
+    static AFableCharacter* FindTarget(AFableEnemy* Enemy)
+    {
+        Enemy->FindTarget();
+        return Enemy->Target.Get();
+    }
+
+    /** 실제 화상 시계 경계만 앞당기고 원정 소유권은 그대로 검사한다. */
+    static void TickBurn(AFableEnemy* Enemy)
+    {
+        Enemy->NextBurnServerTime = -0.01f;
+        Enemy->TickBurn();
+    }
+
+    /** 실제 부활 유지 조건을 변경 없이 확인한다. */
+    static bool CanRevive(AFableCharacter* Hero, AFableCharacter* Target)
+    {
+        return Hero->CanMaintainRevive(Target);
+    }
+
+    /** 부활 요청 간격만 초기화하고 실제 생명 상태 감시를 호출한다. */
+    static void TickLife(AFableCharacter* Hero)
+    {
+        Hero->TickLifeState();
     }
 };
 
@@ -177,6 +250,7 @@ namespace
                 FFablePartyTestAccess::UseMemoryOnly(Player.Profile);
                 Player.Profile->SetOwner(Player.Controller);
                 Player.Controller->SetPlayerState(Player.Profile);
+                State->AddPlayerState(Player.Profile);
 
                 // PostInitializeComponents를 생략한 fixture도 실제 서버 조회 경로에 연결한다.
                 World->AddController(Player.Controller);
@@ -300,9 +374,191 @@ namespace
             World->RemoveController(Player.Controller);
             RegisteredControllers.Remove(Player.Controller);
             Player.Controller->SetPlayerState(nullptr);
+            State->RemovePlayerState(Player.Profile);
             Player.Profile->Destroy();
             Player.Controller->Destroy();
             Player = FPartyTestPlayer();
+        }
+    };
+
+    /** 두 파티의 진행 정본 전체가 그대로인지 비교한다. */
+    bool SameProgress(const FFableAdventureProgress& A, const FFableAdventureProgress& B)
+    {
+        return A.DefeatedEnemies == B.DefeatedEnemies && A.RequiredEnemies == B.RequiredEnemies && A.Round == B.Round &&
+               A.bObjectiveComplete == B.bObjectiveComplete && A.AdventureStage == B.AdventureStage &&
+               A.DungeonWave == B.DungeonWave && A.ActiveRegion == B.ActiveRegion &&
+               A.ActiveDifficulty == B.ActiveDifficulty && A.MoonSealMask == B.MoonSealMask &&
+               A.ActiveSealIndex == B.ActiveSealIndex && A.BossHealth == B.BossHealth &&
+               A.BossMaxHealth == B.BossMaxHealth && A.bPartyRecoveryPending == B.bPartyRecoveryPending &&
+               A.PartyRecoveryEndServerTime == B.PartyRecoveryEndServerTime && A.bRetryAvailable == B.bRetryAvailable &&
+               A.RetryRegion == B.RetryRegion && A.RetryDifficulty == B.RetryDifficulty &&
+               A.PartyRecoveryCount == B.PartyRecoveryCount && A.EncounterSerial == B.EncounterSerial;
+    }
+
+    /** 실제 네 연결을 두 정식 파티와 독립 원정에 배치하는 메모리 전용 fixture. */
+    struct FIsolationTestWorld
+    {
+        FPartyTestWorld Base{true};
+        FPartyTestPlayer First, FirstPeer, Second, SecondPeer;
+        AFablePartyEncounter* One = nullptr;
+        AFablePartyEncounter* Two = nullptr;
+
+        /** 일반 모드 입장은 서로 다른 원점, 효과 검증은 의도적으로 같은 원점을 사용한다. */
+        bool Initialize(bool bOverlap = false, EFableRegion Region = EFableRegion::RootRuins)
+        {
+            First = Base.AddPlayer(701);
+            FirstPeer = Base.AddPlayer(702);
+            Second = Base.AddPlayer(703);
+            SecondPeer = Base.AddPlayer(704);
+            const FVector Portal = FableRPG::PortalLocation();
+            if (!Base.AddMode() || !Base.AddHero(First, Portal + FVector(-150, -100, 110)) ||
+                !Base.AddHero(FirstPeer, Portal + FVector(150, -100, 110)) ||
+                !Base.AddHero(Second, Portal + FVector(-150, 200, 110)) ||
+                !Base.AddHero(SecondPeer, Portal + FVector(150, 200, 110)) ||
+                !Base.Act(First, EFablePartyAction::Create) || !Base.Join(First, FirstPeer) ||
+                !Base.Act(Second, EFablePartyAction::Create) || !Base.Join(Second, SecondPeer))
+            {
+                return false;
+            }
+
+            // 요청은 실제 명부 리비전과 각자의 준비를 사용한다.
+            for (const FPartyTestPlayer* Leader : {&First, &Second})
+            {
+                const FFablePartyRecord* Party = Base.Manager->GetPartyForMember(Leader->Profile->PartyPlayerKey);
+                if (!Party ||
+                    !Base.Manager->SelectExpedition(Leader->Controller, Party->PartyId, Party->PreparationRevision,
+                                                    Region, EFableDifficulty::Normal))
+                {
+                    return false;
+                }
+            }
+            if (!Base.Ready(First) || !Base.Ready(FirstPeer) || !Base.Ready(Second) || !Base.Ready(SecondPeer))
+            {
+                return false;
+            }
+
+            if (!bOverlap)
+            {
+                if (!Base.Enter(First) || !Base.Enter(Second))
+                {
+                    return false;
+                }
+                One = Base.Mode->GetExpeditionFor(First.Profile);
+                Two = Base.Mode->GetExpeditionFor(Second.Profile);
+                return One && Two;
+            }
+
+            // 신뢰한 fixture만 지형을 겹쳐 거리·벽 대신 UUID 거부를 검증한다.
+            One = AdmitAtOrigin(First, FirstPeer, FVector(0, 30000, 0));
+            Two = AdmitAtOrigin(Second, SecondPeer, FVector(0, 30000, 0));
+            return One && Two;
+        }
+
+        /** 실제 준비 snapshot과 실제 입장을 사용하고 임의 소속을 주입하지 않는다. */
+        AFablePartyEncounter* AdmitAtOrigin(const FPartyTestPlayer& Leader, const FPartyTestPlayer& Peer,
+                                            FVector Origin)
+        {
+            const FFablePartyRecord* Party = Base.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+            FFableExpeditionTicket Ticket;
+            if (!Party || !Base.Manager->BuildReadySnapshot(Leader.Controller, Party->PartyId,
+                                                            Party->PreparationRevision, Ticket))
+            {
+                return nullptr;
+            }
+
+            AFablePartyEncounter* Encounter = Base.World->SpawnActor<AFablePartyEncounter>();
+            if (!Encounter || !Encounter->InitializeExpedition(Ticket, Origin) ||
+                !Encounter->Admit({Leader.Controller, Peer.Controller}))
+            {
+                return nullptr;
+            }
+            return Encounter;
+        }
+
+        /** 자기 원정에 실제 생성된 적 하나를 선택한다. */
+        AFableEnemy* EnemyFor(const AFablePartyEncounter* Encounter) const
+        {
+            for (TActorIterator<AFableEnemy> It(Base.World); It; ++It)
+            {
+                if (It->IsAlive() && It->GetExpeditionId() == Encounter->GetExpeditionId())
+                {
+                    return *It;
+                }
+            }
+            return nullptr;
+        }
+
+        /** 원정별 적 UUID와 체력 전체를 보존한다. */
+        TMap<FGuid, float> EnemyHealth(const AFablePartyEncounter* Encounter) const
+        {
+            TMap<FGuid, float> Result;
+            for (TActorIterator<AFableEnemy> It(Base.World); It; ++It)
+            {
+                if (It->IsAlive() && It->GetExpeditionId() == Encounter->GetExpeditionId())
+                {
+                    Result.Add(It->GetSpawnId(), It->GetHealth());
+                }
+            }
+            return Result;
+        }
+
+        /** 적 개체 교체나 체력 변경도 진행 격리 실패로 판정한다. */
+        bool HasEnemyHealth(const AFablePartyEncounter* Encounter, const TMap<FGuid, float>& Expected) const
+        {
+            const TMap<FGuid, float> Actual = EnemyHealth(Encounter);
+            if (Actual.Num() != Expected.Num())
+            {
+                return false;
+            }
+            for (const auto& Entry : Expected)
+            {
+                const float* Value = Actual.Find(Entry.Key);
+                if (!Value || *Value != Entry.Value)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 같은 원점의 범위 검증을 위해 새 서버 적을 명확한 위치에 생성한다. */
+        AFableEnemy* SpawnEnemy(AFablePartyEncounter* Encounter, FVector Offset)
+        {
+            FActorSpawnParameters Parameters;
+            Parameters.Owner = Encounter;
+            Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+            const EFableRegion Region = Encounter->GetTicket().Region;
+            AFableEnemy* Enemy = Base.World->SpawnActor<AFableEnemy>(FableRPG::RegionCenter(Region) +
+                                                                         Encounter->GetWorldOrigin() + Offset,
+                                                                     FRotator::ZeroRotator, Parameters);
+            if (Enemy)
+            {
+                Enemy->BindExpedition(Encounter->GetExpeditionId());
+                if (Region == EFableRegion::Moonwell)
+                {
+                    Enemy->ConfigureMoonwell(false, true);
+                }
+                else
+                {
+                    Enemy->ConfigureEncounter(false, true);
+                }
+            }
+            return Enemy;
+        }
+
+        /** 기존 무리는 양쪽 사정거리 밖에 두고 특정 판정 대상만 사용한다. */
+        void MoveExistingEnemiesAway()
+        {
+            for (TActorIterator<AFableEnemy> It(Base.World); It; ++It)
+            {
+                const auto Adventure = FableAdventure::For(*It);
+                if (Adventure)
+                {
+                    It->SetActorLocation(
+                        Adventure.ToWorld(Adventure->ActiveRegion,
+                                          FableRPG::RegionCenter(Adventure->ActiveRegion) + FVector(-1600, 1300, 110)));
+                }
+            }
         }
     };
 }
@@ -660,17 +916,17 @@ bool FFablePartyGuardTest::RunTest(const FString& Parameters)
     Stranger.Profile->PartyId.Invalidate();
 
     const FGuid OriginalParty = Leader.Profile->PartyId;
-    Fixture.State->ActiveRegion = EFableRegion::RootRuins;
+    Fixture.State->FieldProgress.ActiveRegion = EFableRegion::RootRuins;
     TestFalse(TEXT("Dungeon combat prevents explicit party leave"), Fixture.Act(Leader, EFablePartyAction::Leave));
-    Fixture.State->ActiveRegion = EFableRegion::Village;
-    Fixture.State->bPartyRecoveryPending = true;
+    Fixture.State->FieldProgress.ActiveRegion = EFableRegion::Village;
+    Fixture.State->FieldProgress.bPartyRecoveryPending = true;
     TestFalse(TEXT("Recovery countdown prevents explicit party leave"), Fixture.Act(Leader, EFablePartyAction::Leave));
-    Fixture.State->bPartyRecoveryPending = false;
-    Fixture.State->AdventureStage = EFableAdventureStage::Forest;
+    Fixture.State->FieldProgress.bPartyRecoveryPending = false;
+    Fixture.State->FieldProgress.AdventureStage = EFableAdventureStage::Forest;
     TestFalse(TEXT("A village forest encounter also prevents party editing"),
               Fixture.Act(Leader, EFablePartyAction::Leave));
     TestTrue(TEXT("All rejected edits preserve membership"), Leader.Profile->PartyId == OriginalParty);
-    Fixture.State->AdventureStage = EFableAdventureStage::Village;
+    Fixture.State->FieldProgress.AdventureStage = EFableAdventureStage::Village;
     TestTrue(TEXT("Returning to idle town allows explicit leave"), Fixture.Act(Leader, EFablePartyAction::Leave));
 
     return true;
@@ -916,15 +1172,20 @@ bool FFableExpeditionEntryTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("A ready peer still cannot start as leader"), Fixture.Enter(Member));
     TestTrue(TEXT("A ready leader atomically starts its expedition"), Fixture.Enter(Leader));
 
-    const FFableExpeditionTicket Ticket = Fixture.Mode->GetActiveExpedition();
+    AFablePartyEncounter* Encounter = Fixture.Mode->GetExpeditionFor(Leader.Profile);
+    if (!TestNotNull(TEXT("Admission resolves its own progress actor"), Encounter))
+    {
+        return false;
+    }
+    const FFableExpeditionTicket Ticket = Encounter->GetTicket();
     TestTrue(TEXT("Admission creates a fresh server expedition identity"), Ticket.IsValid());
     TestTrue(TEXT("Only the agreed party is bound to that identity"),
              Leader.Profile->ActiveExpeditionId == Ticket.ExpeditionId &&
                  Member.Profile->ActiveExpeditionId == Ticket.ExpeditionId &&
                  !Outsider.Profile->ActiveExpeditionId.IsValid());
     TestTrue(TEXT("Only the ticket participants arrive in the selected region"),
-             FableRPG::IsInRegion(Ticket.Region, Leader.Hero->GetActorLocation()) &&
-                 FableRPG::IsInRegion(Ticket.Region, Member.Hero->GetActorLocation()) &&
+             FableAdventure::For(Leader.Hero).IsInRegion(Ticket.Region, Leader.Hero->GetActorLocation()) &&
+                 FableAdventure::For(Member.Hero).IsInRegion(Ticket.Region, Member.Hero->GetActorLocation()) &&
                  Outsider.Hero->GetActorLocation().Equals(OutsiderBefore));
     TestTrue(TEXT("The mode identifies exact participants"),
              Fixture.Mode->IsExpeditionParticipant(Leader.Profile) &&
@@ -933,14 +1194,15 @@ bool FFableExpeditionEntryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("The first wave starts only after admission"), Fixture.EnemyCount() > 0);
     TestFalse(TEXT("A duplicate start cannot create another expedition"), Fixture.Enter(Leader));
     TestTrue(TEXT("A duplicate start retains the same identity"),
-             Fixture.Mode->GetActiveExpedition().ExpeditionId == Ticket.ExpeditionId);
+             Fixture.Mode->GetExpeditionFor(Leader.Profile) == Encounter);
 
     // 거리만 맞춘 비참가자도 보상을 받거나 기존 지역 진입점으로 합류할 수 없다.
     Fixture.Mode->RequestEnterRegion(Outsider.Controller, Ticket.Region, Ticket.Difficulty);
     TestTrue(TEXT("The legacy entry route never moves an outsider into this party"),
              Outsider.Hero->GetActorLocation().Equals(OutsiderBefore) &&
                  !Outsider.Profile->ActiveExpeditionId.IsValid());
-    Outsider.Hero->SetActorLocation(FableRPG::RegionEntrance(Ticket.Region) + FVector(700, 0, 110));
+    Outsider.Hero->SetActorLocation(FableRPG::RegionEntrance(Ticket.Region) + Encounter->GetWorldOrigin() +
+                                    FVector(700, 0, 110));
     const int32 OutsiderGold = Outsider.Profile->Gold;
     const int32 LeaderGold = Leader.Profile->Gold;
     const int32 MemberGold = Member.Profile->Gold;
@@ -976,13 +1238,14 @@ bool FFableExpeditionEntryTest::RunTest(const FString& Parameters)
                  FFablePartyTestAccess::IsMemoryOnly(Member.Profile) &&
                  FFablePartyTestAccess::IsMemoryOnly(Outsider.Profile));
 
-    Fixture.State->AdventureStage = EFableAdventureStage::Cleared;
-    Outsider.Hero->SetActorLocation(FableRPG::RegionReturnPortal(Ticket.Region) + FVector(0, 0, 110));
+    FFablePartyTestAccess::SetEncounterStage(Encounter, EFableAdventureStage::Cleared);
+    Outsider.Hero->SetActorLocation(FableRPG::RegionReturnPortal(Ticket.Region) + Encounter->GetWorldOrigin() +
+                                    FVector(0, 0, 110));
     const FVector LeaderInDungeon = Leader.Hero->GetActorLocation();
     Fixture.Mode->RequestReturnVillage(Outsider.Controller);
     TestTrue(TEXT("An outsider at the return portal cannot return or clear another party"),
              Leader.Hero->GetActorLocation().Equals(LeaderInDungeon) &&
-                 Fixture.Mode->GetActiveExpedition().ExpeditionId == Ticket.ExpeditionId);
+                 Fixture.Mode->GetExpeditionFor(Leader.Profile) == Encounter);
 
     return true;
 }
@@ -1016,7 +1279,7 @@ bool FFableExpeditionBlockedEntryTest::RunTest(const FString& Parameters)
     Obstacle->SetRootComponent(Box);
     // 보정된 도착점도 벗어날 수 없도록 유효한 유적 범위와 높이를 모두 막는다.
     Box->SetBoxExtent(FVector(5000, 5000, 3000));
-    Box->SetWorldLocation(FableRPG::RegionCenter(EFableRegion::RootRuins));
+    Box->SetWorldLocation(FableRPG::RegionCenter(EFableRegion::RootRuins) + FVector(0, 30000, 0));
     Box->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     Box->SetCollisionObjectType(ECC_WorldStatic);
     Box->SetCollisionResponseToAllChannels(ECR_Block);
@@ -1028,7 +1291,8 @@ bool FFableExpeditionBlockedEntryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Neither player is stranded after a failed preflight"),
              Leader.Hero->GetActorLocation().Equals(LeaderBefore) &&
                  Member.Hero->GetActorLocation().Equals(MemberBefore));
-    TestFalse(TEXT("A failed admission leaves no active ticket"), Fixture.Mode->GetActiveExpedition().IsValid());
+    TestTrue(TEXT("A failed admission leaves no active ticket or orphan progress actor"),
+             Fixture.Mode->GetExpeditions().IsEmpty());
     TestTrue(TEXT("A failed admission leaves neither profile bound"),
              !Leader.Profile->ActiveExpeditionId.IsValid() && !Member.Profile->ActiveExpeditionId.IsValid());
     TestEqual(TEXT("A failed admission starts no encounter enemies"), Fixture.EnemyCount(), 0);
@@ -1038,6 +1302,293 @@ bool FFableExpeditionBlockedEntryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("The party can confirm readiness after the failure"), Fixture.Ready(Leader) && Fixture.Ready(Member));
     TestTrue(TEXT("Clearing the obstacle allows the unchanged real entry path to succeed"), Fixture.Enter(Leader));
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableIsolationProgressTest,
+                                 "Fablewood.Native.Isolation.IndependentProgressRewardsAndRecovery",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 두 파티의 입장·처치·전멸·귀환과 다음 처치가 서로의 정본을 바꾸지 않아야 한다. */
+bool FFableIsolationProgressTest::RunTest(const FString& Parameters)
+{
+    FIsolationTestWorld Fixture;
+    if (!TestTrue(TEXT("Four memory-only players form and enter two genuine parties"), Fixture.Initialize()))
+    {
+        return false;
+    }
+
+    const FGuid FirstId = Fixture.One->GetExpeditionId();
+    const FGuid SecondId = Fixture.Two->GetExpeditionId();
+    const FFableAdventureProgress FieldBefore = Fixture.Base.State->FieldProgress;
+    const FFableAdventureProgress SecondBefore = Fixture.Two->GetProgress();
+    const TMap<FGuid, float> SecondEnemies = Fixture.EnemyHealth(Fixture.Two);
+    const FVector SecondLocation = Fixture.Second.Hero->GetActorLocation();
+    TestTrue(TEXT("Two expeditions have distinct immutable identities and arena origins"),
+             FirstId.IsValid() && SecondId.IsValid() && FirstId != SecondId &&
+                 Fixture.One->GetWorldOrigin() != Fixture.Two->GetWorldOrigin());
+    TestTrue(TEXT("Creating private progress never replaces the world's one canonical game state"),
+             Fixture.Base.World->GetGameState() == Fixture.Base.State && Fixture.Base.State->PlayerArray.Num() == 4);
+    TestEqual(TEXT("The server registry retains both simultaneous expeditions"),
+              Fixture.Base.Mode->GetExpeditions().Num(), 2);
+    TestTrue(TEXT("Each progress view lists only its own two participants"),
+             FableAdventure::For(Fixture.First.Hero).Players().Num() == 2 &&
+                 FableAdventure::For(Fixture.Second.Hero).Players().Num() == 2);
+    TestTrue(TEXT("Private participants are excluded from public field participants"),
+             FableAdventure::Field(Fixture.Base.World).Players().IsEmpty());
+
+    AFableEnemy* Victim = Fixture.EnemyFor(Fixture.One);
+    if (!TestNotNull(TEXT("First party has its own real spawned guardian"), Victim))
+    {
+        return false;
+    }
+    Victim->ReceiveHit(100000, Fixture.First.Controller);
+    Fixture.Base.Mode->HandleEnemyDefeated(Victim);
+    TestTrue(TEXT("Both admitted first-party members receive their personal kill reward"),
+             Fixture.First.Profile->Gold == 18 && Fixture.FirstPeer.Profile->Gold == 18 &&
+                 Fixture.First.Profile->Ore == 1 && Fixture.FirstPeer.Profile->Ore == 1);
+    TestTrue(TEXT("No first-party reward leaks into the second party"),
+             Fixture.Second.Profile->Gold == 0 && Fixture.SecondPeer.Profile->Gold == 0 &&
+                 Fixture.Second.Profile->Ore == 0 && Fixture.SecondPeer.Profile->Ore == 0);
+    TestTrue(TEXT("A kill leaves every second-party progress field and enemy identity/health untouched"),
+             SameProgress(SecondBefore, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, SecondEnemies));
+
+    // 다른 파티가 살아 있어도 첫 파티의 실제 전멸 감시는 자기 인원만 센다.
+    AFableEnemy* Attacker = Fixture.EnemyFor(Fixture.One);
+    if (!TestNotNull(TEXT("First party retains a live guardian for normal damage"), Attacker))
+    {
+        return false;
+    }
+    Fixture.First.Hero->ReceiveHit(100000, Attacker);
+    Fixture.FirstPeer.Hero->ReceiveHit(100000, Attacker);
+    FFablePartyTestAccess::MonitorEncounter(Fixture.One);
+    TestTrue(TEXT("Only the wiped first party enters recovery"),
+             Fixture.One->GetProgress().bPartyRecoveryPending && !Fixture.Two->GetProgress().bPartyRecoveryPending);
+    TestTrue(TEXT("Recovery and own-enemy cleanup leave the other party fully unchanged"),
+             SameProgress(SecondBefore, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, SecondEnemies) &&
+                 Fixture.Second.Hero->GetActorLocation().Equals(SecondLocation));
+    FFablePartyTestAccess::CompleteRecovery(Fixture.One);
+    TestTrue(TEXT("Only first-party members return to town and release their bindings"),
+             !Fixture.First.Profile->ActiveExpeditionId.IsValid() &&
+                 !Fixture.FirstPeer.Profile->ActiveExpeditionId.IsValid() && Fixture.First.Hero->IsAlive() &&
+                 Fixture.FirstPeer.Hero->IsAlive() &&
+                 FableRPG::IsInRegion(EFableRegion::Village, Fixture.First.Hero->GetActorLocation()) &&
+                 Fixture.Second.Profile->ActiveExpeditionId == SecondId &&
+                 Fixture.SecondPeer.Profile->ActiveExpeditionId == SecondId);
+    TestTrue(TEXT("First-party return preserves the second ticket, progress, actors and position"),
+             Fixture.Base.Mode->GetExpeditionFor(Fixture.Second.Profile) == Fixture.Two &&
+                 SameProgress(SecondBefore, Fixture.Two->GetProgress()) &&
+                 Fixture.HasEnemyHealth(Fixture.Two, SecondEnemies) &&
+                 Fixture.Second.Hero->GetActorLocation().Equals(SecondLocation));
+    TestFalse(TEXT("A destroyed first expedition cannot resolve as the public field"),
+              bool(FableAdventure::For(Fixture.One)));
+    TestTrue(TEXT("All private activity leaves the public field progress unchanged"),
+             SameProgress(FieldBefore, Fixture.Base.State->FieldProgress) &&
+                 Fixture.Base.World->GetGameState() == Fixture.Base.State);
+
+    AFableEnemy* SecondVictim = Fixture.EnemyFor(Fixture.Two);
+    if (!TestNotNull(TEXT("Second party still has a functioning independent target"), SecondVictim))
+    {
+        return false;
+    }
+    SecondVictim->ReceiveHit(100000, Fixture.Second.Controller);
+    Fixture.Base.Mode->HandleEnemyDefeated(SecondVictim);
+    TestTrue(TEXT("The second party can continue and both its members earn only its own reward"),
+             Fixture.Second.Profile->Gold == 18 && Fixture.SecondPeer.Profile->Gold == 18 &&
+                 Fixture.First.Profile->Gold == 18 && Fixture.FirstPeer.Profile->Gold == 18);
+    TestTrue(TEXT("Every profile stayed memory-only throughout real rewards and recovery"),
+             FFablePartyTestAccess::IsMemoryOnly(Fixture.First.Profile) &&
+                 FFablePartyTestAccess::IsMemoryOnly(Fixture.FirstPeer.Profile) &&
+                 FFablePartyTestAccess::IsMemoryOnly(Fixture.Second.Profile) &&
+                 FFablePartyTestAccess::IsMemoryOnly(Fixture.SecondPeer.Profile));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableIsolationEffectsTest,
+                                 "Fablewood.Native.Isolation.OverlappingActorsRejectForeignEffects",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 거리·높이·시야까지 만족한 두 파티도 UUID가 다르면 직접·광역·화상·부활을 공유하지 않는다. */
+bool FFableIsolationEffectsTest::RunTest(const FString& Parameters)
+{
+    FIsolationTestWorld Fixture;
+    if (!TestTrue(TEXT("Two real two-member expeditions deliberately share one test origin"), Fixture.Initialize(true)))
+    {
+        return false;
+    }
+    Fixture.MoveExistingEnemiesAway();
+    const FVector Center = FableRPG::RegionCenter(EFableRegion::RootRuins) + Fixture.One->GetWorldOrigin();
+    Fixture.First.Hero->SetActorLocation(Center + FVector(-300, 0, 110));
+    Fixture.FirstPeer.Hero->SetActorLocation(Center + FVector(-300, 180, 110));
+    Fixture.Second.Hero->SetActorLocation(Center + FVector(-300, -100, 110));
+    Fixture.SecondPeer.Hero->SetActorLocation(Center + FVector(-300, -180, 110));
+    AFableEnemy* Own = Fixture.SpawnEnemy(Fixture.One, FVector(0, 0, 110));
+    AFableEnemy* Foreign = Fixture.SpawnEnemy(Fixture.Two, FVector(0, 120, 110));
+    if (!TestNotNull(TEXT("Own effect target exists"), Own) ||
+        !TestNotNull(TEXT("Foreign effect target exists"), Foreign))
+    {
+        return false;
+    }
+    TestTrue(
+        TEXT("Both private views accept these deliberately overlapping coordinates"),
+        FableAdventure::For(Own).IsInRegion(EFableRegion::RootRuins, Fixture.Second.Hero->GetActorLocation()) &&
+            FableAdventure::For(Foreign).IsInRegion(EFableRegion::RootRuins, Fixture.First.Hero->GetActorLocation()));
+    TestTrue(TEXT("Matching position does not grant matching scope"),
+             FableAdventure::SameScope(Fixture.First.Hero, Own) &&
+                 !FableAdventure::SameScope(Fixture.First.Hero, Foreign));
+
+    const float ForeignHealth = Foreign->GetHealth();
+    Foreign->ReceiveHit(10, Fixture.First.Controller);
+    TestEqual(TEXT("The final direct-hit guard rejects another party"), Foreign->GetHealth(), ForeignHealth);
+    TestFalse(TEXT("The final slow guard rejects another party"),
+              Foreign->ApplySlow(.65f, 4, Fixture.First.Controller));
+    TestFalse(TEXT("The final burn guard rejects another party"), Foreign->ApplyBurn(2, 3, Fixture.First.Controller));
+    const float OwnHealth = Own->GetHealth();
+    FFableExpeditionCombatTestAccess::Area(Fixture.First.Hero, 5, true);
+    TestTrue(TEXT("The same real area skill damages and slows its own target"),
+             Own->GetHealth() < OwnHealth && Own->GetSlowTimeRemaining() > 0);
+    TestEqual(TEXT("The in-range foreign target gets neither area damage nor effect"), Foreign->GetHealth(),
+              ForeignHealth);
+    TestEqual(TEXT("Foreign target has no slow"), Foreign->GetSlowTimeRemaining(), 0.0f);
+    TestTrue(TEXT("The own burn is accepted"), Own->ApplyBurn(2, 3, Fixture.First.Controller));
+    FFableExpeditionCombatTestAccess::TickBurn(Own);
+    TestEqual(TEXT("A valid source applies a scheduled burn tick"), Own->GetBurnTickCount(), 1);
+    const float BeforeStaleBurn = Own->GetHealth();
+    const FGuid FirstId = Fixture.First.Profile->ActiveExpeditionId;
+    Fixture.First.Profile->ActiveExpeditionId = FGuid::NewGuid();
+    TestFalse(TEXT("An unresolved owned UUID never falls back to public field progress"),
+              bool(FableAdventure::For(Fixture.First.Hero)));
+    FFableExpeditionCombatTestAccess::TickBurn(Own);
+    TestEqual(TEXT("A stale source cannot continue damaging an old expedition"), Own->GetHealth(), BeforeStaleBurn);
+    TestEqual(TEXT("The stale burn is cleared"), Own->GetBurnTimeRemaining(), 0.0f);
+    Fixture.First.Profile->ActiveExpeditionId = FirstId;
+
+    const float FirstHealth = Fixture.First.Hero->GetHealth();
+    Fixture.First.Hero->ReceiveHit(10, Foreign);
+    Fixture.First.Hero->ReceiveHit(10);
+    TestEqual(TEXT("Foreign and source-free private damage change no hero health"), Fixture.First.Hero->GetHealth(),
+              FirstHealth);
+    Own->SetActorLocation(Center + FVector(-150, 0, 110));
+    const float SecondHealth = Fixture.Second.Hero->GetHealth();
+    FFableExpeditionCombatTestAccess::EnemyArea(Own);
+    TestTrue(TEXT("Enemy area damage still affects an own participant"), Fixture.First.Hero->GetHealth() < FirstHealth);
+    TestEqual(TEXT("Enemy area damage ignores an overlapping foreign participant"), Fixture.Second.Hero->GetHealth(),
+              SecondHealth);
+    Fixture.FirstPeer.Hero->SetActorLocation(Center + FVector(-300, 600, 110));
+    Fixture.First.Hero->SetActorLocation(Center + FVector(-300, 200, 110));
+    Fixture.Second.Hero->SetActorLocation(Own->GetActorLocation() + FVector(20, 0, 0));
+    TestTrue(TEXT("AI ignores the closer foreign character and selects an own participant"),
+             FFableExpeditionCombatTestAccess::FindTarget(Own) == Fixture.First.Hero);
+
+    Fixture.FirstPeer.Hero->SetActorLocation(Fixture.First.Hero->GetActorLocation() + FVector(0, 180, 0));
+    Fixture.SecondPeer.Hero->SetActorLocation(Fixture.First.Hero->GetActorLocation() + FVector(0, -180, 0));
+    Own->SetActorLocation(Center + FVector(-150, 700, 110));
+    FFableExpeditionCombatTestAccess::ShareShield(Fixture.First.Hero);
+    TestTrue(TEXT("Guardian shield reaches the actual own companion"), Fixture.FirstPeer.Hero->GetShieldAmount() > 0);
+    TestEqual(TEXT("Guardian shield reaches no other party"), Fixture.SecondPeer.Hero->GetShieldAmount(), 0.0f);
+    Fixture.FirstPeer.Hero->ReceiveHit(100000, Own);
+    Fixture.SecondPeer.Hero->ReceiveHit(100000, Foreign);
+    TestTrue(TEXT("Both parties have an equally nearby genuinely downed target"),
+             Fixture.FirstPeer.Hero->IsDowned() && Fixture.SecondPeer.Hero->IsDowned());
+    TestFalse(TEXT("A same-distance foreign downed character cannot be revived"),
+              FFableExpeditionCombatTestAccess::CanRevive(Fixture.First.Hero, Fixture.SecondPeer.Hero));
+    TestTrue(TEXT("The own companion passes the same real revive checks"),
+             FFableExpeditionCombatTestAccess::CanRevive(Fixture.First.Hero, Fixture.FirstPeer.Hero));
+    TestTrue(TEXT("An own revive channel starts normally"), Fixture.First.Hero->BeginRevive(Fixture.FirstPeer.Hero));
+    Fixture.First.Profile->ActiveExpeditionId = FGuid::NewGuid();
+    FFableExpeditionCombatTestAccess::TickLife(Fixture.First.Hero);
+    TestTrue(TEXT("Changing scope interrupts the existing revive channel"),
+             !Fixture.First.Hero->GetReviveTarget() && !Fixture.FirstPeer.Hero->GetReviver());
+    Fixture.First.Profile->ActiveExpeditionId = FirstId;
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableIsolationProjectileTest,
+                                 "Fablewood.Native.Isolation.SweptProjectilesAndStaleSources",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 실제 sweep가 다른 파티를 관통해 자기 대상을 맞히며 재입장한 시전자의 옛 탄은 무효다. */
+bool FFableIsolationProjectileTest::RunTest(const FString& Parameters)
+{
+    FIsolationTestWorld Fixture;
+    if (!TestTrue(TEXT("Swept collision fixture has two real overlapping Moonwell parties"),
+                  Fixture.Initialize(true, EFableRegion::Moonwell)))
+    {
+        return false;
+    }
+    Fixture.MoveExistingEnemiesAway();
+    const FVector Center = FableRPG::RegionCenter(EFableRegion::Moonwell) + Fixture.One->GetWorldOrigin();
+    Fixture.First.Hero->SetActorLocation(Center + FVector(-550, 0, 110));
+    Fixture.FirstPeer.Hero->SetActorLocation(Center + FVector(-1500, 1000, 110));
+    Fixture.Second.Hero->SetActorLocation(Center + FVector(-1500, -1000, 110));
+    Fixture.SecondPeer.Hero->SetActorLocation(Center + FVector(-1500, -1300, 110));
+    AFableEnemy* Own = Fixture.SpawnEnemy(Fixture.One, FVector(200, 0, 110));
+    AFableEnemy* Foreign = Fixture.SpawnEnemy(Fixture.Two, FVector(-100, 0, 110));
+    if (!TestNotNull(TEXT("Own swept target exists"), Own) ||
+        !TestNotNull(TEXT("Foreign swept occluder exists"), Foreign))
+    {
+        return false;
+    }
+    FActorSpawnParameters ParametersForShot;
+    ParametersForShot.Owner = Fixture.First.Hero;
+    ParametersForShot.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AFableProjectile* Shot = Fixture.Base.World->SpawnActor<AFableProjectile>(Center + FVector(-400, 0, 110),
+                                                                              FRotator::ZeroRotator, ParametersForShot);
+    if (!TestNotNull(TEXT("A real server hero projectile exists"), Shot))
+    {
+        return false;
+    }
+    Shot->InitializeShot(FVector::ForwardVector, 5, Fixture.First.Controller, true, 0, 1000, 1200);
+    const float OwnHealth = Own->GetHealth();
+    const float ForeignHealth = Foreign->GetHealth();
+    Shot->Tick(.8f);
+    TestTrue(TEXT("A shot sweeps through the foreign occluder and hits its own enemy"), Own->GetHealth() < OwnHealth);
+    TestEqual(TEXT("The foreign occluder takes no shot damage"), Foreign->GetHealth(), ForeignHealth);
+    TestEqual(TEXT("Only one own enemy consumed a hit"), Shot->GetUniqueHitCount(), 1);
+    TestTrue(TEXT("The projectile captured its immutable source UUID"),
+             Shot->GetExpeditionId() == Fixture.One->GetExpeditionId());
+
+    AFableProjectile* Stale = Fixture.Base.World->SpawnActor<AFableProjectile>(
+        Center + FVector(-400, 0, 110), FRotator::ZeroRotator, ParametersForShot);
+    if (!TestNotNull(TEXT("A second real shot exists before scope changes"), Stale))
+    {
+        return false;
+    }
+    Stale->InitializeShot(FVector::ForwardVector, 5, Fixture.First.Controller, true, 0, 1000, 1200);
+    const FGuid Captured = Stale->GetExpeditionId();
+    const float BeforeStale = Own->GetHealth();
+    Fixture.First.Profile->ActiveExpeditionId = FGuid::NewGuid();
+    Stale->Tick(.8f);
+    TestTrue(TEXT("An old shot retains its UUID and is destroyed when its source changes scope"),
+             Stale->GetExpeditionId() == Captured && Stale->IsActorBeingDestroyed());
+    TestEqual(TEXT("The stale shot cannot damage the previous encounter"), Own->GetHealth(), BeforeStale);
+    Fixture.First.Profile->ActiveExpeditionId = Captured;
+
+    // 적 발사체도 앞의 다른 파티 캐릭터를 무시하고 자기 참가자만 맞힌다.
+    Own->SetActorLocation(Center + FVector(-550, 0, 110));
+    Foreign->SetActorLocation(Center + FVector(-1500, 1300, 110));
+    Fixture.First.Hero->SetActorLocation(Center + FVector(200, 0, 110));
+    Fixture.Second.Hero->SetActorLocation(Center + FVector(-100, 0, 110));
+    FActorSpawnParameters ParametersForBolt;
+    ParametersForBolt.Owner = Own;
+    ParametersForBolt.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AFableEnemyBolt* Bolt = Fixture.Base.World->SpawnActor<AFableEnemyBolt>(Center + FVector(-400, 0, 110),
+                                                                            FRotator::ZeroRotator, ParametersForBolt);
+    if (!TestNotNull(TEXT("A real enemy bolt exists"), Bolt))
+    {
+        return false;
+    }
+    Bolt->InitializeBolt(FVector::ForwardVector, 10, EFableRegion::Moonwell);
+    const float HeroHealth = Fixture.First.Hero->GetHealth();
+    const float OtherHealth = Fixture.Second.Hero->GetHealth();
+    Bolt->Tick(1.0f);
+    TestTrue(TEXT("The enemy bolt sweeps through the foreign hero and damages its own participant"),
+             Fixture.First.Hero->GetHealth() < HeroHealth);
+    TestEqual(TEXT("The enemy bolt changes no foreign hero health"), Fixture.Second.Hero->GetHealth(), OtherHealth);
+    TestTrue(TEXT("Enemy bolts capture the same immutable expedition identity"),
+             Bolt->GetExpeditionId() == Fixture.One->GetExpeditionId());
     return true;
 }
 

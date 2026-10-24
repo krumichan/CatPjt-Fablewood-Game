@@ -1,5 +1,6 @@
 #include "FableRPGValidationDriver.h"
 #include "FablePlayerController.h"
+#include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
@@ -60,13 +61,19 @@ namespace
     }
 
     /** 특성 생존한 적 목록에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
-    int32 TalentLiveEnemies(UWorld* World)
+    int32 TalentLiveEnemies(UWorld* World, const AActor* Context)
     {
         int32 N = 0;
 
         // 지역·적·전투 진행 순회
         for (TActorIterator<AFableEnemy> I(World); I; ++I)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(Context, *I))
+            {
+                continue;
+            }
+
             if (I->IsAlive())
             {
                 ++N;
@@ -77,30 +84,48 @@ namespace
     }
 
     /** 특성 플레이어 투사체 목록에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
-    int32 TalentPlayerProjectiles(UWorld* World)
+    int32 TalentPlayerProjectiles(UWorld* World, const AActor* Context)
     {
         int32 N = 0;
         for (TActorIterator<AFableProjectile> I(World); I; ++I)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(Context, *I))
+            {
+                continue;
+            }
+
             ++N;
         }
         return N;
     }
 
     /** 특성 투사체 목록에 필요한 값을 구성하거나 해당 검증 단계를 처리한다. */
-    int32 TalentProjectiles(UWorld* World)
+    int32 TalentProjectiles(UWorld* World, const AActor* Context)
     {
         int32 N = 0;
 
         // 지역·적·전투 진행 순회
         for (TActorIterator<AFableEnemyBolt> I(World); I; ++I)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(Context, *I))
+            {
+                continue;
+            }
+
             ++N;
         }
 
         // 현재 월드와 플레이어 참조 순회
         for (TActorIterator<AFableProjectile> I(World); I; ++I)
         {
+            // 자기 원정과 같은 UUID의 대상만 관찰한다.
+            if (!FableAdventure::SameScope(Context, *I))
+            {
+                continue;
+            }
+
             ++N;
         }
 
@@ -196,6 +221,11 @@ bool UFableRPGValidationDriver::TalentCombatProbe()
     // 현재 월드와 플레이어 참조 순회
     for (TActorIterator<AFableCharacter> I(GetWorld()); I; ++I)
     {
+        if (!FableAdventure::SameScope(PC.Get(), *I))
+        {
+            continue;
+        }
+
         if (*I != H && I->GetPlayerState() && I->IsAlive())
         {
             Partner = *I;
@@ -208,6 +238,12 @@ bool UFableRPGValidationDriver::TalentCombatProbe()
     // 지역·적·전투 진행 순회
     for (TActorIterator<AFableEnemy> I(GetWorld()); I; ++I)
     {
+        // 자기 원정과 같은 UUID의 대상만 관찰한다.
+        if (!FableAdventure::SameScope(PC.Get(), *I))
+        {
+            continue;
+        }
+
         if (I->IsAlive() && I->IsBoss() && I->GetEncounterRegion() == EFableRegion::RootRuins)
         {
             Boss = *I;
@@ -283,7 +319,7 @@ bool UFableRPGValidationDriver::TalentCombatProbe()
             // Require an empty player-projectile field and stable boss HP before attributing this cast.
 
             // 직업·스킬·특성 빌드 조건 검사
-            if (Boss->GetBurnTimeRemaining() > 0 || TalentPlayerProjectiles(GetWorld()) > 0)
+            if (Boss->GetBurnTimeRemaining() > 0 || TalentPlayerProjectiles(GetWorld(), PC.Get()) > 0)
             {
                 TalentDamageStableAt = -1;
                 TalentStableBossHealth = Boss->GetHealth();
@@ -575,7 +611,12 @@ void UFableRPGValidationDriver::TickTalents()
     // 현재 월드와 플레이어 참조에 필요한 값 준비
     AFablePlayerState* S = PC->GetPlayerState<AFablePlayerState>();
     AFableCharacter* H = PC->GetPawn<AFableCharacter>();
-    AFableGameState* GS = GetWorld()->GetGameState<AFableGameState>();
+    const FFableAdventureView GS = FableAdventure::For(PC.Get());
+    if (!GS)
+    {
+        return;
+    }
+
     const double Now = GetWorld()->GetTimeSeconds(), Wait = Now - StepAt;
     const FVector Board = FableRPG::BoardLocation() + FVector(Role == TEXT("host") ? -100 : 100, -120, 100);
     const auto Go = [&](int32 Next)
@@ -765,7 +806,7 @@ void UFableRPGValidationDriver::TickTalents()
         bool Ready = true;
 
         // 직업·스킬·특성 빌드 순회
-        for (APlayerState* P : GS->PlayerArray)
+        for (APlayerState* P : GS.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(P);
             Ready &= Other && Other->IsRegionEligible(EFableRegion::RootRuins) && Other->GetTalentRank(Path) == 2;
@@ -779,7 +820,7 @@ void UFableRPGValidationDriver::TickTalents()
 
         // 직업·스킬·특성 빌드 처리
         if (GS->ActiveRegion == EFableRegion::RootRuins &&
-            FableRPG::IsInRegion(EFableRegion::RootRuins, H->GetActorLocation()))
+            FableAdventure::For(PC.Get()).IsInRegion(EFableRegion::RootRuins, H->GetActorLocation()))
         {
             TalentProbe = 0;
             TalentAt = Now;
@@ -808,7 +849,7 @@ void UFableRPGValidationDriver::TickTalents()
         }
 
         // 지역·적·전투 진행 조건 검사
-        if (!FableRPG::IsInRegion(EFableRegion::RootRuins, H->GetActorLocation()))
+        if (!FableAdventure::For(PC.Get()).IsInRegion(EFableRegion::RootRuins, H->GetActorLocation()))
         {
             Fail(TEXT("Individual rescue left the talent test region."));
             return;
@@ -864,6 +905,11 @@ void UFableRPGValidationDriver::TickTalents()
             // 현재 월드와 플레이어 참조 순회
             for (TActorIterator<AFableCharacter> I(GetWorld()); I; ++I)
             {
+                if (!FableAdventure::SameScope(PC.Get(), *I))
+                {
+                    continue;
+                }
+
                 if (*I != H && I->GetPlayerState())
                 {
                     Partner = *I;
@@ -889,12 +935,13 @@ void UFableRPGValidationDriver::TickTalents()
         break;
     }
     case 12:
-        if (FableRPG::IsInRegion(EFableRegion::Village, H->GetActorLocation()))
+        if (FableAdventure::For(PC.Get()).IsInRegion(EFableRegion::Village, H->GetActorLocation()))
         {
             Go(13);
             break;
         }
-        if (WalkTo(FableRPG::RegionReturnPortal(EFableRegion::RootRuins) +
+        if (WalkTo(FableAdventure::For(PC.Get()).ToWorld(EFableRegion::RootRuins,
+                                                         FableRPG::RegionReturnPortal(EFableRegion::RootRuins)) +
                        FVector(Role == TEXT("host") ? -80 : 80, 0, 100),
                    100) &&
             Now - LastAction > 1)
@@ -1026,7 +1073,7 @@ void UFableRPGValidationDriver::TickTalents()
         break;
     case 30:
         if (!WalkTo(Board, 90) || H->GetVelocity().Size2D() > 10 || H->GetBuildChangeCooldownRemaining() > 0 ||
-            TalentLiveEnemies(GetWorld()) > 0 || TalentProjectiles(GetWorld()) > 0)
+            TalentLiveEnemies(GetWorld(), PC.Get()) > 0 || TalentProjectiles(GetWorld(), PC.Get()) > 0)
         {
             TalentQuietAt = -1;
             return;
@@ -1055,7 +1102,7 @@ void UFableRPGValidationDriver::TickTalents()
         {
             return;
         }
-        for (APlayerState* P : GS->PlayerArray)
+        for (APlayerState* P : GS.Players())
         {
             const AFablePlayerState* Other = Cast<AFablePlayerState>(P);
             if (!Other || Other->GetTalentRank(EFableTalentPath::Second) != 2 ||
@@ -1124,8 +1171,8 @@ void UFableRPGValidationDriver::AppendTalentReport(TSharedRef<FJsonObject> O) co
 
     // 직업·스킬·특성 빌드 처리
     O->SetNumberField(TEXT("saved_schema_version"), Schema);
-    O->SetNumberField(TEXT("live_enemy_count"), TalentLiveEnemies(GetWorld()));
-    O->SetNumberField(TEXT("projectile_count"), TalentProjectiles(GetWorld()));
+    O->SetNumberField(TEXT("live_enemy_count"), TalentLiveEnemies(GetWorld(), PC.Get()));
+    O->SetNumberField(TEXT("projectile_count"), TalentProjectiles(GetWorld(), PC.Get()));
     O->SetNumberField(TEXT("quiet_seconds"), TalentQuietAt < 0 ? 0 : GetWorld()->GetTimeSeconds() - TalentQuietAt);
     TSharedRef<FJsonObject> Checks = MakeShared<FJsonObject>();
 

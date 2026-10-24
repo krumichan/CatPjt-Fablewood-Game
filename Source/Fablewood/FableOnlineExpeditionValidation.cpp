@@ -6,6 +6,8 @@
 #include "FableEnemy.h"
 #include "FableGameMode.h"
 #include "FableGameState.h"
+#include "FableAdventure.h"
+#include "FablePartyEncounter.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Dom/JsonObject.h"
@@ -41,8 +43,10 @@ namespace
     /** 준비 단계가 끝난 뒤 입구에서 떨어진 두 대기 지점을 사용한다. */
     FVector ExpeditionSafeLocation(const AFableCharacter* Hero)
     {
-        return Hero && Hero->GetHeroClass() == EFableClass::Archer ? FVector(6480, -1700, 100)
-                                                                   : FVector(6300, -1580, 100);
+        const auto View = FableAdventure::For(Hero);
+        const FVector Canonical =
+            Hero && Hero->GetHeroClass() == EFableClass::Archer ? FVector(6480, -1700, 100) : FVector(6300, -1580, 100);
+        return View.ToWorld(EFableRegion::RootRuins, Canonical);
     }
 }
 
@@ -55,15 +59,27 @@ void UFableOnlineValidationDriver::ObserveExpeditionServer(UWorld* World)
     }
 
     const auto* ServerMode = World->GetAuthGameMode<AFableGameMode>();
-    const auto* State = World->GetGameState<AFableGameState>();
-    if (!ServerMode || !State)
+    const AFablePartyEncounter* Encounter = nullptr;
+    if (ServerMode)
+    {
+        for (const auto* Candidate : ServerMode->GetExpeditions())
+        {
+            if (IsValid(Candidate) && Candidate->IsCommitted() && Candidate->GetTicket().MemberKeys.Num() == 2)
+            {
+                Encounter = Candidate;
+                break;
+            }
+        }
+    }
+    const auto Progress = FableAdventure::For(Encounter);
+    if (!ServerMode || !Encounter || !Progress)
     {
         return;
     }
 
-    const auto& Ticket = ServerMode->GetActiveExpedition();
+    const auto& Ticket = Encounter->GetTicket();
     if (!Ticket.IsValid() || Ticket.MemberKeys.Num() != 2 || Ticket.MemberKeys[0] == Ticket.MemberKeys[1] ||
-        State->ActiveRegion != Ticket.Region || State->ActiveDifficulty != Ticket.Difficulty)
+        Progress->ActiveRegion != Ticket.Region || Progress->ActiveDifficulty != Ticket.Difficulty)
     {
         return;
     }
@@ -80,7 +96,7 @@ void UFableOnlineValidationDriver::ObserveExpeditionServer(UWorld* World)
             ProfileState->GetBackendRevision() != ProfileState->GetBackendAcknowledgedRevision() ||
             ProfileState->ActiveExpeditionId != Ticket.ExpeditionId || ProfileState->PartyId != Ticket.PartyId ||
             !Ticket.Contains(ProfileState->PartyPlayerKey) ||
-            !FableRPG::IsInRegion(Ticket.Region, Hero->GetActorLocation()))
+            !Progress.IsInRegion(Ticket.Region, Hero->GetActorLocation()))
         {
             return;
         }
@@ -108,8 +124,8 @@ void UFableOnlineValidationDriver::ObserveExpeditionServer(UWorld* World)
     ServerExpeditionArrival->SetNumberField(TEXT("region"), int32(Ticket.Region));
     ServerExpeditionArrival->SetNumberField(TEXT("difficulty"), int32(Ticket.Difficulty));
     ServerExpeditionArrival->SetNumberField(TEXT("preparationRevision"), Ticket.PreparationRevision);
-    ServerExpeditionArrival->SetNumberField(TEXT("encounterSerial"), State->EncounterSerial);
-    ServerExpeditionArrival->SetNumberField(TEXT("defeatedEnemies"), State->DefeatedEnemies);
+    ServerExpeditionArrival->SetNumberField(TEXT("encounterSerial"), Progress->EncounterSerial);
+    ServerExpeditionArrival->SetNumberField(TEXT("defeatedEnemies"), Progress->DefeatedEnemies);
     ServerExpeditionArrival->SetArrayField(TEXT("members"), Members);
     TArray<TSharedPtr<FJsonValue>> Keys;
     for (const auto& Key : Ticket.MemberKeys)
@@ -126,8 +142,9 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
 {
     auto* World = Hero ? Hero->GetWorld() : nullptr;
     auto* Manager = AFablePartyManager::Find(World);
-    auto* State = World ? World->GetGameState<AFableGameState>() : nullptr;
-    if (!PC || !P || !Hero || !Manager || !State)
+    auto* RootState = World ? World->GetGameState<AFableGameState>() : nullptr;
+    const auto Progress = FableAdventure::For(P);
+    if (!PC || !P || !Hero || !Manager || !RootState || !Progress)
     {
         return false;
     }
@@ -154,7 +171,7 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
 
     // 검증도 일반 사용자처럼 공개 복제 명부에서 동료를 찾는다.
     AFablePlayerState* Peer = nullptr;
-    for (APlayerState* Entry : State->PlayerArray)
+    for (APlayerState* Entry : RootState->PlayerArray)
     {
         if (auto* Candidate = Cast<AFablePlayerState>(Entry); Candidate && Candidate != P)
         {
@@ -263,7 +280,7 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
                P->LastNotice == ExpectedNotice && Both() && Fingerprint() == ExpeditionRequestFingerprint &&
                PC->GetPartyPreparationResultRevision() == Party->PreparationRevision &&
                !P->ActiveExpeditionId.IsValid() && !Peer->ActiveExpeditionId.IsValid() &&
-               State->ActiveRegion == EFableRegion::Village;
+               Progress->ActiveRegion == EFableRegion::Village;
     };
     const FString Stale = TEXT("파티 준비 상태가 바뀌었습니다. 새 상태를 확인하세요.");
     const FString LeaderOnly = TEXT("파티장만 원정을 선택하거나 시작할 수 있습니다.");
@@ -539,10 +556,10 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
                 });
         }
         if (Both() && Peer->GetPawn() && P->ActiveExpeditionId.IsValid() &&
-            P->ActiveExpeditionId == Peer->ActiveExpeditionId && State->ActiveRegion == EFableRegion::RootRuins &&
-            State->ActiveDifficulty == EFableDifficulty::Normal &&
-            FableRPG::IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()) &&
-            FableRPG::IsInRegion(EFableRegion::RootRuins, Peer->GetPawn()->GetActorLocation()))
+            P->ActiveExpeditionId == Peer->ActiveExpeditionId && Progress->ActiveRegion == EFableRegion::RootRuins &&
+            Progress->ActiveDifficulty == EFableDifficulty::Normal &&
+            Progress.IsInRegion(EFableRegion::RootRuins, Hero->GetActorLocation()) &&
+            Progress.IsInRegion(EFableRegion::RootRuins, Peer->GetPawn()->GetActorLocation()))
         {
             ExpeditionReport->SetStringField(TEXT("expeditionId"),
                                              P->ActiveExpeditionId.ToString(EGuidFormats::DigitsWithHyphensLower));
@@ -569,6 +586,7 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
             for (TActorIterator<AFableEnemy> It(World); It; ++It)
             {
                 if (It->IsAlive() && It->GetEncounterRegion() == EFableRegion::RootRuins &&
+                    It->GetExpeditionId() == Progress.ExpeditionId() &&
                     FVector::Dist2D(Hero->GetActorLocation(), It->GetActorLocation()) < 1800)
                 {
                     return false;

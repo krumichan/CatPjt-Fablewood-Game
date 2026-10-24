@@ -512,11 +512,13 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
 
     // 현재 월드와 플레이어 참조 처리
     Fixture.World->SetGameState(Adventure);
+    Controller->SetPlayerState(State);
     Controller->Possess(Hero);
     State->SetOwner(Controller);
 
     // 기대값과 상태 보존 검증 조건 검사
-    if (!TestTrue(TEXT("Fixture controller possesses the expected character"), Controller->GetPawn() == Hero))
+    if (!TestTrue(TEXT("Fixture controller possesses the expected character and profile"),
+                  Controller->GetPawn() == Hero && Hero->GetPlayerState<AFablePlayerState>() == State))
     {
         return false;
     }
@@ -589,13 +591,13 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
     State->StoryChapter = 4;
     State->DungeonCompletions = 1;
     State->MoonwellQuest = EFableQuestStage::Active;
-    Adventure->ActiveRegion = EFableRegion::Moonwell;
+    Adventure->FieldProgress.ActiveRegion = EFableRegion::Moonwell;
     State->RecordStorySeal(0);
     TestEqual(TEXT("A moon seal cannot be observed from root ruins"), State->StorySealMask, 0);
     MoveHero(FableRPG::MoonSealLocation(0) + FVector(0, 0, 110));
     State->RecordStorySeal(0);
     TestEqual(TEXT("An uncleaned server seal cannot award credit"), State->StorySealMask, 0);
-    Adventure->MoonSealMask = 7;
+    Adventure->FieldProgress.MoonSealMask = 7;
     State->RecordStorySeal(-1);
     State->RecordStorySeal(3);
     State->RecordStorySeal(MAX_int32);
@@ -619,10 +621,10 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
     State->RecordStorySeal(1);
     TestEqual(TEXT("Seal credit requires the exact moon story chapter"), State->StorySealMask, 1);
     State->StoryChapter = 4;
-    Adventure->bPartyRecoveryPending = true;
+    Adventure->FieldProgress.bPartyRecoveryPending = true;
     State->RecordStorySeal(1);
     TestEqual(TEXT("Recovery blocks new seal credit"), State->StorySealMask, 1);
-    Adventure->bPartyRecoveryPending = false;
+    Adventure->FieldProgress.bPartyRecoveryPending = false;
     Hero->ReceiveHit(10000.0f);
 
     // 퀘스트와 이야기 진행 처리
