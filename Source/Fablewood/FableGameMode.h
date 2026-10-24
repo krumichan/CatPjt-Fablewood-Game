@@ -9,62 +9,150 @@ class AFableEnemy;
 class AFableDungeonWorld;
 class AFableMoonwellWorld;
 
+/** 서버의 접속·파티 이동·던전·보스·복구 진행을 관리하는 게임 규칙. */
 UCLASS()
 class FABLEWOOD_API AFableGameMode : public AGameModeBase
 {
     GENERATED_BODY()
+
 public:
+    /** 생성 시 필요한 기본 설정과 초기 상태를 구성한다. */
     AFableGameMode();
+
+    /** 월드 초기화 옵션에서 시작 화면·온라인 모드와 접속 설정을 준비한다. */
     virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
-    bool IsFrontEnd() const { return bFrontEnd; }
+
+    /** 시작 화면 여부를 확인한다. */
+    bool IsFrontEnd() const
+    {
+        return bFrontEnd;
+    }
+
+    /** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
     virtual void BeginPlay() override;
+
+    /** 월드 이탈 시 등록한 이벤트와 진행 중인 작업을 정리한다. */
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-    virtual void PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage) override;
+
+    /** 접속을 허용하기 전에 기본 연결 조건을 검사한다. */
+    virtual void PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId,
+                          FString& ErrorMessage) override;
+
+    /** 로그인 요청을 처리하고 필요한 플레이어 연결 상태를 준비한다. */
     virtual APlayerController* Login(UPlayer* NewPlayer, ENetRole InRemoteRole, const FString& Portal,
-        const FString& Options, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage) override;
+                                     const FString& Options, const FUniqueNetIdRepl& UniqueId,
+                                     FString& ErrorMessage) override;
+
+    /** 새 연결을 파티와 백엔드 프로필 초기화 절차에 연결한다. */
     virtual void PostLogin(APlayerController* NewPlayer) override;
+
+    /** 접속 종료에 따른 세션과 소유 상태의 정리를 처리한다. */
     virtual void Logout(AController* Exiting) override;
+
+    /** 플레이어를 현재 진행에 맞는 시작 지점에 생성한다. */
     virtual void RestartPlayer(AController* NewPlayer) override;
 
+    /** 백엔드 인증 결과를 확인해 플레이어의 게임 진입을 완료한다. */
     void CompleteBackendLogin(APlayerController* Player, bool bSuccess, const FString& Reason);
+
+    /** 적 처치에 따른 보상·웨이브·보스 완료 상태를 처리한다. */
     void HandleEnemyDefeated(AFableEnemy* Enemy);
+
+    /** 보스 체력 상태를 갱신한다. */
     void UpdateBossHealth(AFableEnemy* Enemy);
+
+    /** 새 전투 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestNewRound(APlayerController* Requester);
+
+    /** 전투 재도전 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestRetryEncounter(APlayerController* Requester);
+
+    /** 숲 전투 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestForestEncounter(APlayerController* Requester);
+
+    /** 던전 입장 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestEnterDungeon(APlayerController* Requester);
+
+    /** 지역 입장 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestEnterRegion(APlayerController* Requester, EFableRegion Region,
-        EFableDifficulty Difficulty = EFableDifficulty::Normal);
+                            EFableDifficulty Difficulty = EFableDifficulty::Normal);
+
+    /** 봉인 정화 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestCleanseSeal(APlayerController* Requester, int32 SealIndex);
+
+    /** 마을 복귀 요청의 조건을 확인하고 해당 동작을 진행한다. */
     void RequestReturnVillage(APlayerController* Requester);
+
+    /** 살아 있는 요청자가 마을 서비스 범위 안에 있는지 확인한다. */
     bool CanUseTownService(APlayerController* Requester, FVector Location, float Radius = 300.0f) const;
 
 private:
+    /** 현재 연결이 차지한 파티 슬롯 값을 반환한다. */
     int32 GetConnectionSlot(AController* Player) const;
+
+    /** 백엔드 접속 실패를 연결에 알리고 대기 상태를 해제한다. */
     void RejectBackendLogin(APlayerController* Player, const FString& Reason);
+
+    /** 백엔드 프로필을 기다리는 연결의 완료·만료 상태를 확인한다. */
     void CheckBackendLogins();
+
+    /** 현재 지역과 난이도에 맞는 적 전투를 생성한다. */
     void SpawnEncounter();
+
+    /** 현재 전투가 소유한 적과 진행 상태를 정리한다. */
     void ClearEncounter();
+
+    /** 던전의 현재 웨이브에 맞는 적 무리를 생성한다. */
     void SpawnDungeonWave(int32 Wave);
+
+    /** 던전 보스를 생성하고 파티 전투 진행에 연결한다. */
     void SpawnBoss();
+
+    /** 선택한 달샘 봉인에 대응하는 수호 적 무리를 생성한다. */
     void SpawnMoonSealGroup(int32 SealIndex);
+
+    /** 동료들의 생존·지역 상태를 확인해 파티 복구를 판단한다. */
     void CheckPartyState();
+
+    /** 파티 전멸 뒤 전투를 정리하고 복구 대기를 시작한다. */
     void BeginPartyRecovery();
+
+    /** 복구 시간이 끝난 파티를 안전 지점으로 되돌린다. */
     void FinishPartyRecovery();
+
+    /** 복구 전투 상태를 해제한다. */
     void ClearRecoveryCombat();
+
+    /** 재도전 퀘스트의 존재 여부를 확인한다. */
     bool HasRetryQuest(EFableRegion Region) const;
+
+    /** 현재 전투를 마무리하고 파티를 마을로 복귀시킨다. */
     void ReturnPartyToVillage(bool bWipe);
+
+    /** 접속한 파티원들에게 같은 진행 안내를 전달한다. */
     void NotifyParty(const FString& Notice) const;
+
+    /** 연결된 모든 파티원이 선택 지역의 입장 조건을 만족하는지 확인한다. */
     bool AllPlayersRegionEligible(EFableRegion Region) const;
+
+    /** 던전 진행 중 여부를 확인한다. */
     bool IsDungeonRunning() const;
+
+    /** 요청자 생존 여부를 확인한다. */
     bool IsRequesterAlive(APlayerController* Requester) const;
+
+    /** 파티 구성원을 해당 지역의 서버 체크포인트로 이동시킨다. */
     bool MoveParty(EFableRegion Region);
+
+    /** 플레이어를 서버가 정한 지역 체크포인트로 이동시킨다. */
     bool MovePlayerToCheckpoint(AController* Player, EFableRegion Region, int32 Slot);
 
     TSet<TWeakObjectPtr<AFableEnemy>> ActiveEnemies;
     TWeakObjectPtr<AFableEnemy> ActiveBoss;
-    UPROPERTY() TObjectPtr<AFableDungeonWorld> DungeonWorld;
-    UPROPERTY() TObjectPtr<AFableMoonwellWorld> MoonwellWorld;
+    UPROPERTY()
+    TObjectPtr<AFableDungeonWorld> DungeonWorld;
+    UPROPERTY()
+    TObjectPtr<AFableMoonwellWorld> MoonwellWorld;
     FTimerHandle EncounterTimer;
     FTimerHandle PartyMonitor;
     double LastRestartTime = -100.0;
