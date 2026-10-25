@@ -75,8 +75,15 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
     // 체력·마나·보호막·피해량 처리
     IFileManager::Get().MakeDirectory(*Directory, true);
     FParse::Value(FCommandLine::Get(), TEXT("FableOnlineValidationScenario="), Scenario);
+    FParse::Value(FCommandLine::Get(), TEXT("FableTownTravelScenario="), TownTravelScenario);
     Ticker = FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateUObject(this, &UFableOnlineValidationDriver::Tick), .1f);
+    if (TownTravelScenario != TEXT("none") &&
+        (TownTravelScenario != TEXT("unit2-legacy-anchors") || Scenario != TEXT("party-results")))
+    {
+        Finish(false, TEXT("Unknown or incompatible town travel validation scenario."));
+        return;
+    }
 
     // JSON 계약과 검증 기록 처리
     if (Role != TEXT("server"))
@@ -144,6 +151,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 /** 온라인 연결 하위 시스템의 요청과 콜백을 정리한다. */
 void UFableOnlineValidationDriver::Deinitialize()
 {
+    UnbindTownTravel();
     FTSTicker::RemoveTicker(Ticker);
     ReleaseSkillInput();
     DungeonReleaseInput();
@@ -296,6 +304,15 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     if (ServerResultsReport)
     {
         J->SetObjectField(TEXT("serverResults"), ServerResultsReport);
+    }
+    J->SetStringField(TEXT("townTravelScenario"), TownTravelScenario);
+    if (TownReport)
+    {
+        J->SetObjectField(TEXT("townTravel"), TownReport);
+    }
+    if (ServerTownReport)
+    {
+        J->SetObjectField(TEXT("serverTownTravel"), ServerTownReport);
     }
     J->SetNumberField(TEXT("resultsStep"), ResultsStep);
     J->SetNumberField(TEXT("isolationStep"), IsolationStep);
@@ -602,6 +619,10 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (TownTravelScenario == TEXT("unit2-legacy-anchors"))
+        {
+            ObserveTownTravelServer(World);
+        }
         if (Scenario == TEXT("party-results"))
         {
             ObserveResultsServer(World);
@@ -687,7 +708,9 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     {
         return true;
     }
-    if (Now - Started > (Scenario == TEXT("connectivity") ? 420 : 900))
+    if (Now - Started > (TownTravelScenario == TEXT("unit2-legacy-anchors") ? 1080
+                         : Scenario == TEXT("connectivity")                 ? 420
+                                                                            : 900))
     {
         Finish(false, TEXT("Online workflow timed out; private context suppressed."));
         return true;

@@ -28,6 +28,8 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     DOREPLIFETIME(AFablePlayerState, PartyPlayerKey);
     DOREPLIFETIME(AFablePlayerState, PartyId);
     DOREPLIFETIME(AFablePlayerState, ActiveExpeditionId);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, TownConnectionSnapshot, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, bPendingTownTravel, COND_OwnerOnly);
     DOREPLIFETIME(AFablePlayerState, PublicFieldScopeId);
     DOREPLIFETIME_CONDITION(AFablePlayerState, BackendPlayerId, COND_OwnerOnly);
     DOREPLIFETIME_CONDITION(AFablePlayerState, bBackendEnabled, COND_OwnerOnly);

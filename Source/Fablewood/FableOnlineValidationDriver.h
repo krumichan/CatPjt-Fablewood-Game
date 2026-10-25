@@ -3,6 +3,7 @@
 #include "Containers/Ticker.h"
 #include "InputCoreTypes.h"
 #include "FableRPGTypes.h"
+#include "FableTownTravelTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "FableOnlineValidationDriver.generated.h"
 class FJsonObject;
@@ -11,6 +12,7 @@ class AFablePlayerState;
 class AFablePlayerController;
 class AFableCharacter;
 class AFableEnemy;
+class UFableTownTravelCoordinator;
 class UWorld;
 /** Opt-in UI workflow observer. Uses real account APIs and normal gameplay inputs. */
 /** 온라인의 일반 입력과 관찰 결과로 자동 검증을 진행하는 컴포넌트. */
@@ -77,6 +79,46 @@ private:
 
     /** 서버가 관찰한 전투·파티·저장 상태를 JSON으로 만든다. */
     TSharedRef<FJsonObject> ReconnectServerSnapshot(UWorld* World) const;
+    /** 기존 보상 흐름 앞에서 정상 마을 RPC와 실제 도착을 추가 관찰한다. */
+    bool TickUnit2TownAnchors(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero,
+                              double Now);
+
+    /** 정상 서버 이벤트의 순간 상태를 보존하며 게임 상태를 변경하지 않는다. */
+    void ObserveTownTravelServer(UWorld* World);
+
+    /** 권한 이벤트와 동일 시도의 응답·순간 상태를 함께 기록한다. */
+    void OnTownTravelAuthority(const FFableTownTravelEvent& Event);
+
+    /** 준비 콜백에서 일반 소유자 ACK/취소 경로만 호출한다. */
+    void OnTownTravelPrepared(const FFableTownTravelPrepared& Prepared);
+
+    /** 마지막 응답으로 덮어쓰지 않고 모든 실제 시도 응답을 보관한다. */
+    void OnTownTravelResponse(const FFableTownTravelResponse& Response);
+
+    /** 정상 도착·해제 순서를 발신자별 사건과 대조한다. */
+    void OnTownTravelProgress(const FFableTownTravelEvent& Event);
+
+    /** 현재 연결·완전한 성장·전투 시각·안전 위치·필드 정본을 읽는다. */
+    TSharedPtr<FJsonObject> TownTravelSnapshot(UWorld* World) const;
+
+    /** 기존 월드와 PC에 등록한 본인 delegate만 해제한다. */
+    void UnbindTownTravel();
+
+    FString TownTravelScenario = TEXT("none");
+    int32 TownStep = 0, TownAttemptIndex = 0, TownArrivalSamples = 0;
+    int64 TownClientSequence = 0;
+    double TownStarted = 0, TownStationaryAt = 0, TownLastBeginAt = -10, TownArrivalAt = 0;
+    bool bTownReplaySent = false, bTownDuplicateSent = false, bTownCommitResponse = false;
+    bool bTownOwnArrival = false, bTownOrderingFailed = false;
+    FGuid TownRequestId, TownMalformedAttemptId, TownCancelAttemptId, TownReplayAttemptId, TownDuplicateAttemptId;
+    FFableTownTravelPrepared TownPrepared;
+    FFableTownTravelCommitReceipt TownCommit;
+    TWeakObjectPtr<AFablePlayerController> TownBoundPlayer;
+    TWeakObjectPtr<UFableTownTravelCoordinator> TownBoundCoordinator;
+    TSharedPtr<FJsonObject> TownReport, ServerTownReport;
+    TArray<FFableTownTravelResponse> TownResponses;
+    TArray<TSharedPtr<FJsonValue>> TownArrivalObservations;
+
     FString Scenario = TEXT("connectivity");
     int32 DungeonStep = 0, DungeonWeaponId = 0;
     double DungeonStepAt = 0, DungeonActionAt = -10, DungeonAttackAt = -10, DungeonSkillAt = -10;

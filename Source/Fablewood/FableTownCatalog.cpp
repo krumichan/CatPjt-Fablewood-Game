@@ -46,6 +46,12 @@ namespace
         FFableTownAnchorDefinition Anchor;
         Anchor.AnchorId = FName(Name);
         Anchor.FloorId = FName(Floor);
+        if (Definition.TownId == EFableTownId::LegacyVillage)
+        {
+            // FableWorld::Meadow cube: center -60 + (100 * scale1.2)/2 = top0.
+            Anchor.ExpectedSupportTag = TEXT("Meadow");
+            Anchor.ExpectedSupportLocalZ = 0.0;
+        }
         for (const FVector& Slot : Slots)
         {
             Anchor.LocalSlots.Add(FTransform(Slot));
@@ -213,7 +219,8 @@ bool UFableTownCatalog::ValidateDefinition(const FFableTownDefinition& Definitio
             {
                 return Value.FloorId == Anchor.FloorId;
             });
-        if (Anchor.AnchorId.IsNone() || AnchorIds.Contains(Anchor.AnchorId) || !Floor || Anchor.LocalSlots.IsEmpty())
+        if (Anchor.AnchorId.IsNone() || AnchorIds.Contains(Anchor.AnchorId) || !Floor || Anchor.LocalSlots.IsEmpty() ||
+            !FMath::IsFinite(Anchor.ExpectedSupportLocalZ))
         {
             OutError = TEXT("invalid-anchor-definition");
             return false;

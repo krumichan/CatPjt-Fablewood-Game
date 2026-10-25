@@ -3,6 +3,7 @@
 #include "GameFramework/PlayerState.h"
 #include "FableRPGTypes.h"
 #include "FableExpeditionResultTypes.h"
+#include "FableTownTravelTypes.h"
 #include "FablePlayerState.generated.h"
 
 class UFableSaveGame;
@@ -17,8 +18,29 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
     friend struct FFablePartyTestAccess;
     friend struct FFableTownTestAccess;
     friend class AFableTownManager;
+#if WITH_DEV_AUTOMATION_TESTS
+    friend struct FFableTownTravelTestAccess;
+    friend struct FFableTownStreamingTestAccess;
+#endif
 
 public:
+    /** 현재 소유 연결의 메모리 전용 이동 상태를 읽는다. */
+    const FFableTownConnectionSnapshot& GetTownConnectionSnapshot() const
+    {
+        return TownConnectionSnapshot;
+    }
+
+    bool HasPendingTownTravel() const
+    {
+        return bPendingTownTravel;
+    }
+
+    /** 정상 진단에서 물약 재사용 절대 시각을 읽는다. */
+    float GetPotionCooldownEndServerTime() const
+    {
+        return NextPotionServerTime;
+    }
+
     /** 백엔드 식별자와 분리된 현재 서버의 공개 파티 식별 정보. */
     UPROPERTY(Replicated, BlueprintReadOnly)
     FString PartyPlayerKey;
@@ -29,6 +51,12 @@ public:
     /** 서버 참가 증서와 연결되는 현재 원정. 영구 저장 데이터에는 포함하지 않는다. */
     UPROPERTY(Replicated, BlueprintReadOnly)
     FGuid ActiveExpeditionId;
+
+    UPROPERTY(Replicated)
+    FFableTownConnectionSnapshot TownConnectionSnapshot;
+
+    UPROPERTY(Replicated)
+    bool bPendingTownTravel = false;
 
     /** 공개 숲의 현재 실행 세대만 읽는다. 원정 및 영구 저장과는 독립적이다. */
     FGuid GetPublicFieldScopeId() const

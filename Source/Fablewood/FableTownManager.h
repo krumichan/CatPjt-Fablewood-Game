@@ -4,12 +4,14 @@
 #include "GameFramework/Actor.h"
 #include "FableAdventureTypes.h"
 #include "FableTownTypes.h"
+#include "FableTownTravelTypes.h"
 #include "FableTownManager.generated.h"
 
 class APlayerController;
 class APlayerState;
 class AFablePlayerState;
 class UFableTownCatalog;
+class UFableTownTravelCoordinator;
 
 /** GameState를 늘리지 않는 서버 공간 명부. / GameStateを追加しないサーバー空間名簿。 */
 UCLASS()
@@ -20,6 +22,10 @@ class FABLEWOOD_API AFableTownManager : public AActor
 public:
     AFableTownManager();
     virtual void BeginPlay() override;
+
+    /** 등록된 현재 연결의 공간 문맥을 서버에서 미리 갱신한다. */
+    virtual void Tick(float DeltaSeconds) override;
+
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
     static AFableTownManager* Find(const UWorld* World);
@@ -28,6 +34,34 @@ public:
     const UFableTownCatalog* GetCatalog() const;
     const FFableAdventureProgress& GetIdleProgress() const;
     double GetServerTime() const;
+
+    /** 현재 인증 연결에만 새 nonce와 세대를 발급한다. */
+    bool RegisterOrRefreshConnection(APlayerController* Player);
+
+    /** semantic 공간 변경을 root 수명 revision으로 구분한다. */
+    bool RefreshPhysicalPresence(APlayerController* Player);
+
+    /** 현재 연결에 속하는 서버 공간 스냅샷만 반환한다. */
+    bool GetConnectionSnapshot(const AFablePlayerState* Profile, FFableTownConnectionSnapshot& OutSnapshot) const;
+
+    /** controller 객체·nonce·세대를 모두 대조한다. */
+    bool IsCurrentConnection(const APlayerController* Player, int64 OwnerConnectionGeneration,
+                             FGuid ConnectionNonce) const;
+
+    /** 도착 뒤 공개 명부와 안전 앵커를 한 번 확정한다. */
+    bool CommitAnchorPresence(APlayerController* Player, const FFableTownAnchorRef& Anchor,
+                              const FTransform& AcceptedTransform, FGuid TransactionId, int64 Generation,
+                              FFableTownConnectionSnapshot& OutAfter);
+
+    /** 기존 manager의 서버 이동 component를 반환한다. */
+    UFableTownTravelCoordinator* GetTravelCoordinator() const;
+
+    /** JSON에서도 정확한 범위 안에서만 새 공간 revision을 허용한다. */
+    bool CanAdvancePresenceRevision() const
+    {
+        return PresenceSequence < FableTownTravel::MaxSafeSequence;
+    }
+
     FGuid GetPublicFieldScopeId() const;
     FFablePublicAreaKey GetPublicFieldKey() const;
 
@@ -54,6 +88,8 @@ private:
         TWeakObjectPtr<AFablePlayerState> Profile;
         EFableTownId TownId = EFableTownId::Invalid;
         FGuid FieldScope;
+        FFableTownConnectionSnapshot Snapshot;
+        FString Identity;
     };
 
     bool ValidateConnection(const APlayerController* Player, const AFablePlayerState* ExpectedProfile,
@@ -68,4 +104,13 @@ private:
 
     FFableAdventureProgress IdleProgress;
     TMap<TWeakObjectPtr<AFablePlayerState>, FPresenceRecord> Presence;
+
+    UPROPERTY(VisibleAnywhere)
+    TObjectPtr<UFableTownTravelCoordinator> TravelCoordinator;
+
+    FGuid WorldEpoch;
+    int64 ConnectionSequence = 0;
+    int64 PresenceSequence = 0;
+    TMap<FString, TWeakObjectPtr<APlayerController>> CurrentConnectionsByIdentity;
+    TSet<TWeakObjectPtr<APlayerController>> RetiredConnections;
 };

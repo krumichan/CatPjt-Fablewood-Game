@@ -352,6 +352,12 @@ bool UFableOnlineValidationDriver::TickDungeon(AFablePlayerController* PC, AFabl
         DungeonFight(PC, Now);
         break;
     case 3:
+        // 실제 세 번 처치 후 보상을 받기 전에만 마을 이동의 관찰 장벽을 둔다.
+        if (TownTravelScenario == TEXT("unit2-legacy-anchors") && !bResumeExpedition &&
+            !TickUnit2TownAnchors(PC, P, Hero, Now))
+        {
+            break;
+        }
         if (P->ForestQuest == EFableQuestStage::Completed)
         {
             Advance(4);

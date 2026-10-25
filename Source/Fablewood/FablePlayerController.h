@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
 #include "FableRPGTypes.h"
+#include "FableTownTravelTypes.h"
 #include "FablePlayerController.generated.h"
 
 class AFableCharacter;
@@ -50,6 +51,70 @@ class FABLEWOOD_API AFablePlayerController : public APlayerController
     GENERATED_BODY()
 
 public:
+    /** 클라이언트는 논리 Town/Anchor만 요청하며 서버 좌표를 지정하지 않는다. */
+    FGuid UIRequestTownTravel(EFableTownId TargetTownId, FName AnchorId, int32 ExpectedCatalogVersion);
+
+    /** queued 자동 작업을 막고 정상 취소를 송신한다. */
+    FGuid UICancelTownTravel(FGuid TransactionId, int64 Generation);
+
+    /** 명시 ACK/replay를 owner reliable 채널로 전송한다. */
+    FGuid UIRequestTownTravelLoadAcknowledgement(FGuid TransactionId, int64 Generation, FGuid ConnectionNonce,
+                                                 FGuid ChallengeNonce, bool bLoaded);
+
+    /** 현재 owner의 준비 통지를 읽는다. */
+    const FFableTownTravelPrepared& GetTownTravelPrepared() const;
+
+    /** 마지막 상관 응답을 읽는다. */
+    const FFableTownTravelResponse& GetTownTravelLastResponse() const;
+
+    /** 지형 준비 통지의 구독 지점을 반환한다. */
+    FOnFableTownTravelPrepared& OnTownTravelPrepared();
+
+    /** 모든 시도 응답의 구독 지점을 반환한다. */
+    FOnFableTownTravelResponse& OnTownTravelResponse();
+
+    /** authority와 로컬 표식을 구분하는 진행 이벤트를 반환한다. */
+    FOnFableTownTravelEvent& OnTownTravelProgress();
+
+    /** 실제 확인 전의 여행 UI 잠금 상태를 읽는다. */
+    bool IsTownTravelInputBlocked() const;
+
+    /** 실제 소유 pawn 도착의 연속 샘플 수를 읽는다. */
+    int32 GetTownArrivalSampleCount() const;
+
+    /** 실제 도착 샘플의 경과 시간을 읽는다. */
+    double GetTownArrivalSampleSpan() const;
+
+    /** 서버가 논리 목적지와 소유자의 공간 revision을 검사한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerRequestTownTravel(FGuid RequestId, EFableTownId TargetTownId, FName AnchorId,
+                                 int32 ExpectedCatalogVersion, int64 ExpectedPresenceRevision);
+
+    /** 서버가 고정 descriptor를 소유 연결에만 전달한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientPrepareTownGeometry(const FFableTownTravelPrepared& Prepared);
+
+    /** 지형 로드 주장도 서버 tuple 검사 없이 신뢰하지 않는다. */
+    UFUNCTION(Server, Reliable)
+    void ServerAcknowledgeTownGeometry(FGuid AckAttemptId, FGuid TransactionId, int64 Generation, FGuid ConnectionNonce,
+                                       FGuid ChallengeNonce, bool bLoaded);
+
+    /** 취소도 정확한 owner 세대를 요구한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerCancelTownTravel(FGuid CancelAttemptId, FGuid TransactionId, int64 Generation, FGuid ConnectionNonce);
+
+    /** 도착 확인은 임의 XYZ 대신 확정 receipt를 참조한다. */
+    UFUNCTION(Server, Reliable)
+    void ServerConfirmTownArrival(FGuid AttemptId, FGuid TransactionId, int64 Generation, FGuid ConnectionNonce,
+                                  int64 ExpectedCommitSequence);
+
+    /** 시도 응답을 소유자에게 전달한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientTownTravelResponse(const FFableTownTravelResponse& Response);
+
+    /** 서버 수명 이벤트를 로컬 이벤트와 분리해 전달한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientTownTravelEvent(const FFableTownTravelEvent& Event);
     /** 온라인 화면과 UI 초점 상태에 따라 플레이어의 키 입력을 처리한다. */
     virtual bool InputKey(const FInputKeyEventArgs& Params) override;
 
@@ -650,6 +715,46 @@ protected:
 
     /** 플레이어 입력 상태와 주변 상호작용 대상을 갱신한다. */
     virtual void PlayerTick(float DeltaTime) override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+    /** 지형 대기와 실제 도착의 제한된 관찰을 갱신한다. */
+    void TickTownTravel();
+
+    /** 현재 prepared tuple이 유지될 때만 자동 ACK한다. */
+    void TryAutoAcknowledgeTownGeometry();
+
+    /** 보유한 정확 임시 지형 token만 반환한다. */
+    void ReleaseTownPendingGeometry(bool bReleaseSource);
+
+    /** 소유 클라이언트의 실제 관측을 별도 sequence로 기록한다. */
+    void EmitLocalTownEvent(EFableTownTravelEventKind Kind, EFableTownTravelError Error);
+
+    /** 서버가 도착을 확인한 후에만 UI와 source를 해제한다. */
+    void CompleteTownArrivalAfterConfirmation();
+
+    FFableTownTravelPrepared TownPrepared;
+    FFableTownTravelResponse TownLastResponse;
+    FFableTownTravelCommitReceipt TownAwaitingArrival;
+    FFableTownGeometryLease TownTargetLease;
+    FFableTownGeometryLease TownSourceLease;
+    FFableTownGeometryLease TownPresenceLease;
+    FOnFableTownTravelPrepared TownPreparedEvents;
+    FOnFableTownTravelResponse TownResponseEvents;
+    FOnFableTownTravelEvent TownProgressEvents;
+    bool bTownCancelRequested = false;
+    bool bTownAutoAckSent = false;
+    bool bTownAutoAckEligible = false;
+    bool bTownTerminal = false;
+    bool bTownTravelUiLocked = false;
+    bool bTownArrivalConfirmationSent = false;
+    bool bTownMoveInputHeld = false;
+    bool bTownArrivalFailed = false;
+    double TownArrivalDeadline = 0;
+    int32 TownArrivalSamples = 0;
+    double TownArrivalFirstSampleTime = 0;
+    double TownArrivalLastSampleTime = 0;
+    int64 TownLocalEventSequence = 0;
+    FGuid TownObservedArrivalId;
 
 private:
     FGuid OnlineLeaveRequestId;

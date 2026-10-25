@@ -28,8 +28,17 @@ UCLASS()
 class FABLEWOOD_API AFableGameMode : public AGameModeBase
 {
     GENERATED_BODY()
+#if WITH_DEV_AUTOMATION_TESTS
+    friend struct FFableTownTravelTestAccess;
+#endif
 
 public:
+    /** 정상 관찰용 절대 공개 필드 구조 시각을 반환한다. */
+    void GetPublicFieldRecoveryDeadlines(double& OutNextRecoveryAttemptTime, double& OutNextIndividualRescueTime) const
+    {
+        OutNextRecoveryAttemptTime = NextRecoveryAttemptTime;
+        OutNextIndividualRescueTime = NextIndividualRescueTime;
+    }
     /** Native 독립 월드에서도 유일한 서버 정본만 찾는다. */
     static AFableGameMode* Find(const UWorld* World);
 

@@ -7,6 +7,8 @@
 #include "FablePlayerState.h"
 #include "FableProjectile.h"
 #include "FableTownCatalog.h"
+#include "Components/PrimitiveComponent.h"
+
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
@@ -2445,4 +2447,254 @@ void AFableCharacter::AnimateBody(float DeltaSeconds)
                                                                   ? FLinearColor(0.90f, 0.73f, 0.36f)
                                                                   : FableCharacterTuning::BladeColor);
     }
+}
+
+/** 텔레포트 직전의 이동 데이터만 저장한다. */
+bool AFableCharacter::CaptureTownMovementState(FFableTownMovementRollbackSnapshot& OutSnapshot) const
+{
+    const UCharacterMovementComponent* Movement = GetCharacterMovement();
+    if (!HasAuthority() || !Movement || !Controller)
+    {
+        return false;
+    }
+
+    OutSnapshot.Transform = GetActorTransform();
+    OutSnapshot.ControlRotation = Controller->GetControlRotation();
+    OutSnapshot.Velocity = Movement->Velocity;
+    OutSnapshot.MovementMode = Movement->MovementMode;
+    OutSnapshot.CustomMovementMode = Movement->CustomMovementMode;
+    if (const auto* Base = GetMovementBaseInterfaceData())
+    {
+        OutSnapshot.MovementBase = *Base;
+    }
+    OutSnapshot.BaseBone = GetBasedMovement().BoneName;
+    OutSnapshot.CurrentFloor = Movement->CurrentFloor;
+    OutSnapshot.bJustTeleported = Movement->bJustTeleported;
+    OutSnapshot.bForceNextFloorCheck = Movement->bForceNextFloorCheck;
+    return true;
+}
+
+/** 실제 바닥과 실제 크기의 캡슐을 매번 질의한 뒤에만 잠정 배치한다. */
+bool AFableCharacter::TryPlaceAtGroundedTownAnchor(const FFableTownAnchorRef& Target, const FTransform& ServerCandidate,
+                                                   FFableTownPlacementEvidence& OutEvidence)
+{
+    OutEvidence = FFableTownPlacementEvidence();
+    OutEvidence.RequestedCandidate = ServerCandidate;
+    OutEvidence.Error = EFableTownTravelError::PreflightBlocked;
+    UCharacterMovementComponent* Movement = GetCharacterMovement();
+    UCapsuleComponent* Capsule = GetCapsuleComponent();
+    if (!HasAuthority() || !GetWorld() || !IsAlive() || !Target.IsValid() || !Movement || !Capsule ||
+        ServerCandidate.ContainsNaN() || TownPlacementQuerySequence >= FableTownTravel::MaxSafeSequence)
+    {
+        return false;
+    }
+
+    OutEvidence.QuerySequence = ++TownPlacementQuerySequence;
+    OutEvidence.QueryServerTime = GetWorld()->GetTimeSeconds();
+    Capsule->GetScaledCapsuleSize(OutEvidence.ActualCapsuleRadius, OutEvidence.ActualCapsuleHalfHeight);
+    FVector Candidate = ServerCandidate.GetLocation();
+    const UFableTownCatalog* Catalog = GetDefault<UFableTownCatalog>();
+    const auto* Definition = Catalog->FindTown(Target.TownId);
+    const auto* Anchor = Definition ? Definition->Anchors.FindByPredicate(
+                                          [&Target](const FFableTownAnchorDefinition& Value)
+                                          {
+                                              return Value.AnchorId == Target.AnchorId;
+                                          })
+                                    : nullptr;
+    const auto IntendedSupport = [this, Definition, Anchor](const FFindFloorResult& Floor)
+    {
+        const UPrimitiveComponent* Support = Floor.HitResult.GetComponent();
+        const AActor* SupportActor = Floor.HitResult.GetActor();
+        if (!Definition || !Anchor || Anchor->ExpectedSupportTag.IsNone() || !Support || !SupportActor ||
+            SupportActor->GetLevel() != GetWorld()->PersistentLevel ||
+            Support->GetCollisionObjectType() != ECC_WorldStatic ||
+            !Support->ComponentHasTag(Anchor->ExpectedSupportTag))
+        {
+            return false;
+        }
+        const FVector LocalImpact = Definition->LocalToWorld.InverseTransformPosition(Floor.HitResult.ImpactPoint);
+        return FMath::Abs(LocalImpact.Z - Anchor->ExpectedSupportLocalZ) <= 3.0;
+    };
+
+    // 캐시된 CurrentFloor를 재사용하지 않고 고정 후보 아래의 지원면을 조사한다.
+    FFindFloorResult InitialFloor;
+    Movement->FindFloor(Candidate, InitialFloor, false);
+    if (!InitialFloor.IsWalkableFloor() || !Movement->IsWalkable(InitialFloor.HitResult) ||
+        !IntendedSupport(InitialFloor))
+    {
+        OutEvidence.Error = EFableTownTravelError::NoWalkableFloor;
+        return false;
+    }
+    Candidate.Z -= InitialFloor.FloorDist - 2.15f;
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(TownArrivalCapsule), false, this);
+    const FCollisionShape Shape =
+        FCollisionShape::MakeCapsule(OutEvidence.ActualCapsuleRadius, OutEvidence.ActualCapsuleHalfHeight);
+    if (GetWorld()->OverlapBlockingTestByChannel(Candidate, ServerCandidate.GetRotation(), ECC_Pawn, Shape, Query))
+    {
+        OutEvidence.Error = EFableTownTravelError::CapsulePenetrating;
+        return false;
+    }
+
+    FFableTownLocationContext CandidateContext;
+    if (!Catalog->ResolveLocation(Candidate, CandidateContext, true) || CandidateContext.TownId != Target.TownId ||
+        CandidateContext.CatalogVersion != Target.CatalogVersion || !Anchor ||
+        CandidateContext.FloorId != Anchor->FloorId)
+    {
+        OutEvidence.Error = EFableTownTravelError::ArrivalOutOfBounds;
+        return false;
+    }
+    if (!TeleportTo(Candidate, ServerCandidate.Rotator(), false, false) ||
+        FVector::Dist(GetActorLocation(), Candidate) > 3.0f)
+    {
+        OutEvidence.Error = EFableTownTravelError::PlacementFailed;
+        return false;
+    }
+
+    // 실제 도착 후 별도 질의를 수행한다. 보행 상태 설정은 검증된 바닥에만 적용한다.
+    Movement->FindFloor(GetActorLocation(), OutEvidence.FreshFloor, false);
+    OutEvidence.bIntendedSupport = IntendedSupport(OutEvidence.FreshFloor);
+    OutEvidence.bFreshCapsuleClear =
+        !GetWorld()->OverlapBlockingTestByChannel(GetActorLocation(), GetActorQuat(), ECC_Pawn, Shape, Query);
+    if (!OutEvidence.FreshFloor.IsWalkableFloor() || !Movement->IsWalkable(OutEvidence.FreshFloor.HitResult) ||
+        OutEvidence.FreshFloor.FloorDist < 0.0f || OutEvidence.FreshFloor.FloorDist > 3.0f ||
+        !OutEvidence.bFreshCapsuleClear || !OutEvidence.bIntendedSupport)
+    {
+        OutEvidence.Error = EFableTownTravelError::ArrivalNotGrounded;
+        return false;
+    }
+    Movement->CurrentFloor = OutEvidence.FreshFloor;
+    Movement->SetMovementMode(MOVE_Walking);
+    Movement->StopMovementImmediately();
+    FMovementBaseInterfaceData Base =
+        MovementBaseUtility::GetMovementBaseDataFromHitResult(&OutEvidence.FreshFloor.HitResult);
+    SetBase(&Base, OutEvidence.FreshFloor.HitResult.BoneName);
+    OutEvidence.bWalkingOnGround = Movement->IsMovingOnGround();
+    OutEvidence.ActualSupportName = OutEvidence.FreshFloor.HitResult.GetComponent()
+                                        ? OutEvidence.FreshFloor.HitResult.GetComponent()->GetFName()
+                                        : NAME_None;
+    OutEvidence.AcceptedTransform = GetActorTransform();
+    OutEvidence.Error =
+        OutEvidence.bWalkingOnGround ? EFableTownTravelError::None : EFableTownTravelError::ArrivalNotGrounded;
+    return OutEvidence.bWalkingOnGround;
+}
+
+/** 잠정 이동 실패 시 이동 상태만 되돌리고 실제 전투 변경은 보존한다. */
+bool AFableCharacter::RestoreTownMovementState(const FFableTownMovementRollbackSnapshot& Snapshot)
+{
+    UCharacterMovementComponent* Movement = GetCharacterMovement();
+    if (!HasAuthority() || !Movement || !Controller || Snapshot.Transform.ContainsNaN())
+    {
+        return false;
+    }
+
+    SetActorTransform(Snapshot.Transform, false, nullptr, ETeleportType::TeleportPhysics);
+    FMovementBaseInterfaceData Base = Snapshot.MovementBase;
+    SetBase(&Base, Snapshot.BaseBone);
+    Movement->SetMovementMode(Snapshot.MovementMode, Snapshot.CustomMovementMode);
+    Movement->Velocity = Snapshot.Velocity;
+    Movement->CurrentFloor = Snapshot.CurrentFloor;
+    Movement->bJustTeleported = Snapshot.bJustTeleported;
+    Movement->bForceNextFloorCheck = Snapshot.bForceNextFloorCheck;
+    Controller->SetControlRotation(Snapshot.ControlRotation);
+    ForceNetUpdate();
+
+    // 좌표 복사만으로 rollback 성공을 주장하지 않는다. 실제 source 공간이 다시 비어 있어야 한다.
+    float Radius;
+    float HalfHeight;
+    GetCapsuleComponent()->GetScaledCapsuleSize(Radius, HalfHeight);
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(TownRollbackCapsule), false, this);
+    if (!GetActorTransform().Equals(Snapshot.Transform, 0.1f) ||
+        GetWorld()->OverlapBlockingTestByChannel(GetActorLocation(), GetActorQuat(), ECC_Pawn,
+                                                 FCollisionShape::MakeCapsule(Radius, HalfHeight), Query))
+    {
+        return false;
+    }
+    if (Snapshot.MovementMode == MOVE_Walking)
+    {
+        FFindFloorResult ActualFloor;
+        Movement->FindFloor(GetActorLocation(), ActualFloor, false);
+        return Movement->IsMovingOnGround() && ActualFloor.IsWalkableFloor() &&
+               Movement->IsWalkable(ActualFloor.HitResult) && !ActualFloor.HitResult.bStartPenetrating &&
+               ActualFloor.GetDistanceToFloor() >= 0.0f && ActualFloor.GetDistanceToFloor() <= 3.0f;
+    }
+    return true;
+}
+
+/** 안전 위치만 확정한다. 체력·shield·cooldown·발사체·행동 상태는 건드리지 않는다. */
+bool AFableCharacter::CommitSafeTownCheckpointAtCurrentPosition(const FFableTownAnchorRef& Anchor,
+                                                                const FRotator& SafeRotation)
+{
+    FFableTownLocationContext Context;
+    if (!HasAuthority() || !GetWorld() || !Anchor.IsValid() || SafeRotation.ContainsNaN() ||
+        !GetDefault<UFableTownCatalog>()->ResolveLocation(GetActorLocation(), Context, true) ||
+        Context.TownId != Anchor.TownId || Context.CatalogVersion != Anchor.CatalogVersion)
+    {
+        return false;
+    }
+
+    SafeSpawnLocation = GetActorLocation();
+    SafeSpawnRotation = SafeRotation;
+    ForceNetUpdate();
+    return true;
+}
+
+/** 보존 검증과 정상 진단에 절대 시각을 읽기 전용으로 제공한다. */
+FFableTownCombatState AFableCharacter::GetTownCombatState() const
+{
+    FFableTownCombatState State;
+    State.NextAttackServerTime = NextAttackServerTime;
+    State.NextSkillServerTime = NextSkillServerTime;
+    State.NextSecondSkillServerTime = NextSecondSkillServerTime;
+    State.NextThirdSkillServerTime = NextThirdSkillServerTime;
+    State.NextDodgeServerTime = NextDodgeServerTime;
+    State.CombatBuildEndServerTime = CombatBuildEndServerTime;
+    State.ShieldAmount = ShieldAmount;
+    State.ShieldEndServerTime = ShieldEndServerTime;
+    State.ActionLockEndServerTime = ActionLockEndServerTime;
+    State.SafeSpawnLocation = SafeSpawnLocation;
+    State.SafeSpawnRotation = SafeSpawnRotation;
+    return State;
+}
+
+/** 서버 receipt 확인 시에도 새 바닥/캡슐 질의와 authored support를 재검사한다. */
+bool AFableCharacter::IsGroundedAtCurrentTownAnchor(const FFableTownAnchorRef& Target) const
+{
+    auto* Movement = GetCharacterMovement();
+    const auto* Capsule = GetCapsuleComponent();
+    const UFableTownCatalog* Catalog = GetDefault<UFableTownCatalog>();
+    const auto* Definition = Catalog->FindTown(Target.TownId);
+    const auto* Anchor = Definition ? Definition->Anchors.FindByPredicate(
+                                          [&Target](const FFableTownAnchorDefinition& Value)
+                                          {
+                                              return Value.AnchorId == Target.AnchorId;
+                                          })
+                                    : nullptr;
+    FFableTownLocationContext Context;
+    FFindFloorResult Floor;
+    if (!HasAuthority() || !GetWorld() || !Movement || !Capsule || !Anchor || Anchor->ExpectedSupportTag.IsNone() ||
+        !Movement->IsMovingOnGround() || !Catalog->ResolveLocation(GetActorLocation(), Context, true) ||
+        Context.TownId != Target.TownId || Context.CatalogVersion != Target.CatalogVersion ||
+        Context.FloorId != Anchor->FloorId)
+    {
+        return false;
+    }
+
+    Movement->FindFloor(GetActorLocation(), Floor, false);
+    const auto* Support = Floor.HitResult.GetComponent();
+    const auto* SupportActor = Floor.HitResult.GetActor();
+    if (!Floor.IsWalkableFloor() || !Movement->IsWalkable(Floor.HitResult) || Floor.FloorDist < 0.0f ||
+        Floor.FloorDist > 3.0f || !Support || !SupportActor ||
+        SupportActor->GetLevel() != GetWorld()->PersistentLevel ||
+        Support->GetCollisionObjectType() != ECC_WorldStatic || !Support->ComponentHasTag(Anchor->ExpectedSupportTag) ||
+        FMath::Abs(Definition->LocalToWorld.InverseTransformPosition(Floor.HitResult.ImpactPoint).Z -
+                   Anchor->ExpectedSupportLocalZ) > 3.0)
+    {
+        return false;
+    }
+    float Radius;
+    float HalfHeight;
+    Capsule->GetScaledCapsuleSize(Radius, HalfHeight);
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(TownArrivalConfirmation), false, this);
+    return !GetWorld()->OverlapBlockingTestByChannel(GetActorLocation(), GetActorQuat(), ECC_Pawn,
+                                                     FCollisionShape::MakeCapsule(Radius, HalfHeight), Query);
 }

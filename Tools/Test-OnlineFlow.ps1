@@ -6,6 +6,7 @@ param(
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
     [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results')][string]$Scenario='connectivity',
+    [ValidateSet('none','unit2-legacy-anchors')][string]$TownTravelScenario='none',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -15,6 +16,8 @@ param(
 if(-not $IsWindows){throw 'Windows and PowerShell 7.4+ are required.'}
 $backendLink=Get-FableBackendLink -BackendRoot $BackendRoot
 function Assert-Online($Condition,[string]$Code){if(-not $Condition){throw [InvalidOperationException]::new('OnlineValidation:'+$Code)}}
+Assert-Online ($TownTravelScenario -ceq 'none' -or $Scenario -ceq 'party-results') 'town_subscenario_requires_results'
+if($TownTravelScenario -ceq 'unit2-legacy-anchors' -and -not $PSBoundParameters.ContainsKey('TimeoutSeconds')){$TimeoutSeconds=830}
 function Initialize-OnlineSocketOwnerReader{
     if('FableOnlineValidation.SocketOwners' -as [type]){return}
     # IP Helper reads the IPv4 owner table without the CIM provider. No service or socket is changed.
@@ -204,6 +207,7 @@ function Start-OnlineValidationProcess([string]$Role,[string]$Phase,[string]$Con
     }
     $log=Join-Path $folder ($Role+'.log')
     $arguments.Add('-FableOnlineValidationRole='+$Role);$arguments.Add('-FableOnlineValidationScenario='+$Scenario);$arguments.Add('-FableOnlineValidationDirectory='+(Quote-Online $folder))
+    $arguments.Add('-FableTownTravelScenario='+$TownTravelScenario)
     $arguments.Add('-FableOnlineValidationRun='+$runId);$arguments.Add('-abslog='+(Quote-Online $log))
     $arguments.Add('-LogCmds="LogInit off,LogNet off,LogLoad off"');$arguments.Add('-ExecCmds="t.MaxFPS 30,t.IdleWhenNotForeground 0"')
     try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $(if($Role -cne 'server' -and $PackagedClientExecutable){Split-Path -Parent $exe}else{$script:FableProjectRoot}) -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
@@ -311,6 +315,11 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$fa
 }
 function Assert-OnlineShots($Report,[string]$Phase,[int]$Minimum){
     $shots=@($Report.screenshots);Assert-Online (@($shots|Select-Object -Unique).Count -ge $Minimum) 'screenshots_missing'
+    if($TownTravelScenario -ceq 'unit2-legacy-anchors'){
+        # 추가 Unit2 캡처로 기존 회귀의 원래 최소 개수를 대체하지 않는다.
+        $legacyShots=@($shots|Where-Object {[IO.Path]::GetFileName([string]$_) -cnotmatch '-unit2-'}|Select-Object -Unique)
+        Assert-Online ($legacyShots.Count -ge $Minimum) 'original_results_screenshots_missing'
+    }
     $prefix=[IO.Path]::GetFullPath((Join-Path $runFolder $Phase)).TrimEnd('\')+'\';$result=@()
     $deadline=[DateTime]::UtcNow.AddSeconds(15)
     foreach($shot in $shots){
@@ -497,6 +506,191 @@ function Assert-OnlineIsolationServer($ServerReport,$ClientReports){
     $summary['partyIsolation']=[ordered]@{status='passed';twoSoloPartiesAndSeparateArenas=$true;exactOwnTicketsAndEnemyIds=$true;aKillOnlyRewardsA=$true;aNormalWipeAndOwnRecovery=$true;bUnchangedThroughAKillWipeAndReturn=$true;bCanContinueAndKillOwnEnemy=$true;bKillDoesNotRewardA=$true;actualCrossDamageGuardAttempted=$false;crashReconnectPerformed=$false;partyIds=@($one.partyId,$two.partyId);expeditionIds=@($one.expeditionId,$two.expeditionId)}
 }
 # 결과 확인은 서버가 이미 지급한 내역을 읽기만 하며 장비의 실제 영구 식별자까지 비교한다.
+# 숫자 문자열/bool을 실제 JSON 숫자로 오인하지 않는다. / JSON型を厳密に読む。
+function Assert-Unit2Number($Value,[bool]$Integer=$false){
+    Assert-Online ($null -ne $Value -and $Value.GetType() -in @([byte],[short],[int],[long],[float],[double],[decimal]) -and [double]::IsFinite([double]$Value)) 'town_number_type_invalid'
+    if($Integer){Assert-Online ([math]::Truncate([double]$Value) -eq [double]$Value -and [math]::Abs([double]$Value) -le 9007199254740991) 'town_integer_invalid'}
+}
+# 좌표와 속도는 유한 숫자 세 개로만 인정한다.
+function Assert-Unit2Vector($Value){
+    Assert-Online ($Value -is [array] -and $Value.Count -eq 3) 'town_vector_shape_invalid'
+    foreach($entry in $Value){Assert-Unit2Number $entry}
+}
+# 같은 월드의 실제 관측 좌표 사이 거리를 계산한다.
+function Unit2-Distance($A,$B){
+    Assert-Unit2Vector $A;Assert-Unit2Vector $B
+    return [math]::Sqrt([math]::Pow($A[0]-$B[0],2)+[math]::Pow($A[1]-$B[1],2)+[math]::Pow($A[2]-$B[2],2))
+}
+# 비어 있거나 정규 형태가 아닌 상관 식별자는 거절한다.
+function Assert-Unit2Guid($Value){Assert-Online ($Value -is [string] -and $Value -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -and $Value -cne '00000000-0000-0000-0000-000000000000') 'town_guid_invalid'}
+
+# 각 서버 이벤트의 순간 상태를 독립 기준본과 비교한다. nonce 원문은 열지 않는다.
+function Assert-Unit2Snapshot($Before,$After,[bool]$OwnerMoved){
+    foreach($key in @('worldId','worldName','gameModeId','gameStateId','fieldScopeId','field','livingFieldEnemies','streamingLevelCount','newTownGeometryReady','newTownLoadedLevels')){
+        Require-OnlineFields $Before @($key) 'town_baseline_field_missing';Require-OnlineFields $After @($key) 'town_snapshot_field_missing'
+        Assert-Online (Equal-Online $Before.$key $After.$key) 'town_field_or_world_changed'
+    }
+    Assert-Online ($After.newTownLoadedLevels -eq 0 -and @($After.newTownGeometryReady).Count -eq 4) 'town_new_content_loaded'
+    foreach($ready in $After.newTownGeometryReady){Assert-Online ($ready -is [bool] -and -not $ready) 'town_unapproved_geometry_ready'}
+    foreach($slot in @('a','b')){
+        $old=$Before.$slot;$current=$After.$slot
+        foreach($key in @('economy','publicPlayerKey','controllerId','playerStateId','pawnId','mana','maxMana','alive','combat','worldEpoch','ownerConnectionGeneration','connectionNonceDigest','physicalTownId','physicalFloorId','physicalAreaKind','physicalCatalogVersion','physicalGeometryReady','physicalConnectorId','potionCooldownEnd')){
+            Require-OnlineFields $old @($key) 'town_baseline_member_missing';Require-OnlineFields $current @($key) 'town_snapshot_member_missing'
+            Assert-Online (Equal-Online $old.$key $current.$key) 'town_owner_or_observer_state_changed'
+        }
+        Assert-Online ($current.alive -is [bool] -and $current.alive -and $current.onGround -is [bool] -and $current.onGround -and $current.privateExpeditionId -ceq '00000000-0000-0000-0000-000000000000') 'town_member_not_alive_grounded_public'
+        Assert-Online ($current.connectionNonceDigest -cmatch '^[0-9a-f]{64}$') 'town_nonce_digest_invalid'
+        if($slot -ceq 'b' -or -not $OwnerMoved){
+            foreach($key in @('presenceRevision','safeCheckpointRevision','safeAnchor','safeSpawnLocation','safeSpawnRotation','publicScopeId')){Assert-Online (Equal-Online $old.$key $current.$key) 'town_failed_scope_or_checkpoint_changed'}
+            Assert-Online ((Unit2-Distance $old.position $current.position) -le 1) 'town_stationary_member_moved'
+            Assert-Unit2Vector $old.rotation;Assert-Unit2Vector $current.rotation
+            for($i=0;$i -lt 3;$i++){$angle=[math]::Abs((($old.rotation[$i]-$current.rotation[$i]+540)%360)-180);Assert-Online ($angle -le .5) 'town_stationary_member_rotated'}
+        }
+        if($slot -ceq 'b'){
+            foreach($key in @('noticeSerial','lastNotice')){Assert-Online (Equal-Online $old.$key $current.$key) 'town_observer_notice_leaked'}
+        }
+    }
+    # 一人の名簿も配列として保持し、厳密比較の型を変えない。
+    $expectedRoster=@(if($OwnerMoved){[string]$Before.b.publicPlayerKey}else{$Before.publicRoster})
+    Assert-Online (Equal-Online @($After.publicRoster) $expectedRoster) 'town_public_roster_changed_incorrectly'
+    if($OwnerMoved){
+        Assert-Online ($After.a.presenceRevision -gt $Before.a.presenceRevision -and $After.a.safeCheckpointRevision -gt $Before.a.safeCheckpointRevision -and $After.a.publicScopeId -ceq '00000000-0000-0000-0000-000000000000' -and $After.b.publicScopeId -ceq $Before.b.publicScopeId) 'town_success_scope_or_checkpoint_invalid'
+    }
+}
+
+# 各AttemptIdを実際の権威応答と結び、欠けた証拠をboolで代用しない。
+function Assert-OnlineUnit2($ServerReport,$ClientReport,$OriginalPeer){
+    Require-OnlineFields $ServerReport @('serverTownTravel') 'town_server_evidence_missing'
+    Require-OnlineFields $ClientReport @('townTravel') 'town_owner_evidence_missing'
+    Require-OnlineFields $OriginalPeer @('townTravel') 'town_observer_evidence_missing'
+    $server=$ServerReport.serverTownTravel;$owner=$ClientReport.townTravel;$observer=$OriginalPeer.townTravel
+    Require-OnlineFields $server @('before','after','committed','events','completed') 'town_server_evidence_incomplete'
+    Assert-Online ($server.completed -is [bool] -and $server.completed -and $owner.completed -is [bool] -and $owner.completed -and $observer.completed -is [bool] -and $observer.completed) 'town_workflow_not_completed'
+    $before=$server.before;$after=$server.after
+    Assert-Online ($before.worldName -ceq '/Game/Maps/ForestClearing' -and $before.a.worldEpoch -ceq $before.b.worldEpoch) 'town_actual_world_identity_mismatch'
+    Assert-Online ($before.field.objectiveComplete -is [bool] -and $before.field.objectiveComplete -and $before.field.defeatedEnemies -eq 3 -and $before.field.requiredEnemies -eq 3) 'town_field_three_kills_not_complete'
+    Assert-Online (@($before.publicRoster).Count -eq 2 -and @($before.livingFieldEnemies).Count -eq 0 -and $before.a.publicPlayerKey -cne $before.b.publicPlayerKey -and $before.a.economy.playerId -cne $before.b.economy.playerId) 'town_ready_baseline_not_exact_two'
+    foreach($slot in @('a','b')){
+        $member=$before.$slot
+        Assert-Online ($member.economy.forestQuest -eq 2 -and $member.economy.questKills -eq 3 -and $member.economy.ready -is [bool] -and $member.economy.ready -and $member.economy.savePending -is [bool] -and -not $member.economy.savePending -and $member.mana -eq $member.maxMana -and $member.onGround -is [bool] -and $member.onGround -and $member.alive -is [bool] -and $member.alive) 'town_ready_baseline_invalid'
+        Assert-Unit2Guid $member.publicScopeId;Assert-Unit2Number $member.ownerConnectionGeneration $true
+        Assert-Unit2Guid $member.worldEpoch
+        Assert-Online ($member.physicalTownId -eq 1 -and $member.physicalFloorId -ceq 'Ground' -and $member.physicalAreaKind -eq 1 -and $member.physicalCatalogVersion -eq 1 -and $member.physicalGeometryReady -is [bool] -and $member.physicalGeometryReady) 'town_departure_physical_context_invalid'
+    }
+    Assert-Online ($before.a.publicScopeId -ceq $before.b.publicScopeId -and $before.a.publicScopeId -ceq $before.fieldScopeId) 'town_baseline_public_generation_differs'
+    $events=@($server.events);$commits=@($events|Where-Object kind -CEQ 'Committed')
+    Assert-Online ($events.Count -gt 20 -and $commits.Count -eq 1) 'town_commit_count_invalid'
+    $moved=$false;$sequence=0
+    foreach($event in $events){
+        Assert-Unit2Number $event.sequence $true;Assert-Unit2Number $event.serverTime
+        Assert-Online ($event.sequence -gt $sequence) 'town_authority_event_order_invalid';$sequence=$event.sequence
+        if($event.kind -ceq 'Committed'){$moved=$true}
+        Assert-Unit2Snapshot $before $event.snapshot $moved
+    }
+    Assert-Unit2Snapshot $before $after $true
+    $labels=@('sunbrook','starbough','snowbloom','eldergrove','unknownAnchor','staleCatalog','loadedFalse','cancelled','wrongChallenge','wrongConnection','wrongGeneration','success')
+    $attempts=@($owner.attempts)
+    Assert-Online ($attempts.Count -eq 12 -and @($observer.attempts).Count -eq 0) 'town_attempt_count_invalid'
+    $allIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $transactionIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$previousTravelGeneration=0
+    $matched=@()
+    for($index=0;$index -lt $attempts.Count;$index++){
+        $attempt=$attempts[$index];$request=$attempt.request
+        Assert-Online ($attempt.label -ceq $labels[$index] -and $attempt.completed -is [bool] -and $attempt.completed) 'town_attempt_incomplete'
+        Assert-Unit2Guid $request.requestId;Assert-Online ($allIds.Add($request.requestId)) 'town_request_id_reused'
+        Assert-Online ((@($request.PSObject.Properties.Name|Sort-Object) -join ',') -ceq 'anchorId,catalogVersion,requestId,targetTownId') 'town_request_has_client_authority_fields'
+        Assert-Unit2Number $request.targetTownId $true;Assert-Unit2Number $request.catalogVersion $true
+        Assert-Online ($request.targetTownId -eq $(if($index -lt 4){$index+2}else{1}) -and $request.anchorId -ceq $(if($index -eq 4){'Unknown.Unit2'}else{'Entry'}) -and $request.catalogVersion -eq $(if($index -eq 5){2}else{1})) 'town_logical_target_mismatch'
+        $responses=@($attempt.responses)
+        foreach($response in $responses){
+            foreach($key in @('eventSequence','clientSequence','generation')){Assert-Unit2Number $response.$key $true}
+            Assert-Unit2Guid $response.attemptId;Assert-Online ($response.requestId -ceq $request.requestId) 'town_client_response_request_mismatch'
+            if($response.attemptId -cne $request.requestId){Assert-Online ($allIds.Add($response.attemptId)) 'town_attempt_id_reused'}
+            $authority=@($events|Where-Object {$null -ne $_.PSObject.Properties['response'] -and $_.response.attemptId -ceq $response.attemptId -and $_.response.requestId -ceq $request.requestId})
+            Assert-Online ($authority.Count -eq 1) 'town_authority_response_correlation_missing'
+            foreach($property in $authority[0].response.PSObject.Properties){Assert-Online (Equal-Online $property.Value $response.($property.Name)) 'town_client_authority_response_mismatch'}
+            if($index -ge 6){Assert-Online ($authority[0].serverTime -lt $attempt.prepared.expiresAtServerTime) 'town_response_expired_instead_of_exact_rejection'}
+        }
+        $find={param($AttemptKey,$ExpectedErrorCode) $rows=@($responses|Where-Object {$_.attemptId -ceq $AttemptKey -and $_.error -ceq $ExpectedErrorCode});Assert-Online ($rows.Count -eq 1) 'town_exact_attempt_response_missing';return $rows[0]}
+        if($index -lt 6){
+            $expected=if($index -lt 4){'DestinationNotReady'}elseif($index -eq 4){'UnknownAnchor'}else{'StaleCatalog'}
+            $row=& $find $request.requestId $expected
+            Assert-Online ($null -eq $attempt.PSObject.Properties['prepared']) 'town_rejected_destination_prepared'
+        }else{
+            $prepared=$attempt.prepared;Assert-Unit2Guid $prepared.transactionId;Assert-Unit2Number $prepared.generation $true
+            Assert-Online ($transactionIds.Add($prepared.transactionId) -and $prepared.generation -gt $previousTravelGeneration) 'town_fresh_transaction_or_generation_reused';$previousTravelGeneration=$prepared.generation
+            Assert-Unit2Number $prepared.expiresAtServerTime;Assert-Unit2Number $prepared.ownerConnectionGeneration $true;Assert-Unit2Number $prepared.sourcePresenceRevision $true
+            Assert-Online ($prepared.requestId -ceq $request.requestId -and $prepared.descriptorKind -ceq 'ExistingPersistent' -and $prepared.sourcePublicScopeId -ceq $before.fieldScopeId -and $prepared.connectionNonceDigest -ceq $before.a.connectionNonceDigest -and $prepared.challengeNonceDigest -cmatch '^[0-9a-f]{64}$') 'town_prepared_identity_invalid'
+            Assert-Online ($prepared.sourcePresenceRevision -eq $before.a.presenceRevision -and $prepared.ownerConnectionGeneration -eq $before.a.ownerConnectionGeneration -and $prepared.sourceTownId -eq 1 -and $prepared.sourceFloorId -ceq 'Ground' -and $prepared.sourceCatalogVersion -eq 1 -and $prepared.sourceGeometryReady -is [bool] -and $prepared.sourceGeometryReady -and $prepared.targetAnchor.townId -eq 1 -and $prepared.targetAnchor.anchorId -ceq 'Entry' -and $prepared.targetAnchor.catalogVersion -eq 1) 'town_prepared_source_or_destination_mismatch'
+            $authoritativePrepared=@($events|Where-Object {$_.requestId -ceq $request.requestId -and $null -ne $_.PSObject.Properties['prepared']})
+            Assert-Online ($authoritativePrepared.Count -ge 1 -and (Equal-Online $prepared $authoritativePrepared[0].prepared)) 'town_prepared_server_client_mismatch'
+            foreach($preparedEvent in $authoritativePrepared){Assert-Online (Equal-Online $prepared $preparedEvent.prepared) 'town_pending_tuple_or_original_ttl_changed'}
+            if($index -lt 11){
+                if($index -ne 7){
+                    $expected=if($index -eq 6){'ClientLoadFailed'}elseif($index -eq 8){'WrongChallengeNonce'}elseif($index -eq 9){'WrongConnectionNonce'}else{'WrongGeneration'}
+                    $bad=& $find $attempt.malformedAttemptId $expected
+                    Assert-Online ($bad.operation -ceq 'Acknowledge') 'town_malformed_not_actual_ack'
+                    Assert-Online ($bad.transactionId -ceq $prepared.transactionId -and $bad.generation -eq $prepared.generation -and $bad.state -ceq $(if($index -eq 6){'Cancelled'}else{'AwaitClientGeometry'})) 'town_malformed_ack_changed_pending_or_terminal_state'
+                    $sent=$attempt.sentAck
+                    Assert-Unit2Number $sent.generation $true
+                    Assert-Online ($sent.loaded -is [bool] -and $sent.loaded -eq ($index -ne 6)) 'town_loaded_flag_invalid'
+                    Assert-Online (($sent.generation -eq $prepared.generation) -eq ($index -ne 10) -and ($sent.connectionNonceDigest -ceq $prepared.connectionNonceDigest) -eq ($index -ne 9) -and ($sent.challengeNonceDigest -ceq $prepared.challengeNonceDigest) -eq ($index -ne 8)) 'town_malformed_tuple_not_exact'
+                }
+                if($index -ne 6){
+                    $cancel=& $find $attempt.cancelAttemptId 'CancelledByOwner'
+                    Assert-Online ($cancel.operation -ceq 'Cancel' -and $cancel.state -ceq 'Cancelled') 'town_cancel_not_authoritative_terminal'
+                    if($index -ge 8){Assert-Online ($bad.eventSequence -lt $cancel.eventSequence -and $bad.clientSequence -lt $cancel.clientSequence) 'town_malformed_cancel_order_invalid'}
+                }
+                $replay=& $find $attempt.replayAttemptId 'AlreadyCancelled'
+                Assert-Online ($replay.operation -ceq 'Acknowledge' -and $replay.state -ceq 'Cancelled' -and $replay.transactionId -ceq $prepared.transactionId -and $replay.generation -eq $prepared.generation) 'town_old_ack_not_cancelled'
+                $terminal=if($index -eq 6){$bad}else{$cancel}
+                Assert-Online ($terminal.clientSequence -lt $replay.clientSequence -and $terminal.eventSequence -lt $replay.eventSequence -and $attempt.replayAttemptId -cne $terminal.attemptId) 'town_replay_before_cancel_response'
+            }
+        }
+        $matched+=@([ordered]@{label=$attempt.label;requestId=$request.requestId;responseCount=$responses.Count;rawResponsesMatched=$true})
+    }
+    $success=$attempts[11];$commit=$owner.commitResponse.commit;$placement=$server.committed.placement;$arrival=$owner.arrival
+    Assert-Online ($owner.commitResponse.error -ceq 'None' -and $owner.commitResponse.operation -ceq 'Acknowledge' -and $commit.commitCount -eq 1 -and $commit.transactionId -ceq $success.prepared.transactionId) 'town_legitimate_ack_missing'
+    Assert-Online ($placement.capsuleClear -is [bool] -and $placement.capsuleClear -and $placement.walkingOnGround -is [bool] -and $placement.walkingOnGround -and $placement.floorBlocking -is [bool] -and $placement.floorBlocking -and $placement.floorWalkable -is [bool] -and $placement.floorWalkable -and $placement.floorPenetrating -is [bool] -and -not $placement.floorPenetrating) 'town_floor_or_capsule_invalid'
+    Assert-Online ($placement.intendedSupport -is [bool] -and $placement.intendedSupport) 'town_floor_not_intended_geometry'
+    foreach($key in @('capsuleRadius','capsuleHalfHeight','querySequence','queryServerTime','floorDistanceCm')){Assert-Unit2Number $placement.$key}
+    Assert-Online ($placement.capsuleRadius -gt 0 -and $placement.capsuleHalfHeight -ge $placement.capsuleRadius -and $placement.querySequence -gt 0 -and $placement.floorDistanceCm -ge 0 -and $placement.floorDistanceCm -le 3 -and $placement.queryServerTime -le $server.committed.serverTime -and -not [string]::IsNullOrWhiteSpace($placement.supportName)) 'town_fresh_floor_evidence_invalid'
+    Assert-Online ((Unit2-Distance $before.a.position $placement.acceptedPosition) -gt 2*$placement.capsuleRadius -and (Unit2-Distance $commit.acceptedPosition $placement.acceptedPosition) -le .01 -and (Unit2-Distance $after.a.position $placement.acceptedPosition) -le 1 -and (Unit2-Distance $after.a.safeSpawnLocation $placement.acceptedPosition) -le .01) 'town_accepted_transform_or_displacement_invalid'
+    Assert-Online ($arrival.transactionId -ceq $commit.transactionId -and $arrival.generation -eq $commit.generation -and $arrival.samples -ge 3 -and $arrival.stableSeconds -ge .3 -and $arrival.planarDistanceCm -le 10 -and $arrival.verticalDistanceCm -le 10 -and $arrival.orderingFailed -is [bool] -and -not $arrival.orderingFailed -and $arrival.ownArrivalEventObserved -eq $true) 'town_own_arrival_not_correlated'
+    $samples=@($arrival.observations)
+    Assert-Online ($samples.Count -eq $arrival.samples -and $samples.Count -ge 3) 'town_arrival_raw_samples_missing'
+    $lastTime=-1.0
+    foreach($sample in $samples){
+        foreach($key in @('clientTime','generation','presenceRevision','safeCheckpointRevision','ownerConnectionGeneration')){Assert-Unit2Number $sample.$key ($key -cne 'clientTime')}
+        Assert-Online ($sample.clientTime -gt $lastTime -and $sample.transactionId -ceq $commit.transactionId -and $sample.generation -eq $commit.generation -and $sample.presenceRevision -eq $commit.presenceRevision -and $sample.safeCheckpointRevision -eq $commit.safeCheckpointRevision -and $sample.ownerConnectionGeneration -eq $before.a.ownerConnectionGeneration -and $sample.connectionNonceDigest -ceq $before.a.connectionNonceDigest -and $sample.onGround -is [bool] -and $sample.onGround) 'town_arrival_sample_identity_invalid'
+        Assert-Unit2Vector $sample.position;Assert-Unit2Vector $sample.velocity
+        $dx=$sample.position[0]-$commit.acceptedPosition[0];$dy=$sample.position[1]-$commit.acceptedPosition[1]
+        Assert-Online ([math]::Sqrt($dx*$dx+$dy*$dy) -le 10 -and [math]::Abs($sample.position[2]-$commit.acceptedPosition[2]) -le 10 -and (Unit2-Distance $sample.velocity @(0,0,0)) -le 1) 'town_arrival_sample_not_settled'
+        $lastTime=$sample.clientTime
+    }
+    Assert-Online ($samples[-1].clientTime-$samples[0].clientTime -ge .3 -and [math]::Abs(($samples[-1].clientTime-$samples[0].clientTime)-$arrival.stableSeconds) -le .001) 'town_arrival_stable_span_invalid'
+    $progress=@($owner.progressEvents|Where-Object {$_.transactionId -ceq $commit.transactionId -and $_.emitter -ceq 'client'})
+    $ownArrival=@($progress|Where-Object kind -CEQ 'OwnArrivalObserved');$unlock=@($progress|Where-Object kind -CEQ 'UiUnlocked');$release=@($progress|Where-Object kind -CEQ 'SourceLeaseReleased')
+    Assert-Online ($ownArrival.Count -eq 1 -and $unlock.Count -eq 1 -and $release.Count -eq 1 -and $unlock[0].clientSequence -gt $ownArrival[0].clientSequence -and $unlock[0].clientSequence -gt $owner.commitResponse.clientSequence -and $release[0].clientSequence -gt $ownArrival[0].clientSequence -and $release[0].clientSequence -gt $owner.commitResponse.clientSequence) 'town_unlock_or_source_release_too_early'
+    $duplicate=@($success.responses|Where-Object {$_.attemptId -ceq $success.duplicateAttemptId -and $_.error -ceq 'AlreadyCommitted'})
+    Assert-Online ($duplicate.Count -eq 1 -and (Equal-Online $duplicate[0].commit $commit)) 'town_duplicate_changed_receipt'
+    $confirmation=@($success.responses|Where-Object {$_.operation -ceq 'ConfirmArrival' -and $_.error -ceq 'None'})
+    Assert-Online ($confirmation.Count -eq 1 -and $confirmation[0].ownArrivalConfirmed -is [bool] -and $confirmation[0].ownArrivalConfirmed -and (Equal-Online $confirmation[0].commit $commit) -and $confirmation[0].clientSequence -lt $unlock[0].clientSequence -and $confirmation[0].clientSequence -lt $release[0].clientSequence) 'town_server_source_lease_released_before_arrival_confirmation'
+    $gates=[ordered]@{
+        u2_same_owned_server_world=($before.worldId -eq $after.worldId -and $before.gameModeId -eq $after.gameModeId -and $before.gameStateId -eq $after.gameStateId)
+        u2_ready_barrier_registered=$true;u2_logical_target_only=$true;u2_descriptor_kind=[string]$success.prepared.descriptorKind
+        u2_four_unapproved_towns_rejected=$true;u2_unknown_anchor_rejected=$true;u2_stale_catalog_rejected=$true
+        u2_loaded_false_rejected=$true;u2_cancel_source_preserved=$true;u2_cancelled_old_ack_rejected=$true
+        u2_wrong_challenge_rejected=$true;u2_wrong_connection_nonce_rejected=$true;u2_wrong_generation_rejected=$true
+        u2_failed_attempt_scope_unchanged=$true;u2_legitimate_ack_observed=$true;u2_server_floor_capsule_verified=$true
+        u2_owner_nonzero_displacement=$true;u2_commit_correlated_once=$true;u2_client_own_arrival_correlated=$true
+        u2_client_unlock_after_both=$true;u2_only_owner_scope_changed=$true;u2_observer_unchanged=$true
+        u2_field_progress_unchanged=$true;u2_owner_economy_unchanged=$true;u2_checkpoint_memory_only=$true
+        u2_duplicate_ack_no_second_commit=$true;u2_new_content_claim_limits=$true
+    }
+    return [ordered]@{status='running';scenario=$TownTravelScenario;gates=$gates;perAttemptChecks=$matched;authorityEventCount=$events.Count;authorityCommitCount=$commits.Count;descriptorKind=$success.prepared.descriptorKind;evidence=@{client1='register/client1.json';client2='register/client2-crash-checkpoint.json';server='register/server.json'};newTownGeometryReady=$false;newTownActualPlayClaimed=$false;newTownLoadedLevels=$after.newTownLoadedLevels;persistentMapUnloadClaimed=$false;anchorPersistenceAcrossRestartClaimed=$false}
+}
+
 function Assert-OnlineResultsReceipt($Value,$Checkpoint,[string]$Role,[string]$Key,[string]$Expedition,[int]$Outcome,[bool]$Cleared){
     Require-OnlineFields $Value @('expeditionId','partyId','recipientKey','region','difficulty','memberKeys','outcome','completionId','resultRevision','acknowledged','allGrantsCommitted','saveReady','requiresBackendCommit','retryExpeditionId','receipts','gold','ore','experience','rootCores','moonCrystals','itemCount') 'results_receipt_incomplete'
     Assert-Online ($Value.expeditionId -ceq $Expedition -and $Value.recipientKey -ceq $Key -and $Value.region -eq 1 -and $Value.difficulty -eq 0 -and @($Value.memberKeys).Count -eq 2 -and $Key -cin @($Value.memberKeys) -and $Value.outcome -eq $Outcome -and $Value.resultRevision -gt 0 -and $Value.saveReady -eq $true -and $Value.requiresBackendCommit -eq $true) 'results_receipt_owner_or_scope_invalid'
@@ -878,7 +1072,7 @@ $backendDll=Join-Path $backendLink.root 'Fablewood.Backend\bin\Release\net10.0\F
 $credentialsPath=Join-Path $backendLink.root 'Saved\Backend\backend-credentials.json'
 $serverKeyPath=Join-Path $backendLink.root 'Saved\Backend\server-key.txt'
 $summary=[ordered]@{
-    runId=$runId;status='running';scenario=$Scenario;mode=$(if($PackagedClientExecutable){'editor-dedicated-two-packaged-ui-clients'}else{'editor-dedicated-two-ui-clients'});startedUtc=[DateTime]::UtcNow.ToString('o')
+    runId=$runId;status='running';scenario=$Scenario;townTravelScenario=$TownTravelScenario;mode=$(if($PackagedClientExecutable){'editor-dedicated-two-packaged-ui-clients'}else{'editor-dedicated-two-ui-clients'});startedUtc=[DateTime]::UtcNow.ToString('o')
     backendUrl=$BackendUrl;gamePort=$Port;databaseName='fablewood';phases=[ordered]@{}
     scope=@('One PC, loopback only','Normal in-game registration, authentication, movement, potion and leave UI','Existing saves are not uploaded or injected','API reader sessions only inspect the two new accounts','API restart reuses the same database; PostgreSQL is not restarted here')
     visualReviewPerformed=$false;privateContextFolder=$privateFolder;initialBackendStartupPerformed=$false
@@ -940,6 +1134,11 @@ try{
     Write-OnlineJson (Join-Path (Join-Path $runFolder 'register') 'control.json') @{allowJoin=$true;quitServer=$false}
     $reports=Wait-OnlinePhase 'register' $server $clients $crashSecond
     $drained=Wait-OnlineDrain 'register' $server $clients $reports
+    if($TownTravelScenario -ceq 'unit2-legacy-anchors'){
+        # 원본 B의 interruption checkpoint에서 sidecar를 읽으며 재접속 B와 섞지 않는다.
+        $originalPeer=Read-OnlineJson (Join-Path $runFolder 'register\client2-crash-checkpoint.json')
+        $summary['unit2TownTravel']=Assert-OnlineUnit2 $drained.server $reports.client1 $originalPeer
+    }
     $freshCanonical=$drained.canonical
     $shots=@();$shots+=@(Assert-OnlineShots $reports.client1 $clients.client1.phase 7);$shots+=@(Assert-OnlineShots $reports.client2 $clients.client2.phase 5)
     $summary.phases.register=[ordered]@{status='passed';connectionFailureObservedAtStep5=$true;serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;forcedCloseRole=$(if($crashSecond){'client2'}else{$null});serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;reports=@((Join-Path $runFolder 'register\client1.json'),(Join-Path $runFolder $(if($crashSecond){'register\client2-crash-checkpoint.json'}else{'register\client2.json'})));canonical=(Join-Path $runFolder 'register\canonical.json')}
@@ -999,6 +1198,27 @@ try{
         $summary.partyResults.actualPackagedClientStarts=$startedClients.Count
         $summary.partyResults.safeLeaveAndApiRestartFullProfileExact=$true
         $summary.partyResults.status='passed'
+    }
+    if($TownTravelScenario -ceq 'unit2-legacy-anchors'){
+        # 유지한 process handle의 실제 시작/종료 시각으로 동시 수를 계산한다.
+        $timeline=@()
+        foreach($record in @($ownedProcesses|Where-Object role -IN @('client1','client2'))){
+            $handle=$processHandles[[int]$record.pid]
+            Assert-Online ($null -ne $handle -and $handle.HasExited -and $record.exitCode -ne $null) 'town_process_exit_evidence_missing'
+            $start=Online-UtcTicks $record.startedUtc;$finish=$handle.ExitTime.ToUniversalTime().Ticks
+            Assert-Online ($finish -ge $start) 'town_process_timeline_invalid'
+            $timeline+=@([pscustomobject]@{ticks=$start;delta=1},[pscustomobject]@{ticks=$finish;delta=-1})
+        }
+        $active=0;$peak=0
+        foreach($entry in @($timeline|Sort-Object ticks,delta)){$active+=$entry.delta;$peak=[math]::Max($peak,$active)}
+        Assert-Online ($active -eq 0 -and $peak -eq 2 -and $timeline.Count -eq 10) 'town_client_start_or_peak_mismatch'
+        $summary.unit2TownTravel.gates['u2_packaged_client_starts']=[int]($timeline.Count/2)
+        $summary.unit2TownTravel.gates['u2_packaged_client_peak']=[int]$peak
+        $summary.unit2TownTravel.gates['u2_existing_results_conditions']=($summary.partyResults.status -ceq 'passed')
+        $summary.unit2TownTravel.gates['u2_normal_results_reconnect_preserved']=($summary.partyResults.status -ceq 'passed' -and $summary.partyResults.plannedClient2InterruptionOnce -eq $true)
+        $summary.unit2TownTravel.gates['u2_api_restart_profile_preserved']=($summary.phases.login.resumeWalletItemsSummaryExact -eq $true -and $summary.backendRestart.sameDatabaseIdentity -eq $true -and $summary.backendRestart.healthy -eq $true)
+        Assert-Online ($summary.unit2TownTravel.gates.Count -eq 32 -and $summary.unit2TownTravel.gates.u2_existing_results_conditions -and $summary.unit2TownTravel.gates.u2_normal_results_reconnect_preserved -and $summary.unit2TownTravel.gates.u2_api_restart_profile_preserved) 'town_final_existing_evidence_missing'
+        $summary.unit2TownTravel.status='passed'
     }
     $summary.status='passed'
 }catch{

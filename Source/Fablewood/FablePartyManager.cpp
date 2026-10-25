@@ -4,6 +4,8 @@
 #include "FableGameMode.h"
 #include "FableAdventure.h"
 #include "FablePlayerState.h"
+#include "FableTownManager.h"
+#include "FableTownTravelCoordinator.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -209,6 +211,10 @@ void AFablePartyManager::RegisterPlayer(APlayerController* Player)
     }
 
     Publish();
+    if (auto* Towns = AFableTownManager::Ensure(GetWorld()))
+    {
+        Towns->RegisterOrRefreshConnection(Player);
+    }
     if (AFableGameMode* Mode = AFableGameMode::Find(GetWorld()))
     {
         Mode->RestoreExpeditionResult(Profile);
@@ -263,6 +269,10 @@ void AFablePartyManager::DisconnectPlayer(APlayerController* Player)
     }
 
     CurrentConnections.Remove(Profile->PartyPlayerKey);
+    if (auto* Travel = UFableTownTravelCoordinator::Find(Player))
+    {
+        Travel->CancelForConnection(Player, EFableTownTravelError::StaleConnection);
+    }
     for (FFablePartyRecord& Party : Parties)
     {
         for (FFablePartyMember& Member : Party.Members)

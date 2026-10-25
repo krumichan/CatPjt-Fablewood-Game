@@ -50,6 +50,13 @@ struct FABLEWOOD_API FFableTownAnchorDefinition
 
     UPROPERTY()
     TArray<FTransform> LocalSlots;
+
+    /** authored support의 component tag와 표면 높이를 명시한다. */
+    UPROPERTY()
+    FName ExpectedSupportTag = NAME_None;
+
+    UPROPERTY()
+    double ExpectedSupportLocalZ = 0.0;
 };
 
 /** 새 네 마을은 후보 데이터이며 활성 지형이 아니다. / 新四村は候補データであり有効な地形ではない。 */

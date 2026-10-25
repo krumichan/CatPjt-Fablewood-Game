@@ -3,6 +3,7 @@
 #include "FableGameState.h"
 #include "FablePlayerState.h"
 #include "FableTownCatalog.h"
+#include "FableTownTravelCoordinator.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -11,11 +12,14 @@
 /** 실행 세대만 복제하고 GameState나 별도 시계는 만들지 않는다. / 実行世代のみを複製し別GameState・時計は作らない。 */
 AFableTownManager::AFableTownManager()
 {
-    PrimaryActorTick.bCanEverTick = false;
+    PrimaryActorTick.bCanEverTick = true;
+    PrimaryActorTick.TickInterval = 0.1f;
     bReplicates = true;
     bAlwaysRelevant = true;
     SetNetUpdateFrequency(5.0f);
     Catalog = CreateDefaultSubobject<UFableTownCatalog>(TEXT("TownCatalog"));
+    TravelCoordinator = CreateDefaultSubobject<UFableTownTravelCoordinator>(TEXT("TownTravelCoordinator"));
+    WorldEpoch = FGuid::NewGuid();
     IdleProgress.AdventureStage = EFableAdventureStage::Village;
     IdleProgress.ActiveRegion = EFableRegion::Village;
     IdleProgress.ActiveDifficulty = EFableDifficulty::Normal;
@@ -25,9 +29,41 @@ AFableTownManager::AFableTownManager()
 void AFableTownManager::BeginPlay()
 {
     Super::BeginPlay();
+    SetActorTickEnabled(HasAuthority());
     if (HasAuthority() && !PublicFieldScopeId.IsValid())
     {
         RotatePublicFieldScope();
+    }
+}
+
+/** 이동 요청 전에 현재 공간 세대를 게시하며 새 참가자는 자동 등록하지 않는다. */
+void AFableTownManager::Tick(float DeltaSeconds)
+{
+    Super::Tick(DeltaSeconds);
+    if (!HasAuthority())
+    {
+        return;
+    }
+
+    // 명부 복사 뒤 갱신해 연결 교체나 동기 콜백이 순회 중인 저장소를 변경하지 못하게 한다.
+    PruneDisconnected();
+    TArray<TWeakObjectPtr<APlayerController>> RegisteredPlayers;
+    RegisteredPlayers.Reserve(Presence.Num());
+    for (const auto& Pair : Presence)
+    {
+        RegisteredPlayers.Add(Pair.Value.Player);
+    }
+
+    // 실제 pawn에서만 문맥을 읽고 공개 숲 참가 여부나 게임 진행은 변경하지 않는다.
+    for (const auto& Entry : RegisteredPlayers)
+    {
+        APlayerController* Player = Entry.Get();
+        AFablePlayerState* Profile = Player ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+        const FPresenceRecord* Record = Presence.Find(Profile);
+        if (Record && Record->Player.Get() == Player && ValidateConnection(Player, Profile, false))
+        {
+            RefreshPhysicalPresence(Player);
+        }
     }
 }
 
@@ -132,6 +168,15 @@ bool AFableTownManager::ValidateConnection(const APlayerController* Player, cons
         (!ExpectedProfile->IsBackendReady() || ExpectedProfile->GetBackendPlayerId().IsEmpty()))
     {
         return false;
+    }
+    if (const FPresenceRecord* Record = Presence.Find(const_cast<AFablePlayerState*>(ExpectedProfile));
+        Record && Record->Player.Get() == Player)
+    {
+        const auto* Current = CurrentConnectionsByIdentity.Find(Record->Identity);
+        if (!Current || Current->Get() != Player)
+        {
+            return false;
+        }
     }
 
     bool bCurrentController = false;
@@ -252,19 +297,7 @@ bool AFableTownManager::ResolvePhysicalContext(const AActor* Context, FFableTown
 /** 현재 연결과 실제 pawn의 검증된 공간만 등록한다. / 現接続と実pawnの検証済空間のみ登録する。 */
 bool AFableTownManager::RegisterValidatedPresence(APlayerController* Player)
 {
-    AFablePlayerState* Profile = IsValid(Player) ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
-    FFableTownLocationContext Context;
-    if (!ValidateConnection(Player, Profile, true) || !ResolvePhysicalContext(Player, Context))
-    {
-        return false;
-    }
-
-    PruneDisconnected();
-    FPresenceRecord& Record = Presence.FindOrAdd(Profile);
-    Record.Player = Player;
-    Record.Profile = Profile;
-    Record.TownId = Context.TownId;
-    return true;
+    return RefreshPhysicalPresence(Player);
 }
 
 /** 등록한 동일 연결의 현재 물리 공간을 다시 검사한다. / 同一登録接続の現在空間を再検査する。 */
@@ -342,6 +375,19 @@ void AFableTownManager::UnregisterPlayer(APlayerController* Player)
         return;
     }
 
+    if (TravelCoordinator)
+    {
+        TravelCoordinator->CancelForConnection(Player, EFableTownTravelError::StaleConnection);
+    }
+    RetiredConnections.Add(Player);
+    if (Record)
+    {
+        const auto* Current = CurrentConnectionsByIdentity.Find(Record->Identity);
+        if (Current && Current->Get() == Player)
+        {
+            CurrentConnectionsByIdentity.Remove(Record->Identity);
+        }
+    }
     UnregisterSharedForestParticipant(Player);
     Presence.Remove(Profile);
 }
@@ -398,4 +444,176 @@ TArray<APlayerState*> AFableTownManager::GetSharedForestParticipants() const
     }
 
     return Result;
+}
+
+/** 새 소유 연결만 새 세대로 발급하며 늦은 이전 연결은 현재 명부를 덮어쓰지 못한다. */
+bool AFableTownManager::RegisterOrRefreshConnection(APlayerController* Player)
+{
+    AFablePlayerState* Profile = IsValid(Player) ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+    if (!ValidateConnection(Player, Profile, false) || RetiredConnections.Contains(Player))
+    {
+        return false;
+    }
+
+    const FString Identity = Profile->IsBackendEnabled() ? TEXT("online:") + Profile->GetBackendPlayerId()
+                                                         : TEXT("local:") + FString::FromInt(Profile->GetPlayerId());
+    FPresenceRecord* Existing = Presence.Find(Profile);
+    const auto* Current = CurrentConnectionsByIdentity.Find(Identity);
+    if (Existing && Existing->Player.Get() == Player && Existing->Snapshot.ConnectionNonce.IsValid() &&
+        Existing->Identity == Identity && Current && Current->Get() == Player)
+    {
+        return true;
+    }
+    if (ConnectionSequence >= FableTownTravel::MaxSafeSequence || PresenceSequence >= FableTownTravel::MaxSafeSequence)
+    {
+        return false;
+    }
+
+    if (Existing && TravelCoordinator)
+    {
+        TravelCoordinator->CancelForConnection(Existing->Player.Get(), EFableTownTravelError::StaleConnection);
+    }
+    if (Current && Current->IsValid() && Current->Get() != Player)
+    {
+        if (TravelCoordinator)
+        {
+            TravelCoordinator->CancelForConnection(Current->Get(), EFableTownTravelError::StaleConnection);
+        }
+        RetiredConnections.Add(*Current);
+    }
+
+    FPresenceRecord Record;
+    Record.Player = Player;
+    Record.Profile = Profile;
+    Record.Identity = Identity;
+    Record.Snapshot.WorldEpoch = WorldEpoch;
+    Record.Snapshot.OwnerConnectionGeneration = ++ConnectionSequence;
+    Record.Snapshot.ConnectionNonce = FGuid::NewGuid();
+    Record.Snapshot.PresenceRevision = ++PresenceSequence;
+    Presence.Add(Profile, Record);
+    CurrentConnectionsByIdentity.Add(Identity, Player);
+    Profile->TownConnectionSnapshot = Record.Snapshot;
+    Profile->bPendingTownTravel = false;
+    Profile->ForceNetUpdate();
+    return true;
+}
+
+/** 위치 흔들림이 아니라 Town/층/연결부/공개 세대 변경만 revision을 증가시킨다. */
+bool AFableTownManager::RefreshPhysicalPresence(APlayerController* Player)
+{
+    if (!RegisterOrRefreshConnection(Player))
+    {
+        return false;
+    }
+    AFablePlayerState* Profile = Player->GetPlayerState<AFablePlayerState>();
+    FFableTownLocationContext Context;
+    const bool bPhysicalValid = ValidateConnection(Player, Profile, true) && ResolvePhysicalContext(Player, Context);
+
+    FPresenceRecord& Record = Presence.FindChecked(Profile);
+    FFableTownConnectionSnapshot& Snapshot = Record.Snapshot;
+    FFablePublicAreaKey PublicArea;
+    if (Record.FieldScope.IsValid())
+    {
+        PublicArea.AreaId = FableTown::LegacyForestAreaId();
+        PublicArea.ScopeId = Record.FieldScope;
+    }
+    const auto& Previous = Snapshot.PhysicalContext;
+    const bool bChanged = Previous.TownId != Context.TownId || Previous.FloorId != Context.FloorId ||
+                          Previous.ConnectorId != Context.ConnectorId ||
+                          Previous.CatalogVersion != Context.CatalogVersion ||
+                          Previous.bGeometryReady != Context.bGeometryReady || Snapshot.PublicArea != PublicArea;
+    if (bChanged && PresenceSequence >= FableTownTravel::MaxSafeSequence)
+    {
+        return false;
+    }
+    if (bChanged)
+    {
+        Snapshot.PresenceRevision = ++PresenceSequence;
+    }
+    Snapshot.PhysicalContext = Context;
+    Snapshot.PublicArea = PublicArea;
+    Record.TownId = Context.TownId;
+    Profile->TownConnectionSnapshot = Snapshot;
+    if (bChanged)
+    {
+        // 위치 흔들림마다 강제 복제하지 않고 의미가 바뀐 세대만 즉시 소유자에게 알린다.
+        Profile->ForceNetUpdate();
+    }
+    return bPhysicalValid;
+}
+
+/** 실제 현재 연결에 묶인 서버 스냅샷만 반환한다. */
+bool AFableTownManager::GetConnectionSnapshot(const AFablePlayerState* Profile,
+                                              FFableTownConnectionSnapshot& OutSnapshot) const
+{
+    OutSnapshot = FFableTownConnectionSnapshot();
+    const FPresenceRecord* Record = Presence.Find(const_cast<AFablePlayerState*>(Profile));
+    if (!Record || !ValidateConnection(Record->Player.Get(), Profile, false) || Record->Profile.Get() != Profile ||
+        !Record->Snapshot.ConnectionNonce.IsValid() || !CurrentConnectionsByIdentity.Contains(Record->Identity) ||
+        CurrentConnectionsByIdentity.FindChecked(Record->Identity) != Record->Player)
+    {
+        return false;
+    }
+    OutSnapshot = Record->Snapshot;
+    return true;
+}
+
+/** controller 객체와 발급 세대·nonce가 모두 일치해야 현재 연결이다. */
+bool AFableTownManager::IsCurrentConnection(const APlayerController* Player, int64 OwnerConnectionGeneration,
+                                            FGuid ConnectionNonce) const
+{
+    FFableTownConnectionSnapshot Snapshot;
+    return IsValid(Player) && GetConnectionSnapshot(Player->GetPlayerState<AFablePlayerState>(), Snapshot) &&
+           Player->GetPlayerState<AFablePlayerState>()->GetOwner() == Player &&
+           Snapshot.OwnerConnectionGeneration == OwnerConnectionGeneration &&
+           Snapshot.ConnectionNonce == ConnectionNonce;
+}
+
+/** 물리 도착 검증을 마친 뒤에만 공개 참가 해제와 안전 앵커를 한 번 확정한다. */
+bool AFableTownManager::CommitAnchorPresence(APlayerController* Player, const FFableTownAnchorRef& Anchor,
+                                             const FTransform& AcceptedTransform, FGuid TransactionId, int64 Generation,
+                                             FFableTownConnectionSnapshot& OutAfter)
+{
+    AFablePlayerState* Profile = IsValid(Player) ? Player->GetPlayerState<AFablePlayerState>() : nullptr;
+    FPresenceRecord* Record = Presence.Find(Profile);
+    FFableTownLocationContext Context;
+    if (!Record || Record->Player.Get() != Player || !ValidateConnection(Player, Profile, true) || !Anchor.IsValid() ||
+        !TransactionId.IsValid() || Generation <= 0 || !ResolvePhysicalContext(Player, Context) ||
+        Context.TownId != Anchor.TownId || Context.CatalogVersion != Anchor.CatalogVersion ||
+        AcceptedTransform.ContainsNaN() || !Player->GetPawn()->GetActorTransform().Equals(AcceptedTransform, 0.1f) ||
+        PresenceSequence >= FableTownTravel::MaxSafeSequence ||
+        Record->Snapshot.SafeCheckpointRevision >= FableTownTravel::MaxSafeSequence)
+    {
+        return false;
+    }
+
+    // 마지막 fallible 검사를 명부 변경 전에 끝낸다. 이후는 미리 검사한 단순 값 대입뿐이다.
+    AFableCharacter* Hero = Player->GetPawn<AFableCharacter>();
+    if (!Hero || !Hero->CommitSafeTownCheckpointAtCurrentPosition(Anchor, AcceptedTransform.Rotator()))
+    {
+        return false;
+    }
+
+    Record->FieldScope.Invalidate();
+    Profile->PublicFieldScopeId.Invalidate();
+    auto& Snapshot = Record->Snapshot;
+    Snapshot.PhysicalContext = Context;
+    Snapshot.PublicArea = FFablePublicAreaKey();
+    Snapshot.SafeAnchor = Anchor;
+    Snapshot.PresenceRevision = ++PresenceSequence;
+    ++Snapshot.SafeCheckpointRevision;
+    Snapshot.LastCommittedTransactionId = TransactionId;
+    Snapshot.LastCommittedGeneration = Generation;
+    Snapshot.LastAcceptedTransform = AcceptedTransform;
+    Record->TownId = Anchor.TownId;
+    Profile->TownConnectionSnapshot = Snapshot;
+    Profile->ForceNetUpdate();
+    OutAfter = Snapshot;
+    return true;
+}
+
+/** 서버 이동 조정자를 기존 manager에서 반환한다. */
+UFableTownTravelCoordinator* AFableTownManager::GetTravelCoordinator() const
+{
+    return TravelCoordinator;
 }

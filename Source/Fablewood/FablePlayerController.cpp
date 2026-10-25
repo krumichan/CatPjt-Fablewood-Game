@@ -1,4 +1,4 @@
-﻿#include "FablePlayerController.h"
+#include "FablePlayerController.h"
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
 #include "FableGameMode.h"
@@ -10,6 +10,12 @@
 #include "FableGameState.h"
 #include "FablePlayerState.h"
 #include "FablePartyManager.h"
+#include "FableTownManager.h"
+#include "FableTownCatalog.h"
+#include "FableTownTravelCoordinator.h"
+#include "FableTownStreamingSubsystem.h"
+
+#include "TimerManager.h"
 #include "FableCharacter.h"
 #include "FableEnemy.h"
 #include "EngineUtils.h"
@@ -742,6 +748,7 @@ void AFablePlayerController::UIClosePanels()
 void AFablePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
+    TickTownTravel();
 
     // 종료 결과의 자동 열기는 로컬 표시만 바꾸며 지급·확인 요청을 대신하지 않는다.
     const AFablePlayerState* ResultProfile = GetPlayerState<AFablePlayerState>();
@@ -4271,4 +4278,514 @@ void AFablePlayerController::ServerRestartTrial_Implementation()
     {
         Mode->RequestNewRound(this);
     }
+}
+
+/** 논리 목적지와 현재 복제 revision만 전송한다. */
+FGuid AFablePlayerController::UIRequestTownTravel(EFableTownId TargetTownId, FName AnchorId,
+                                                  int32 ExpectedCatalogVersion)
+{
+    const FGuid RequestId = FGuid::NewGuid();
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!IsLocalController() || !Profile)
+    {
+        return RequestId;
+    }
+    bTownTravelUiLocked = true;
+    ServerRequestTownTravel(RequestId, TargetTownId, AnchorId, ExpectedCatalogVersion,
+                            Profile->GetTownConnectionSnapshot().PresenceRevision);
+    return RequestId;
+}
+
+/** 취소를 보내는 즉시 queued 자동 작업을 막되 저수준 replay 전송은 막지 않는다. */
+FGuid AFablePlayerController::UICancelTownTravel(FGuid TransactionId, int64 Generation)
+{
+    const FGuid AttemptId = FGuid::NewGuid();
+    if (TownPrepared.TransactionId == TransactionId && TownPrepared.Generation == Generation)
+    {
+        bTownCancelRequested = true;
+    }
+    ServerCancelTownTravel(AttemptId, TransactionId, Generation, TownPrepared.ConnectionNonce);
+    return AttemptId;
+}
+
+/** 명시적인 전송 경로는 잘못된 tuple/replay도 서버에서 판정하게 한다. */
+FGuid AFablePlayerController::UIRequestTownTravelLoadAcknowledgement(FGuid TransactionId, int64 Generation,
+                                                                     FGuid ConnectionNonce, FGuid ChallengeNonce,
+                                                                     bool bLoaded)
+{
+    const FGuid AttemptId = FGuid::NewGuid();
+    if (!bLoaded && TownPrepared.TransactionId == TransactionId && TownPrepared.Generation == Generation &&
+        TownPrepared.ConnectionNonce == ConnectionNonce && TownPrepared.ChallengeNonce == ChallengeNonce)
+    {
+        // 정확한 현재 지형 실패 의도는 queued 자동 ready ACK를 즉시 막는다.
+        bTownAutoAckSent = true;
+    }
+    ServerAcknowledgeTownGeometry(AttemptId, TransactionId, Generation, ConnectionNonce, ChallengeNonce, bLoaded);
+    return AttemptId;
+}
+
+/** 현재 소유자의 준비 통지를 읽는다. */
+const FFableTownTravelPrepared& AFablePlayerController::GetTownTravelPrepared() const
+{
+    return TownPrepared;
+}
+
+/** 가장 최근 응답의 상관 ID를 읽는다. */
+const FFableTownTravelResponse& AFablePlayerController::GetTownTravelLastResponse() const
+{
+    return TownLastResponse;
+}
+
+/** 준비 통지 구독 지점을 반환한다. */
+FOnFableTownTravelPrepared& AFablePlayerController::OnTownTravelPrepared()
+{
+    return TownPreparedEvents;
+}
+
+/** 매 시도 응답의 구독 지점을 반환한다. */
+FOnFableTownTravelResponse& AFablePlayerController::OnTownTravelResponse()
+{
+    return TownResponseEvents;
+}
+
+/** authority/owner-client 구분을 포함한 진행 통지를 반환한다. */
+FOnFableTownTravelEvent& AFablePlayerController::OnTownTravelProgress()
+{
+    return TownProgressEvents;
+}
+
+/** 여행 화면의 실제 확인 대기 상태를 읽는다. */
+bool AFablePlayerController::IsTownTravelInputBlocked() const
+{
+    return bTownTravelUiLocked;
+}
+
+/** 소유 pawn의 실제 연속 도착 샘플 수를 읽는다. */
+int32 AFablePlayerController::GetTownArrivalSampleCount() const
+{
+    return TownArrivalSamples;
+}
+
+/** 실제 샘플 사이의 경과 시간을 읽는다. */
+double AFablePlayerController::GetTownArrivalSampleSpan() const
+{
+    return TownArrivalSamples > 0 ? TownArrivalLastSampleTime - TownArrivalFirstSampleTime : 0.0;
+}
+
+/** RPG 입력 제한과 별개인 owner reliable 요청을 조정자에 전달한다. */
+void AFablePlayerController::ServerRequestTownTravel_Implementation(FGuid RequestId, EFableTownId TargetTownId,
+                                                                    FName AnchorId, int32 ExpectedCatalogVersion,
+                                                                    int64 ExpectedPresenceRevision)
+{
+    AFableTownManager* Towns = AFableTownManager::Ensure(GetWorld());
+    if (auto* Coordinator = Towns ? Towns->GetTravelCoordinator() : nullptr)
+    {
+        FFableTownAnchorRef Target;
+        Target.TownId = TargetTownId;
+        Target.AnchorId = AnchorId;
+        Target.CatalogVersion = ExpectedCatalogVersion;
+        Coordinator->BeginAnchorTravel(this, RequestId, Target, ExpectedPresenceRevision);
+    }
+}
+
+/** ACK는 일반 RPG throttle와 분리해 정확 tuple을 전달한다. */
+void AFablePlayerController::ServerAcknowledgeTownGeometry_Implementation(FGuid AckAttemptId, FGuid TransactionId,
+                                                                          int64 Generation, FGuid ConnectionNonce,
+                                                                          FGuid ChallengeNonce, bool bLoaded)
+{
+    if (auto* Coordinator = UFableTownTravelCoordinator::Find(this))
+    {
+        Coordinator->AcknowledgeGeometry(this, AckAttemptId, TransactionId, Generation, ConnectionNonce, ChallengeNonce,
+                                         bLoaded);
+    }
+}
+
+/** 취소는 소유자 세대가 같은 경우에만 서버에서 적용한다. */
+void AFablePlayerController::ServerCancelTownTravel_Implementation(FGuid CancelAttemptId, FGuid TransactionId,
+                                                                   int64 Generation, FGuid ConnectionNonce)
+{
+    if (auto* Coordinator = UFableTownTravelCoordinator::Find(this))
+    {
+        Coordinator->CancelAnchorTravel(this, CancelAttemptId, TransactionId, Generation, ConnectionNonce);
+    }
+}
+
+/** 도착 확인도 arbitrary XYZ 없이 정확한 서버 receipt만 참조한다. */
+void AFablePlayerController::ServerConfirmTownArrival_Implementation(FGuid AttemptId, FGuid TransactionId,
+                                                                     int64 Generation, FGuid ConnectionNonce,
+                                                                     int64 ExpectedCommitSequence)
+{
+    if (auto* Coordinator = UFableTownTravelCoordinator::Find(this))
+    {
+        Coordinator->ConfirmOwnArrival(this, AttemptId, TransactionId, Generation, ConnectionNonce,
+                                       ExpectedCommitSequence);
+    }
+}
+
+/** Prepared callback과 같은 tick의 정상 취소가 다음 tick 자동ACK보다 먼저 적용된다. */
+void AFablePlayerController::ClientPrepareTownGeometry_Implementation(const FFableTownTravelPrepared& Prepared)
+{
+    if (!IsLocalController())
+    {
+        return;
+    }
+    if (TownPrepared.TransactionId == Prepared.TransactionId && TownPrepared.Generation == Prepared.Generation)
+    {
+        return;
+    }
+    ReleaseTownPendingGeometry(true);
+    TownPrepared = Prepared;
+    bTownCancelRequested = false;
+    bTownAutoAckSent = false;
+    bTownAutoAckEligible = false;
+    bTownTerminal = false;
+    bTownTravelUiLocked = true;
+    TownArrivalSamples = 0;
+    bTownArrivalConfirmationSent = false;
+    bTownArrivalFailed = false;
+    TownAwaitingArrival = FFableTownTravelCommitReceipt();
+    TownPreparedEvents.Broadcast(TownPrepared);
+
+    const FGuid TransactionId = Prepared.TransactionId;
+    const int64 Generation = Prepared.Generation;
+    const FGuid ConnectionNonce = Prepared.ConnectionNonce;
+    GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(
+        this,
+        [this, TransactionId, Generation, ConnectionNonce]()
+        {
+            if (TownPrepared.TransactionId == TransactionId && TownPrepared.Generation == Generation &&
+                TownPrepared.ConnectionNonce == ConnectionNonce && !bTownCancelRequested && !bTownTerminal)
+            {
+                bTownAutoAckEligible = true;
+                TryAutoAcknowledgeTownGeometry();
+            }
+        }));
+}
+
+/** 別channelのPS複製がPreparedより遅ければ同じTTL内で待つ。 */
+void AFablePlayerController::TryAutoAcknowledgeTownGeometry()
+{
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!IsLocalController() || !GetWorld() || !Profile || bTownCancelRequested || bTownTerminal || bTownAutoAckSent ||
+        !bTownAutoAckEligible || !TownPrepared.TransactionId.IsValid())
+    {
+        return;
+    }
+    const auto& Connection = Profile->GetTownConnectionSnapshot();
+    if (Connection.OwnerConnectionGeneration != TownPrepared.OwnerConnectionGeneration ||
+        Connection.ConnectionNonce != TownPrepared.ConnectionNonce || !Connection.WorldEpoch.IsValid())
+    {
+        return;
+    }
+    auto* Streaming = GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>();
+    if (!Streaming || !AFableTownManager::Find(GetWorld()))
+    {
+        return;
+    }
+    FFableTownGeometryLeaseOwner GeometryOwner;
+    GeometryOwner.OwnerConnectionGeneration = TownPrepared.OwnerConnectionGeneration;
+    GeometryOwner.OwnerPlayerState = const_cast<AFablePlayerState*>(Profile);
+    GeometryOwner.TransactionId = TownPrepared.TransactionId;
+    EFableTownGeometryFailure Failure;
+    if (!TownSourceLease.IsValid())
+    {
+        FFableTownGeometryDescriptor Source;
+        Source.Mode = EFableTownGeometryMode::ExistingPersistent;
+        Source.TownId = TownPrepared.SourceContext.TownId;
+        Source.CatalogVersion = TownPrepared.SourceContext.CatalogVersion;
+        Source.LocalToWorld = FTransform::Identity;
+        Source.FixedInstanceName = TEXT("FableTown_LegacyVillage_Geometry_v1");
+        Source.ContentIdentity = TEXT("LegacyPersistentV1");
+        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::SourceRetention;
+        if (!Streaming->AcquireGeometry(Source, GeometryOwner, TownSourceLease, Failure))
+        {
+            if (Failure != EFableTownGeometryFailure::InvalidOwner)
+            {
+                bTownAutoAckSent = true;
+                UIRequestTownTravelLoadAcknowledgement(TownPrepared.TransactionId, TownPrepared.Generation,
+                                                       TownPrepared.ConnectionNonce, TownPrepared.ChallengeNonce,
+                                                       false);
+            }
+            return;
+        }
+    }
+    if (!TownTargetLease.IsValid())
+    {
+        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::TargetPending;
+        if (!Streaming->AcquireGeometry(TownPrepared.Geometry, GeometryOwner, TownTargetLease, Failure))
+        {
+            if (Failure != EFableTownGeometryFailure::InvalidOwner)
+            {
+                bTownAutoAckSent = true;
+                UIRequestTownTravelLoadAcknowledgement(TownPrepared.TransactionId, TownPrepared.Generation,
+                                                       TownPrepared.ConnectionNonce, TownPrepared.ChallengeNonce,
+                                                       false);
+            }
+            return;
+        }
+    }
+    const auto Status = Streaming->GetGeometryStatus(TownTargetLease);
+    if (Status.State == EFableTownGeometryState::Failed || Status.State == EFableTownGeometryState::Removed)
+    {
+        bTownAutoAckSent = true;
+        UIRequestTownTravelLoadAcknowledgement(TownPrepared.TransactionId, TownPrepared.Generation,
+                                               TownPrepared.ConnectionNonce, TownPrepared.ChallengeNonce, false);
+    }
+    else if (Streaming->IsGeometryReadyVisible(TownTargetLease))
+    {
+        bTownAutoAckSent = true;
+        UIRequestTownTravelLoadAcknowledgement(TownPrepared.TransactionId, TownPrepared.Generation,
+                                               TownPrepared.ConnectionNonce, TownPrepared.ChallengeNonce, true);
+    }
+}
+
+/** 応答を先に保存してから購読者へ通知する。 */
+void AFablePlayerController::ClientTownTravelResponse_Implementation(const FFableTownTravelResponse& Response)
+{
+    TownLastResponse = Response;
+    if (Response.TransactionId == TownPrepared.TransactionId && Response.Generation == TownPrepared.Generation)
+    {
+        if (Response.Operation == EFableTownTravelOperation::ConfirmArrival)
+        {
+            TownResponseEvents.Broadcast(Response);
+            if (Response.Error == EFableTownTravelError::None && Response.bOwnArrivalConfirmed &&
+                TownAwaitingArrival.TransactionId == Response.TransactionId &&
+                TownAwaitingArrival.CommitSequence == Response.Commit.CommitSequence)
+            {
+                CompleteTownArrivalAfterConfirmation();
+            }
+            else
+            {
+                bTownArrivalConfirmationSent = false;
+                TownArrivalSamples = 0;
+                EmitLocalTownEvent(EFableTownTravelEventKind::AttemptRejected, Response.Error);
+            }
+            return;
+        }
+        else if (Response.State == EFableTownTravelState::Committed && Response.Commit.CommitCount == 1)
+        {
+            bTownTerminal = true;
+            if (TownObservedArrivalId != Response.TransactionId &&
+                TownAwaitingArrival.TransactionId != Response.TransactionId)
+            {
+                TownAwaitingArrival = Response.Commit;
+                TownArrivalSamples = 0;
+                bTownTravelUiLocked = true;
+                bTownArrivalConfirmationSent = false;
+                bTownArrivalFailed = false;
+                TownArrivalDeadline = GetWorld()->GetTimeSeconds() + 5.0;
+                if (!bTownMoveInputHeld)
+                {
+                    SetIgnoreMoveInput(true);
+                    bTownMoveInputHeld = true;
+                }
+                if (auto* Hero = GetPawn<AFableCharacter>())
+                {
+                    Hero->GetCharacterMovement()->StopMovementImmediately();
+                }
+            }
+        }
+        else if (Response.State == EFableTownTravelState::Cancelled || Response.State == EFableTownTravelState::Expired)
+        {
+            bTownTerminal = true;
+            bTownTravelUiLocked = Response.Error == EFableTownTravelError::RollbackFailed;
+            if (Response.Error != EFableTownTravelError::RollbackFailed)
+            {
+                ReleaseTownPendingGeometry(true);
+            }
+        }
+    }
+    else if (Response.Operation == EFableTownTravelOperation::Begin && Response.Error != EFableTownTravelError::None &&
+             !TownAwaitingArrival.TransactionId.IsValid() && (!TownPrepared.TransactionId.IsValid() || bTownTerminal))
+    {
+        bTownTravelUiLocked = false;
+    }
+    TownResponseEvents.Broadcast(Response);
+}
+
+/** server terminal event는 TTL UI를 정리하며 RPC 시도 응답과 섞지 않는다. */
+void AFablePlayerController::ClientTownTravelEvent_Implementation(const FFableTownTravelEvent& Event)
+{
+    if (Event.TransactionId == TownPrepared.TransactionId && Event.Generation == TownPrepared.Generation &&
+        (Event.State == EFableTownTravelState::Cancelled || Event.State == EFableTownTravelState::Expired))
+    {
+        bTownTerminal = true;
+        bTownTravelUiLocked = Event.Error == EFableTownTravelError::RollbackFailed;
+        if (Event.Error != EFableTownTravelError::RollbackFailed)
+        {
+            ReleaseTownPendingGeometry(true);
+        }
+    }
+    TownProgressEvents.Broadcast(Event);
+}
+
+/** 정확 응답과 복제된 소유 pawn의 실제 도착을 함께 관찰한다. */
+void AFablePlayerController::TickTownTravel()
+{
+    if (!IsLocalController())
+    {
+        return;
+    }
+    if (!bTownTerminal && !bTownCancelRequested && TownPrepared.TransactionId.IsValid())
+    {
+        TryAutoAcknowledgeTownGeometry();
+    }
+    if (!TownAwaitingArrival.TransactionId.IsValid() || bTownArrivalFailed)
+    {
+        return;
+    }
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    const AFableCharacter* Hero = GetPawn<AFableCharacter>();
+    const auto* Movement = Hero ? Hero->GetCharacterMovement() : nullptr;
+    const auto& Commit = TownAwaitingArrival;
+    const auto* Connection = Profile ? &Profile->GetTownConnectionSnapshot() : nullptr;
+    const FVector Delta = Hero ? Hero->GetActorLocation() - Commit.AcceptedTransform.GetLocation() : FVector(MAX_flt);
+    const bool bArrived =
+        Connection && Hero && Movement && Connection->LastCommittedTransactionId == Commit.TransactionId &&
+        Connection->LastCommittedGeneration == Commit.Generation &&
+        Connection->PresenceRevision == Commit.PresenceRevision &&
+        Connection->SafeCheckpointRevision == Commit.SafeCheckpointRevision && FVector2D(Delta).Size() <= 10.0f &&
+        FMath::Abs(Delta.Z) <= 10.0f && Movement->IsMovingOnGround();
+    const double Now = GetWorld()->GetTimeSeconds();
+    if (Now >= TownArrivalDeadline)
+    {
+        bTownArrivalFailed = true;
+        bTownTravelUiLocked = false;
+        if (bTownMoveInputHeld)
+        {
+            SetIgnoreMoveInput(false);
+            bTownMoveInputHeld = false;
+        }
+        EmitLocalTownEvent(EFableTownTravelEventKind::AttemptRejected, EFableTownTravelError::ArrivalUnconfirmed);
+        return;
+    }
+    if (!bArrived)
+    {
+        TownArrivalSamples = 0;
+        return;
+    }
+    if (TownArrivalSamples == 0)
+    {
+        TownArrivalFirstSampleTime = Now;
+        TownArrivalLastSampleTime = Now;
+        TownArrivalSamples = 1;
+    }
+    else if (Now - TownArrivalLastSampleTime >= 0.1)
+    {
+        ++TownArrivalSamples;
+        TownArrivalLastSampleTime = Now;
+    }
+    if (TownArrivalSamples < 3 || Now - TownArrivalFirstSampleTime < 0.3)
+    {
+        return;
+    }
+    if (!bTownArrivalConfirmationSent)
+    {
+        bTownArrivalConfirmationSent = true;
+        EmitLocalTownEvent(EFableTownTravelEventKind::OwnArrivalObserved, EFableTownTravelError::None);
+        ServerConfirmTownArrival(FGuid::NewGuid(), Commit.TransactionId, Commit.Generation,
+                                 TownPrepared.ConnectionNonce, Commit.CommitSequence);
+    }
+}
+
+/** 서버 확인 응답 뒤에만 로컬 source lease와 UI 잠금을 해제한다. */
+void AFablePlayerController::CompleteTownArrivalAfterConfirmation()
+{
+    const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
+    if (!Profile || !TownAwaitingArrival.TransactionId.IsValid())
+    {
+        return;
+    }
+    const auto Commit = TownAwaitingArrival;
+    auto* Streaming = GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>();
+    if (!Streaming || !TownTargetLease.IsValid() || !Streaming->IsGeometryReadyVisible(TownTargetLease))
+    {
+        return;
+    }
+    FFableTownGeometryLeaseOwner GeometryOwner;
+    GeometryOwner.OwnerConnectionGeneration = TownPrepared.OwnerConnectionGeneration;
+    GeometryOwner.OwnerPlayerState = const_cast<AFablePlayerState*>(Profile);
+    GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::Presence;
+    FFableTownGeometryLease Presence;
+    EFableTownGeometryFailure Failure;
+    if (!Streaming->AcquireGeometry(TownPrepared.Geometry, GeometryOwner, Presence, Failure))
+    {
+        return;
+    }
+    if (TownPresenceLease.IsValid() && TownPresenceLease.LeaseId != Presence.LeaseId)
+    {
+        Streaming->ReleaseGeometry(TownPresenceLease);
+    }
+    TownPresenceLease = Presence;
+    TownObservedArrivalId = Commit.TransactionId;
+    bTownTravelUiLocked = false;
+    if (bTownMoveInputHeld)
+    {
+        SetIgnoreMoveInput(false);
+        bTownMoveInputHeld = false;
+    }
+    EmitLocalTownEvent(EFableTownTravelEventKind::UiUnlocked, EFableTownTravelError::None);
+    ReleaseTownPendingGeometry(true);
+    EmitLocalTownEvent(EFableTownTravelEventKind::SourceLeaseReleased, EFableTownTravelError::None);
+    TownAwaitingArrival = FFableTownTravelCommitReceipt();
+}
+
+/** 정확히 보관한 임시 token만 반환한다. persistent Legacy에는 unload를 요청하지 않는다. */
+void AFablePlayerController::ReleaseTownPendingGeometry(bool bReleaseSource)
+{
+    if (auto* Streaming = GetWorld() ? GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>() : nullptr)
+    {
+        if (TownTargetLease.IsValid())
+        {
+            Streaming->ReleaseGeometry(TownTargetLease);
+        }
+        if (bReleaseSource && TownSourceLease.IsValid())
+        {
+            Streaming->ReleaseGeometry(TownSourceLease);
+        }
+    }
+    TownTargetLease = FFableTownGeometryLease();
+    if (bReleaseSource)
+    {
+        TownSourceLease = FFableTownGeometryLease();
+    }
+}
+
+/** 로컬 관측은 별도 sequence와 emitter로 발행한다. */
+void AFablePlayerController::EmitLocalTownEvent(EFableTownTravelEventKind Kind, EFableTownTravelError Error)
+{
+    FFableTownTravelEvent Event;
+    if (TownLocalEventSequence >= FableTownTravel::MaxSafeSequence)
+    {
+        return;
+    }
+    Event.Sequence = ++TownLocalEventSequence;
+    Event.Kind = Kind;
+    Event.RequestId = TownPrepared.RequestId;
+    Event.TransactionId = TownPrepared.TransactionId;
+    Event.Generation = TownPrepared.Generation;
+    Event.State = EFableTownTravelState::Committed;
+    Event.Error = Error;
+    Event.ServerTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0;
+    Event.bAuthority = false;
+    TownProgressEvents.Broadcast(Event);
+}
+
+/** ローカルleaseの寿命をcontrollerと同じにする。 */
+void AFablePlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (bTownMoveInputHeld)
+    {
+        SetIgnoreMoveInput(false);
+        bTownMoveInputHeld = false;
+    }
+    ReleaseTownPendingGeometry(true);
+    if (auto* Streaming = GetWorld() ? GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>() : nullptr)
+    {
+        if (TownPresenceLease.IsValid())
+        {
+            Streaming->ReleaseGeometry(TownPresenceLease);
+        }
+    }
+    Super::EndPlay(EndPlayReason);
 }

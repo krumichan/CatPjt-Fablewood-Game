@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FableRPGTypes.h"
+#include "FableTownTravelTypes.h"
 #include "Engine/NetSerialization.h"
 #include "GameFramework/Character.h"
 #include "TimerManager.h"
@@ -241,6 +242,25 @@ public:
 
     /** 서버에서 안전 복귀 위치와 회전·자원 회복 여부를 설정한다. */
     void SetCheckpoint(const FVector& Location, const FRotator& Rotation, bool bRestore = true);
+
+    /** 이동 직전에만 이동 데이터와 base를 캡처한다. */
+    bool CaptureTownMovementState(FFableTownMovementRollbackSnapshot& OutSnapshot) const;
+
+    /** fresh floor와 실제 캡슐이 검증된 지점에 잠정 배치한다. */
+    bool TryPlaceAtGroundedTownAnchor(const FFableTownAnchorRef& Target, const FTransform& ServerCandidate,
+                                      FFableTownPlacementEvidence& OutEvidence);
+
+    /** 실패 시 전투 결과를 덮어쓰지 않고 이동 데이터만 복원한다. */
+    bool RestoreTownMovementState(const FFableTownMovementRollbackSnapshot& Snapshot);
+
+    /** cooldown·shield·발사체를 변경하지 않고 안전 위치만 확정한다. */
+    bool CommitSafeTownCheckpointAtCurrentPosition(const FFableTownAnchorRef& Anchor, const FRotator& SafeRotation);
+
+    /** 정상 관찰용 절대 전투 시각을 읽는다. */
+    FFableTownCombatState GetTownCombatState() const;
+
+    /** 현재 도착 지점의 authored support를 새 질의로 검사한다. */
+    bool IsGroundedAtCurrentTownAnchor(const FFableTownAnchorRef& Anchor) const;
 
     /** 전투에 참가하지 않은 마을 캐릭터만 본인의 확정 체크포인트로 구조한다. */
     bool TryRecoverIdleTownAtCheckpoint();
@@ -496,6 +516,11 @@ private:
     void PerformDodge();
 
     friend class AFablePartyEncounter;
+#if WITH_DEV_AUTOMATION_TESTS
+    friend struct FFableTownTravelTestAccess;
+#endif
+
+    int64 TownPlacementQuerySequence = 0;
 
     /** 이동 성공이 확정된 현재 위치에서만 전투·부활 지점을 확정한다. */
     void CommitCheckpointAtCurrentPosition(const FRotator& Rotation, bool bRestore);

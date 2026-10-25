@@ -24,6 +24,8 @@
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
 #include "FableTownManager.h"
+#include "FableTownTravelCoordinator.h"
+#include "Misc/ScopeExit.h"
 
 /** AFableGameMode는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 AFableGameMode::AFableGameMode()
@@ -700,6 +702,13 @@ bool AFableGameMode::MovePlayerToCheckpoint(AController* Player, EFableRegion Re
         if (Hero->IsAlive() && bCorrectRegion && FVector::DistSquared2D(Actual, Candidate) <= FMath::Square(150.0f) &&
             FMath::Abs(Actual.Z - Candidate.Z) <= 180.0f)
         {
+            if (!bDungeon)
+            {
+                if (auto* Towns = AFableTownManager::Ensure(GetWorld()))
+                {
+                    Towns->RegisterValidatedPresence(Cast<APlayerController>(Player));
+                }
+            }
             return true;
         }
     }
@@ -1501,6 +1510,17 @@ bool AFableGameMode::StartPreparedExpedition(APlayerController* Requester, FGuid
         Profile->SetNotice(TEXT("원정 공간이 가득 찼습니다. 잠시 후 다시 시도하세요."));
         return false;
     }
+    AFableTownManager* Towns = AFableTownManager::Ensure(GetWorld());
+    UFableTownTravelCoordinator* Travel = Towns ? Towns->GetTravelCoordinator() : nullptr;
+    if (!Travel || !Travel->TryReservePrivateAdmission(Players, Ticket.ExpeditionId))
+    {
+        Profile->SetNotice(TEXT("참가자의 마을 이동 상태를 확인한 뒤 다시 입장하세요."));
+        return false;
+    }
+    ON_SCOPE_EXIT
+    {
+        Travel->ReleasePrivateAdmission(Ticket.ExpeditionId);
+    };
     PendingAdmissions.Add(PartyId);
     AFablePartyEncounter* Encounter = GetWorld()->SpawnActor<AFablePartyEncounter>();
     const bool bPrepared = Encounter && Encounter->InitializeExpedition(Ticket, FVector(0, Slot * 30000, 0));
