@@ -208,6 +208,43 @@ bool UFableTownCatalog::ValidateDefinition(const FFableTownDefinition& Definitio
                 return false;
             }
         }
+
+        // 기존 회랑에는 층을 추정하지 않는다. 경로 안내용 정의만 두 끝의 층을 함께 요구한다. / 旧回廊の階は推測しない。
+        const bool bHasFromFloor = !Connector.FromFloorId.IsNone();
+        const bool bHasToFloor = !Connector.ToFloorId.IsNone();
+        if (bHasFromFloor != bHasToFloor)
+        {
+            OutError = TEXT("invalid-connector-floor-reference");
+            return false;
+        }
+
+        if (bHasFromFloor)
+        {
+            const FFableTownFloorDefinition* FromFloor = Definition.Floors.FindByPredicate(
+                [&Connector](const FFableTownFloorDefinition& Floor)
+                {
+                    return Floor.FloorId == Connector.FromFloorId;
+                });
+            const FFableTownFloorDefinition* ToFloor = Definition.Floors.FindByPredicate(
+                [&Connector](const FFableTownFloorDefinition& Floor)
+                {
+                    return Floor.FloorId == Connector.ToFloorId;
+                });
+            if (!FromFloor || !ToFloor || Connector.FromFloorId == Connector.ToFloorId)
+            {
+                OutError = TEXT("invalid-connector-floor-reference");
+                return false;
+            }
+
+            // 방향의 기준은 실제 첫점과 끝점이다. 마을 안에만 있다는 이유로 다른 층의 끝점을 허용하지 않는다.
+            if (!Contains(FromFloor->LocalBounds, Connector.LocalPoints[0]) ||
+                !Contains(ToFloor->LocalBounds, Connector.LocalPoints.Last()))
+            {
+                OutError = TEXT("invalid-connector-endpoint");
+                return false;
+            }
+        }
+
         ConnectorIds.Add(Connector.ConnectorId);
     }
 

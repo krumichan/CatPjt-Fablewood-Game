@@ -21,7 +21,7 @@ struct FABLEWOOD_API FFableTownFloorDefinition
     FBox LocalBounds = FBox(ForceInit);
 };
 
-/** 연결 경로의 유한 선분 회랑. / 接続経路の有限な線分回廊。 */
+/** 두 층 ID가 비어 있으면 기존 위치 조회 전용 회랑이다. / 両階IDが空なら従来の位置照会専用回廊。 */
 USTRUCT()
 struct FABLEWOOD_API FFableTownConnectorDefinition
 {
@@ -35,6 +35,18 @@ struct FABLEWOOD_API FFableTownConnectorDefinition
 
     UPROPERTY()
     double RadiusCm = 0.0;
+
+    /** 첫 경로점이 속하는 출발층이며 다른 층과 묶어서 명시한다. / 始点の階を終点の階と対で明示する。 */
+    UPROPERTY()
+    FName FromFloorId = NAME_None;
+
+    /** 마지막 경로점이 속하는 도착층이다. / 最後の経路点が属する到着階。 */
+    UPROPERTY()
+    FName ToFloorId = NAME_None;
+
+    /** false이면 점 목록의 처음에서 마지막 방향만 안내한다. / falseなら点列の先頭から末尾だけを案内する。 */
+    UPROPERTY()
+    bool bBidirectional = true;
 };
 
 /** 논리 앵커는 하나 이상의 서버 선택 도착 슬롯을 가진다. / 論理アンカーの到着枠はサーバーが選択する。 */
