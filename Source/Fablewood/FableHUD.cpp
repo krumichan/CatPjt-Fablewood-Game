@@ -1,4 +1,4 @@
-﻿#include "FableHUD.h"
+#include "FableHUD.h"
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
 #include "FableCharacter.h"
@@ -10,6 +10,8 @@
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
 #include "FablePartyManager.h"
+#include "FableTownCatalog.h"
+#include "FableTownNavigation.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
 #include "Engine/Engine.h"
@@ -183,9 +185,6 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableA
 
     // 지역·적·전투 진행에 필요한 값 준비
     const FVector Here = PlayerOwner->GetPawn()->GetActorLocation();
-    const EFableRegion Region = GS.IsInRegion(EFableRegion::Moonwell, Here)    ? EFableRegion::Moonwell
-                                : GS.IsInRegion(EFableRegion::RootRuins, Here) ? EFableRegion::RootRuins
-                                                                               : EFableRegion::Village;
     const AFablePlayerController* PC = Cast<AFablePlayerController>(PlayerOwner);
     FVector PrimaryTarget;
     FString PrimaryLabel;
@@ -219,96 +218,8 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableA
         return PrimaryLabel;
     }
 
-    // 퀘스트와 이야기 진행에 필요한 값 준비
-    const EFableQuestId Quest = PC ? PC->GetSelectedQuestId() : EFableQuestId::Story;
-    FVector Destination = FableRPG::BoardLocation();
-    FString Label = TEXT("안내인 로완");
-    bool bInteract = true, bSeek = false;
-
-    // 생존 상태와 부활 진행 처리
-    if (Region != EFableRegion::Village)
-    {
-        Destination = GS.ToWorld(Region, FableRPG::RegionReturnPortal(Region));
-        Label = TEXT("마을 귀환 포털");
-        if (GS && GS->AdventureStage != EFableAdventureStage::Cleared)
-        {
-            bSeek = true;
-            if (Region == EFableRegion::Moonwell && GS->AdventureStage == EFableAdventureStage::Dungeon &&
-                GS->ActiveSealIndex >= 0 && GS->ActiveSealIndex < 3)
-            {
-                Destination = GS.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(GS->ActiveSealIndex));
-                Label = FString::Printf(TEXT("봉인 %d"), GS->ActiveSealIndex + 1);
-                if (GS->RequiredEnemies > 0 && GS->DefeatedEnemies >= GS->RequiredEnemies)
-                {
-                    bSeek = false;
-                }
-                else
-                {
-                    bInteract = false;
-                }
-            }
-        }
-    }
-    else if (State->GetQuestStage(Quest) == EFableQuestStage::Ready)
-    {
-        Label = TEXT("로완에게 선택 의뢰 보고");
-    }
-    else if (State->ForestQuest == EFableQuestStage::Active)
-    {
-        bSeek = true;
-    }
-    else if ((Quest == EFableQuestId::Moonwell && State->MoonwellQuest == EFableQuestStage::Active) ||
-             (State->MoonwellQuest == EFableQuestStage::Active && State->DungeonQuest != EFableQuestStage::Active))
-    {
-        Destination = FableRPG::PortalLocation();
-        Label = TEXT("포털 · 달빛 수원 선택");
-    }
-    else if (State->DungeonQuest == EFableQuestStage::Active)
-    {
-        Destination = FableRPG::PortalLocation();
-        Label = TEXT("포털 · 뿌리 유적 선택");
-    }
-
-    // 지역·적·전투 진행 처리
-    if (bSeek)
-    {
-        float Best = TNumericLimits<float>::Max();
-        for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
-        {
-            if (!It->IsAlive() || !FableAdventure::SameScope(PlayerOwner, *It) ||
-                !GS.IsInRegion(Region, It->GetActorLocation()))
-            {
-                continue;
-            }
-            const float Distance = FVector::DistSquared2D(Here, It->GetActorLocation());
-            if (Distance < Best)
-            {
-                Best = Distance;
-                Destination = It->GetActorLocation();
-                Label = Region == EFableRegion::Village ? TEXT("숲 수호자") : TEXT("현재 지역의 적");
-                bInteract = false;
-            }
-        }
-    }
-
-    // 위치·방향·거리 계산에 필요한 값 준비
-    FVector Delta = Destination - Here;
-    Delta.Z = 0;
-
-    // 화면 표시와 사용자 안내 조건 검사
-    if (Delta.Size() <= 330)
-    {
-        return Label + (bInteract ? TEXT(" · 가까이 있음 [E]") : TEXT(" · 가까이 있음"));
-    }
-
-    // 위치·방향·거리 계산에 필요한 값 준비
-    const float Angle = FMath::FindDeltaAngleDegrees(PlayerOwner->GetControlRotation().Yaw, Delta.Rotation().Yaw);
-    const TCHAR* Direction = FMath::Abs(Angle) < 25    ? TEXT("앞")
-                             : FMath::Abs(Angle) > 150 ? TEXT("뒤")
-                             : Angle > 0               ? TEXT("오른쪽")
-                                                       : TEXT("왼쪽");
-
-    return FString::Printf(TEXT("%s · %s %.0fm"), *Label, Direction, Delta.Size() / 100);
+    // 목적지 선택과 실패 사유는 controller의 현재 마을·층 조회 결과를 그대로 사용한다.
+    return TEXT("현재 추적 중인 목적지가 없습니다");
 }
 
 /** 월드 안내 UI를 현재 상태에 맞게 그린다. */
@@ -326,10 +237,10 @@ void AFableHUD::DrawWorldLabels(float S)
     {
         return;
     }
-    const FVector Locations[] = {FableRPG::BoardLocation(),
-                                 FableRPG::ForgeLocation(),
-                                 FableRPG::MerchantLocation(),
-                                 FableRPG::PortalLocation(),
+    const FVector Locations[] = {FVector::ZeroVector,
+                                 FVector::ZeroVector,
+                                 FVector::ZeroVector,
+                                 FVector::ZeroVector,
                                  FableRPG::RegionReturnPortal(EFableRegion::RootRuins),
                                  FableRPG::RegionReturnPortal(EFableRegion::Moonwell),
                                  FableRPG::MoonSealLocation(0),
@@ -342,6 +253,9 @@ void AFableHUD::DrawWorldLabels(float S)
                             TEXT("뿌리 유적 / 달빛 수원"), TEXT("원정 완료 후 이용"),  TEXT("원정 완료 후 이용"),
                             TEXT("적 처치 후 E 정화"),     TEXT("적 처치 후 E 정화"),  TEXT("적 처치 후 E 정화")};
     const FVector Here = PlayerOwner->GetPawn()->GetActorLocation();
+    const UFableTownCatalog* Catalog = FableTownNavigation::CatalogFor(PlayerOwner);
+    const EFableTownServiceId Services[] = {EFableTownServiceId::QuestGuide, EFableTownServiceId::Workshop,
+                                            EFableTownServiceId::Merchant, EFableTownServiceId::ExpeditionPortal};
     const AFablePlayerState* LabelState = PlayerOwner->GetPlayerState<AFablePlayerState>();
     // Test the entire label rectangle against the two fixed side cards.
     const auto OverlapsSideCard = [this, S](const FVector2D& Screen, float HalfWidth)
@@ -360,7 +274,27 @@ void AFableHUD::DrawWorldLabels(float S)
         const EFableRegion LabelRegion = Index < 4    ? EFableRegion::Village
                                          : Index == 4 ? EFableRegion::RootRuins
                                                       : EFableRegion::Moonwell;
-        const FVector WorldLocation = GS.ToWorld(LabelRegion, Locations[Index]);
+        FVector WorldLocation;
+        if (Index < 4)
+        {
+            FFableTownServiceDescriptor Service;
+            if (FableTownNavigation::ResolveService(Catalog, Here, Services[Index], Service) !=
+                EFableTownNavigationStatus::Ready)
+            {
+                continue;
+            }
+
+            WorldLocation = Service.WorldLocation;
+        }
+        else
+        {
+            if (!GS.IsInRegion(LabelRegion, Here))
+            {
+                continue;
+            }
+
+            WorldLocation = GS.ToWorld(LabelRegion, Locations[Index]);
+        }
 
         // 위치·방향·거리 계산 처리
         if (FVector::DistSquared2D(Here, WorldLocation) > FMath::Square(1500.0f))
@@ -429,7 +363,13 @@ void AFableHUD::DrawWorldLabels(float S)
     // 퀘스트와 이야기 진행 순회
     for (int32 Index = 0; Index < 5; ++Index)
     {
-        const FVector Location = GS.ToWorld(FableRPG::StoryObjectRegion(Index), FableRPG::StoryObjectLocation(Index));
+        const EFableRegion ObjectRegion = FableRPG::StoryObjectRegion(Index);
+        const FVector Location = GS.ToWorld(ObjectRegion, FableRPG::StoryObjectLocation(Index));
+        if ((ObjectRegion == EFableRegion::Village && !FableTownNavigation::IsSameFloor(Catalog, Here, Location)) ||
+            (ObjectRegion != EFableRegion::Village && !GS.IsInRegion(ObjectRegion, Here)))
+        {
+            continue;
+        }
 
         // 위치·방향·거리 계산 처리
         if (FVector::DistSquared2D(Here, Location) > FMath::Square(1500.f))
@@ -507,14 +447,65 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     const EFableRegion Region = GS.IsInRegion(EFableRegion::Moonwell, HereWorld)    ? EFableRegion::Moonwell
                                 : GS.IsInRegion(EFableRegion::RootRuins, HereWorld) ? EFableRegion::RootRuins
                                                                                     : EFableRegion::Village;
-    // 이동하는 표식만 원본 좌표로 한 번 되돌리고 고정 표식과 함께 그린다.
-    const FVector Here = GS.ToCanonical(Region, HereWorld);
-    const FVector Center = Region == EFableRegion::Village ? FVector(0, 500, 0) : FableRPG::RegionCenter(Region);
-    const float Extent = Region == EFableRegion::Village ? 3000.f : 3700.f;
+    // 마을 지도는 현재 층의 로컬 범위를 사용하고 원정 지도는 기존 실행 원점을 사용한다.
+    const UFableTownCatalog* Catalog = FableTownNavigation::CatalogFor(PC);
+    FFableTownLocationContext Physical;
+    const FFableTownDefinition* Definition = nullptr;
+    const FFableTownFloorDefinition* Floor = nullptr;
+    if (Region == EFableRegion::Village)
+    {
+        if (!Catalog || !Catalog->ResolveLocation(HereWorld, Physical, true) || !Physical.ConnectorId.IsNone())
+        {
+            return;
+        }
+
+        Definition = Catalog->FindTown(Physical.TownId);
+        Floor = Definition ? Definition->Floors.FindByPredicate(
+                                 [&Physical](const FFableTownFloorDefinition& Candidate)
+                                 {
+                                     return Candidate.FloorId == Physical.FloorId;
+                                 })
+                           : nullptr;
+        if (!Floor)
+        {
+            return;
+        }
+    }
+
+    const auto MapPosition = [Definition, &GS, Region](const FVector& WorldPosition)
+    {
+        return Definition ? Definition->LocalToWorld.InverseTransformPosition(WorldPosition)
+                          : GS.ToCanonical(Region, WorldPosition);
+    };
+    const FVector Here = MapPosition(HereWorld);
+    const FVector Center = Floor ? Floor->LocalBounds.GetCenter() : FableRPG::RegionCenter(Region);
+    const float Extent =
+        Floor ? float(FMath::Max(Floor->LocalBounds.GetExtent().X, Floor->LocalBounds.GetExtent().Y)) : 3700.f;
+    FString MapTitle = FableRPG::RegionName(Region);
+    if (Definition)
+    {
+        switch (Definition->TownId)
+        {
+        case EFableTownId::Sunbrook:
+            MapTitle = TEXT("햇살 시내 마을");
+            break;
+        case EFableTownId::Starbough:
+            MapTitle = TEXT("별가지 마을");
+            break;
+        case EFableTownId::Snowbloom:
+            MapTitle = TEXT("눈꽃 마을");
+            break;
+        case EFableTownId::Eldergrove:
+            MapTitle = TEXT("고목 숲 마을");
+            break;
+        default:
+            break;
+        }
+    }
     const float X = Canvas->ClipX - 184 * S, Y = 153 * S, Width = 170 * S;
     const float MapX = X + 8 * S, MapY = Y + 28 * S, MapW = 154 * S, MapH = 128 * S;
     DrawRect(Ink, X, Y, Width, 184 * S);
-    DrawFitted(FableRPG::RegionName(Region) + TEXT(" · 지도"), Cream, X + 8 * S, Y + 5 * S, 154 * S, .51f * S);
+    DrawFitted(MapTitle + TEXT(" · 현재 층"), Cream, X + 8 * S, Y + 5 * S, 154 * S, .51f * S);
     DrawRect(FLinearColor(.07f, .16f, .12f), MapX, MapY, MapW, MapH);
 
     // 화면 표시와 사용자 안내 순회
@@ -536,11 +527,13 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     };
     FVector Objective;
     FString ObjectiveLabel;
-    EFableRegion ObjectiveRegion = EFableRegion::Village;
-    const bool bHasObjective = State->GetStoryTarget(Objective, ObjectiveLabel, &ObjectiveRegion);
+    // 화살표·거리 문구와 같은 목적지를 쓰고 다른 층의 표식은 그리지 않는다.
+    const bool bHasObjective =
+        PC->GetNavigationTarget(Objective, ObjectiveLabel) &&
+        (Region != EFableRegion::Village || FableTownNavigation::IsSameFloor(Catalog, HereWorld, Objective));
     if (bHasObjective)
     {
-        Objective = GS.ToCanonical(Region, GS.ToWorld(ObjectiveRegion, Objective));
+        Objective = MapPosition(Objective);
     }
     const FVector2D Self = Point(Here);
     const FVector2D ObjectivePoint = bHasObjective ? Point(Objective) : FVector2D::ZeroVector;
@@ -566,10 +559,19 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     // 지역·적·전투 진행 처리
     if (Region == EFableRegion::Village)
     {
-        Marker(FableRPG::BoardLocation(), TEXT("로"), Mint);
-        Marker(FableRPG::ForgeLocation(), TEXT("브"), Mint);
-        Marker(FableRPG::MerchantLocation(), TEXT("미"), Mint);
-        Marker(FableRPG::PortalLocation(), TEXT("문"), FLinearColor(.67f, .69f, 1));
+        const EFableTownServiceId Roles[] = {EFableTownServiceId::QuestGuide, EFableTownServiceId::Workshop,
+                                             EFableTownServiceId::Merchant, EFableTownServiceId::ExpeditionPortal};
+        const TCHAR* Labels[] = {TEXT("로"), TEXT("브"), TEXT("미"), TEXT("문")};
+        for (int32 Index = 0; Index < UE_ARRAY_COUNT(Roles); ++Index)
+        {
+            FFableTownServiceDescriptor Service;
+            if (FableTownNavigation::ResolveService(Catalog, HereWorld, Roles[Index], Service) ==
+                EFableTownNavigationStatus::Ready)
+            {
+                Marker(MapPosition(Service.WorldLocation), Labels[Index],
+                       Roles[Index] == EFableTownServiceId::ExpeditionPortal ? FLinearColor(.67f, .69f, 1) : Mint);
+            }
+        }
     }
     else
     {
@@ -591,7 +593,11 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     {
         if (FableRPG::StoryObjectRegion(Index) == Region && State->CanUseStoryObject(Index))
         {
-            Marker(FableRPG::StoryObjectLocation(Index), TEXT(""), Gold * .65f);
+            const FVector ObjectWorld = GS.ToWorld(Region, FableRPG::StoryObjectLocation(Index));
+            if (Region != EFableRegion::Village || FableTownNavigation::IsSameFloor(Catalog, HereWorld, ObjectWorld))
+            {
+                Marker(MapPosition(ObjectWorld), TEXT(""), Gold * .65f);
+            }
         }
     }
 
@@ -617,9 +623,11 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
             {
                 if (const AFableCharacter* Ally = Cast<AFableCharacter>(Member->GetPawn()))
                 {
-                    if (GS.IsInRegion(Region, Ally->GetActorLocation()))
+                    if (GS.IsInRegion(Region, Ally->GetActorLocation()) &&
+                        (Region != EFableRegion::Village ||
+                         FableTownNavigation::IsSameFloor(Catalog, HereWorld, Ally->GetActorLocation())))
                     {
-                        Marker(GS.ToCanonical(Region, Ally->GetActorLocation()), TEXT(""),
+                        Marker(MapPosition(Ally->GetActorLocation()), TEXT(""),
                                Ally->IsAlive() ? FLinearColor(.43f, .74f, 1) : Warning);
                     }
                 }
@@ -628,7 +636,10 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     }
 
     // 화면 표시와 사용자 안내에 필요한 값 준비
-    const float Yaw = FMath::DegreesToRadians(PC->GetPawn()->GetActorRotation().Yaw);
+    const FVector WorldForward = PC->GetPawn()->GetActorForwardVector();
+    const FVector MapForward =
+        Definition ? Definition->LocalToWorld.InverseTransformVectorNoScale(WorldForward) : WorldForward;
+    const float Yaw = FMath::DegreesToRadians(MapForward.Rotation().Yaw);
     const FVector2D Forward(FMath::Cos(Yaw), -FMath::Sin(Yaw)), Side(-Forward.Y, Forward.X);
     const FVector2D Tip = Self + Forward * 7 * S, Left = Self - Forward * 4 * S + Side * 4 * S,
                     Right = Self - Forward * 4 * S - Side * 4 * S;

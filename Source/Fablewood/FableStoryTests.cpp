@@ -717,4 +717,73 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
 
     return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableStoryTownNavigationTest, "Fablewood.Native.Story.CurrentTownNavigationContext",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 실제 소유 pawn의 위치로 안내·포털을 해석하고 미채택 위치에는 오래된 목적지를 남기지 않는다. */
+bool FFableStoryTownNavigationTest::RunTest(const FString& Parameters)
+{
+    FStoryTestWorld Fixture(true);
+    AFablePlayerState* State = Fixture.MakeState();
+    APlayerController* Controller = Fixture.World ? Fixture.World->SpawnActor<APlayerController>() : nullptr;
+    AFableGameState* Adventure = Fixture.World ? Fixture.World->SpawnActor<AFableGameState>() : nullptr;
+    AFableGameMode* Mode = Fixture.World ? Fixture.World->SpawnActor<AFableGameMode>() : nullptr;
+    FActorSpawnParameters Spawn;
+    Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AFableCharacter* Hero = Fixture.World ? Fixture.World->SpawnActor<AFableCharacter>(FVector(-2300, -2300, 110),
+                                                                                       FRotator::ZeroRotator, Spawn)
+                                          : nullptr;
+    if (!TestNotNull(TEXT("Story navigation profile"), State) ||
+        !TestNotNull(TEXT("Story navigation controller"), Controller) ||
+        !TestNotNull(TEXT("Story navigation game state"), Adventure) ||
+        !TestNotNull(TEXT("Story navigation mode"), Mode) || !TestNotNull(TEXT("Story navigation pawn"), Hero))
+    {
+        return false;
+    }
+
+    Fixture.World->CopyGameState(Mode, Adventure);
+    Controller->SetPlayerState(State);
+    Controller->Possess(Hero);
+    State->SetOwner(Controller);
+    Fixture.World->AddController(Controller);
+    Fixture.RegisteredController = Controller;
+    State->StoryChapter = 0;
+    const int32 GoldBefore = State->Gold;
+    const int32 OreBefore = State->Ore;
+    FVector Target;
+    FString Label;
+    EFableRegion Region = EFableRegion::Moonwell;
+
+    TestTrue(TEXT("Real story handler resolves the current Legacy guide beyond interaction range"),
+             State->GetStoryTarget(Target, Label, &Region) && Target.Equals(FableRPG::BoardLocation()) &&
+                 Region == EFableRegion::Village);
+    State->StoryChapter = 3;
+    State->StoryObjectMask = 15;
+    State->DungeonQuest = EFableQuestStage::Active;
+    TestTrue(TEXT("Active root story resolves the current town expedition anchor"),
+             State->GetStoryTarget(Target, Label, &Region) && Target.Equals(FableRPG::PortalLocation()) &&
+                 Region == EFableRegion::Village);
+
+    // 합성 위치 변경은 실제 새 마을 플레이나 서버 이동 허가를 뜻하지 않는다.
+    Hero->SetActorLocation(FVector(0, -77000, 104), false, nullptr, ETeleportType::TeleportPhysics);
+    State->StoryChapter = 0;
+    Target = FableRPG::BoardLocation();
+    TestFalse(TEXT("Real story handler declines unadopted town navigation"),
+              State->GetStoryTarget(Target, Label, &Region));
+    TestTrue(TEXT("Unavailable result clears stale target and explains the unavailable town"),
+             Target.IsZero() && !Label.IsEmpty());
+    State->StoryChapter = 1;
+    State->StoryObjectMask = 0;
+    TestFalse(TEXT("Legacy collection points are not copied into a different town"),
+              State->GetStoryTarget(Target, Label, &Region));
+    TestTrue(TEXT("Queries preserve money and memory-only persistence"),
+             State->Gold == GoldBefore && State->Ore == OreBefore && FFableStoryTestAccess::IsMemoryOnly(State));
+
+    Controller->UnPossess();
+    Target = FableRPG::PortalLocation();
+    TestFalse(TEXT("Missing current pawn has no default village target"),
+              State->GetStoryTarget(Target, Label, &Region));
+    TestTrue(TEXT("Missing pawn clears the previous output"), Target.IsZero());
+    return true;
+}
 #endif

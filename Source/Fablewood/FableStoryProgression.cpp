@@ -3,6 +3,8 @@
 #include "FableEnemy.h"
 #include "FableGameState.h"
 #include "FableAdventure.h"
+#include "FableTownCatalog.h"
+#include "FableTownNavigation.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -286,64 +288,68 @@ FString AFablePlayerState::GetStoryRewardText() const
                            GoldReward, OreReward);
 }
 
-/** 이야기 목표의 위치 값을 반환한다. */
+/** 마을 목표는 현재 마을의 월드 좌표, 원정 목표는 해당 원정의 정본 좌표로 반환한다. */
 bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion) const
 {
-    // 화면 표시와 사용자 안내 처리
-    OutLocation = FableRPG::BoardLocation();
-    OutLabel = TEXT("안내인 로완");
+    OutLocation = FVector::ZeroVector;
+    OutLabel.Empty();
     if (OutRegion)
     {
         *OutRegion = EFableRegion::Village;
     }
 
-    // 퀘스트와 이야기 진행 조건 검사
-    if (!bProfileLoaded || StoryChapter < 0 || StoryChapter >= 5)
+    // 불완전한 프로필이나 소유 pawn을 이전 마을 좌표로 대체하지 않는다. / 未準備状態を旧座標に置換しない。
+    const AFableCharacter* Hero = StoryHero(this);
+    const auto View = FableAdventure::For(this);
+    if (!bProfileLoaded || StoryChapter < 0 || StoryChapter >= 5 || !Hero || !View)
     {
         return false;
     }
 
-    // 지역·적·전투 진행에 필요한 값 준비
-    const AFableCharacter* Hero = StoryHero(this);
-    const auto View = FableAdventure::For(this);
-    if (!View)
-    {
-        return false;
-    }
-    const FVector Position = Hero ? Hero->GetActorLocation() : FableRPG::BoardLocation();
+    const FVector Position = Hero->GetActorLocation();
+    const UFableTownCatalog* Catalog = FableTownNavigation::CatalogFor(this);
+    FFableTownLocationContext Physical;
+    const bool bInPreparedTown = Catalog && Catalog->ResolveLocation(Position, Physical, true);
     const EFableRegion Current = View.IsInRegion(EFableRegion::Moonwell, Position)    ? EFableRegion::Moonwell
                                  : View.IsInRegion(EFableRegion::RootRuins, Position) ? EFableRegion::RootRuins
                                                                                       : EFableRegion::Village;
     EFableRegion Destination = EFableRegion::Village;
+    bool bVillageStoryObject = false;
+    bool bVillageEnemy = false;
+    bool bEnemyFound = false;
+    OutLabel = TEXT("안내인 로완");
+
+    // 적 목표는 같은 실행 범위와 현재 마을·층 안에서만 선택한다. / 同じ実行範囲と現在の村・階だけを選ぶ。
     const auto SeekEnemy = [&](EFableRegion Region)
     {
-        // 지역·적·전투 진행 처리
         Destination = Region;
-        OutLocation = Region == EFableRegion::Village ? FVector(0, 650, 0) : FableRPG::RegionCenter(Region);
+        bVillageEnemy = Region == EFableRegion::Village;
+        OutLocation = Region == EFableRegion::Village ? FVector::ZeroVector : FableRPG::RegionCenter(Region);
         OutLabel = Region == EFableRegion::Village ? TEXT("숲의 수호자") : TEXT("원정의 수호자");
         float Nearest = TNumericLimits<float>::Max();
-
-        // 지역·적·전투 진행 처리
         if (GetWorld())
         {
             for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
             {
                 if (!It->IsAlive() || !FableAdventure::SameScope(this, *It) ||
-                    !View.IsInRegion(Region, It->GetActorLocation()))
+                    !View.IsInRegion(Region, It->GetActorLocation()) ||
+                    (bVillageEnemy && !FableTownNavigation::IsSameFloor(Catalog, Position, It->GetActorLocation())))
                 {
                     continue;
                 }
+
                 const float Distance = FVector::DistSquared2D(Position, It->GetActorLocation());
                 if (Distance < Nearest)
                 {
                     Nearest = Distance;
                     OutLocation = View.ToCanonical(Region, It->GetActorLocation());
+                    bEnemyFound = true;
                 }
             }
         }
     };
 
-    // 퀘스트와 이야기 진행 처리
+    // 기존 이야기 진행과 원정의 정본 좌표 계약은 보존한다. / 物語進行と遠征の座標契約は維持する。
     if (!IsStoryReady())
     {
         if (StoryChapter == 1)
@@ -354,6 +360,7 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, 
                 {
                     OutLocation = FableRPG::StoryObjectLocation(Index);
                     OutLabel = FableRPG::StoryObjectName(Index);
+                    bVillageStoryObject = true;
                     break;
                 }
             }
@@ -399,27 +406,58 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, 
     }
 
     EFableRegion TargetRegion = Destination;
+    EFableTownServiceId TownService = EFableTownServiceId::QuestGuide;
+    bool bResolveTownService = Current == EFableRegion::Village && Destination == EFableRegion::Village &&
+                               !bVillageStoryObject && !bVillageEnemy;
 
-    // 지역·적·전투 진행 처리
+    // 마을에서는 논리 포털을 찾고 원정 안에서는 해당 실행의 귀환 포털을 사용한다.
     if (Current != Destination)
     {
+        TargetRegion = Current;
         if (Current == EFableRegion::Village)
         {
-            TargetRegion = EFableRegion::Village;
-            OutLocation = FableRPG::PortalLocation();
+            TownService = EFableTownServiceId::ExpeditionPortal;
+            bResolveTownService = true;
             OutLabel = FableRPG::RegionName(Destination) + TEXT(" 입장 차원문");
         }
         else
         {
-            TargetRegion = Current;
             OutLocation = FableRPG::RegionReturnPortal(Current);
             OutLabel = TEXT("마을 귀환 차원문");
         }
+    }
+
+    if (bResolveTownService)
+    {
+        FFableTownServiceDescriptor Service;
+        const EFableTownNavigationStatus Status =
+            FableTownNavigation::ResolveService(Catalog, Position, TownService, Service);
+        if (Status != EFableTownNavigationStatus::Ready)
+        {
+            OutLocation = FVector::ZeroVector;
+            OutLabel = FableTownNavigation::UnavailableText(Status);
+            return false;
+        }
+
+        OutLocation = Service.WorldLocation;
+    }
+    else if (Current == EFableRegion::Village && Destination == EFableRegion::Village &&
+             (!bInPreparedTown || Physical.TownId != EFableTownId::LegacyVillage ||
+              (bVillageStoryObject && !FableTownNavigation::IsSameFloor(Catalog, Position, OutLocation)) ||
+              (bVillageEnemy && !bEnemyFound)))
+    {
+        // 기존 숲 오브젝트를 미채택 새 마을에 복제하거나 빈 전투 위치로 안내하지 않는다.
+        OutLocation = FVector::ZeroVector;
+        OutLabel = bVillageEnemy && bInPreparedTown && Physical.TownId == EFableTownId::LegacyVillage
+                       ? TEXT("현재 층의 숲 수호자를 기다리는 중")
+                       : TEXT("현재 마을에는 이 이야기 목적지가 준비되지 않았습니다");
+        return false;
     }
 
     if (OutRegion)
     {
         *OutRegion = TargetRegion;
     }
+
     return true;
 }

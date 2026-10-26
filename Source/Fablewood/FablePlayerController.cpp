@@ -13,6 +13,7 @@
 #include "FablePartyManager.h"
 #include "FableTownManager.h"
 #include "FableTownCatalog.h"
+#include "FableTownNavigation.h"
 #include "FableTownTravelCoordinator.h"
 #include "FableTownStreamingSubsystem.h"
 
@@ -2931,6 +2932,7 @@ int32 AFablePlayerController::GetNearbyStoryObjectIndex() const
 bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& OutLabel) const
 {
     // 화면 표시와 사용자 안내 처리
+    OutLocation = FVector::ZeroVector;
     OutLabel.Empty();
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
@@ -2963,6 +2965,18 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
 
     // 생존 상태와 부활 진행에 필요한 값 준비
     const EFableRegion Region = PawnRegion(this);
+    const UFableTownCatalog* Catalog = FableTownNavigation::CatalogFor(this);
+    FFableTownLocationContext Physical;
+    if (Region == EFableRegion::Village &&
+        (!Catalog || !Catalog->ResolveLocation(Hero->GetActorLocation(), Physical, true)))
+    {
+        // 위치가 불명확하거나 지형이 미준비이면 이전 마을 안내로 돌아가지 않는다.
+        FFableTownServiceDescriptor UnusedService;
+        OutLabel = FableTownNavigation::UnavailableText(FableTownNavigation::ResolveService(
+            Catalog, Hero->GetActorLocation(), EFableTownServiceId::QuestGuide, UnusedService));
+        return false;
+    }
+
     float Nearest = TNumericLimits<float>::Max();
     const AFableCharacter* DownedAlly = nullptr;
     const AFablePartyManager* PartyManager = AFablePartyManager::Find(GetWorld());
@@ -2975,8 +2989,10 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
             if (const AFableCharacter* Ally = Member ? Cast<AFableCharacter>(Member->GetPawn()) : nullptr)
             {
                 if (Ally != Hero && Ally->IsDowned() && FableAdventure::SameScope(this, Ally) &&
-                    Adventure.IsInRegion(Region, Ally->GetActorLocation()) && PartyManager &&
-                    PartyManager->ArePartyMembers(State, Cast<AFablePlayerState>(Member)))
+                    Adventure.IsInRegion(Region, Ally->GetActorLocation()) &&
+                    (Region != EFableRegion::Village ||
+                     FableTownNavigation::IsSameFloor(Catalog, Hero->GetActorLocation(), Ally->GetActorLocation())) &&
+                    PartyManager && PartyManager->ArePartyMembers(State, Cast<AFablePlayerState>(Member)))
                 {
                     const float Distance = FVector::DistSquared2D(Hero->GetActorLocation(), Ally->GetActorLocation());
                     if (Distance < Nearest)
@@ -3015,7 +3031,9 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         for (TActorIterator<AFableEnemy> It(GetWorld()); It; ++It)
         {
             if (It->IsAlive() && FableAdventure::SameScope(this, *It) &&
-                Adventure.IsInRegion(Region, It->GetActorLocation()))
+                Adventure.IsInRegion(Region, It->GetActorLocation()) &&
+                (Region != EFableRegion::Village ||
+                 FableTownNavigation::IsSameFloor(Catalog, Hero->GetActorLocation(), It->GetActorLocation())))
             {
                 const float Distance = FVector::DistSquared2D(Hero->GetActorLocation(), It->GetActorLocation());
                 if (Distance < Nearest)
@@ -3052,7 +3070,32 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         return true;
     }
 
-    OutLabel.Empty();
+    // 이야기의 안내 불가 이유를 보존해 고정 좌표 fallback을 막는다.
+    if (!OutLabel.IsEmpty())
+    {
+        return false;
+    }
+
+    // 메인 이야기 완료 뒤에도 선택 의뢰의 서비스는 현재 마을·층에서 찾는다.
+    if (Region == EFableRegion::Village)
+    {
+        const EFableQuestId Quest = GetSelectedQuestId();
+        const bool bPortal = (Quest == EFableQuestId::RootRuins || Quest == EFableQuestId::Moonwell) &&
+                             State->GetQuestStage(Quest) == EFableQuestStage::Active;
+        FFableTownServiceDescriptor Service;
+        const EFableTownNavigationStatus Status = FableTownNavigation::ResolveService(
+            Catalog, Hero->GetActorLocation(),
+            bPortal ? EFableTownServiceId::ExpeditionPortal : EFableTownServiceId::QuestGuide, Service);
+        if (Status != EFableTownNavigationStatus::Ready)
+        {
+            OutLabel = FableTownNavigation::UnavailableText(Status);
+            return false;
+        }
+
+        OutLocation = Service.WorldLocation;
+        OutLabel = bPortal ? TEXT("선택 의뢰의 원정 차원문") : TEXT("안내인 로완 · 의뢰 수락 / 보고");
+        return true;
+    }
 
     return false;
 }
