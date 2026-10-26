@@ -5,6 +5,7 @@
 #include "FableGameInstance.h"
 #include "FableOnlineFlowSubsystem.h"
 #include "FableOnlineServicesValidation.h"
+#include "FableOnlineValidationDriver.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "HAL/PlatformApplicationMisc.h"
@@ -1658,10 +1659,19 @@ void AFablePlayerController::ServerSelectPartyExpedition_Implementation(FGuid Re
 void AFablePlayerController::ServerSetPartyReady_Implementation(FGuid RequestId, FGuid PartyId,
                                                                 int32 PreparationRevision, bool bReady)
 {
+    auto* Observation = GetGameInstance() ? GetGameInstance()->GetSubsystem<UFableOnlineValidationDriver>() : nullptr;
+    const int32 ObservationIndex =
+        Observation ? Observation->BeginPartyCancellationObservation(this, RequestId, TEXT("ready"), PartyId,
+                                                                     PreparationRevision, bReady)
+                    : INDEX_NONE;
     AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const int32 NoticeBefore = Profile ? Profile->NoticeSerial : INDEX_NONE;
     const bool bSuccess = Manager && Manager->SetExpeditionReady(this, PartyId, PreparationRevision, bReady);
+    if (Observation)
+    {
+        Observation->EndPartyCancellationObservation(ObservationIndex, bSuccess);
+    }
     ReplyPartyPreparation(RequestId, bSuccess, NoticeBefore);
 }
 
@@ -1669,10 +1679,19 @@ void AFablePlayerController::ServerSetPartyReady_Implementation(FGuid RequestId,
 void AFablePlayerController::ServerEnterPreparedParty_Implementation(FGuid RequestId, FGuid PartyId,
                                                                      int32 PreparationRevision)
 {
+    auto* Observation = GetGameInstance() ? GetGameInstance()->GetSubsystem<UFableOnlineValidationDriver>() : nullptr;
+    const int32 ObservationIndex =
+        Observation ? Observation->BeginPartyCancellationObservation(this, RequestId, TEXT("entry"), PartyId,
+                                                                     PreparationRevision, false)
+                    : INDEX_NONE;
     AFablePartyManager* Manager = AFablePartyManager::Find(GetWorld());
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const int32 NoticeBefore = Profile ? Profile->NoticeSerial : INDEX_NONE;
     const bool bSuccess = Manager && Manager->StartExpedition(this, PartyId, PreparationRevision);
+    if (Observation)
+    {
+        Observation->EndPartyCancellationObservation(ObservationIndex, bSuccess);
+    }
     ReplyPartyPreparation(RequestId, bSuccess, NoticeBefore);
 }
 
@@ -1732,6 +1751,13 @@ void AFablePlayerController::ClientPartyPreparationResult_Implementation(FGuid R
     if (!PendingPartyRequestId.IsValid() || RequestId != PendingPartyRequestId)
     {
         return;
+    }
+
+    // 현재 요청과 일치한 실제 소유자 응답만 검증 기록에 보존한다. / 現要求と一致した所有者応答だけを保存する。
+    if (auto* Observation =
+            GetGameInstance() ? GetGameInstance()->GetSubsystem<UFableOnlineValidationDriver>() : nullptr)
+    {
+        Observation->RecordPartyCancellationReply(this, RequestId, bSuccess, PreparationRevision, Reason);
     }
 
     const bool bEntered = bPendingPartyEntry && bSuccess;

@@ -77,8 +77,14 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
     IFileManager::Get().MakeDirectory(*Directory, true);
     FParse::Value(FCommandLine::Get(), TEXT("FableOnlineValidationScenario="), Scenario);
     FParse::Value(FCommandLine::Get(), TEXT("FableTownTravelScenario="), TownTravelScenario);
+    bPartyReadyCancellation = FParse::Param(FCommandLine::Get(), TEXT("FablePartyReadyCancellation"));
     Ticker = FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateUObject(this, &UFableOnlineValidationDriver::Tick), .1f);
+    if (bPartyReadyCancellation && Scenario != TEXT("party-results"))
+    {
+        Finish(false, TEXT("Party readiness cancellation requires the party-results scenario."));
+        return;
+    }
     if (TownTravelScenario != TEXT("none") &&
         (TownTravelScenario != TEXT("unit2-legacy-anchors") || Scenario != TEXT("party-results")))
     {
@@ -334,6 +340,19 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     J->SetStringField(TEXT("townTravelScenario"), TownTravelScenario);
     J->SetArrayField(TEXT("unit5PartySpatialSamples"), Unit5PartySamples);
     J->SetArrayField(TEXT("unit5DepartureChecks"), Unit5DepartureChecks);
+    if (bPartyReadyCancellation)
+    {
+        auto Cancellation = MakeShared<FJsonObject>();
+        if (PartyCancelReport)
+        {
+            Cancellation->Values = PartyCancelReport->Values;
+        }
+        Cancellation->SetBoolField(TEXT("enabled"), true);
+        Cancellation->SetStringField(TEXT("role"), Role);
+        Cancellation->SetArrayField(TEXT("authorityEvents"), PartyCancelAuthority);
+        Cancellation->SetArrayField(TEXT("clientReplies"), PartyCancelReplies);
+        J->SetObjectField(TEXT("partyReadyCancellation"), Cancellation);
+    }
     if (TownReport)
     {
         J->SetObjectField(TEXT("townTravel"), TownReport);

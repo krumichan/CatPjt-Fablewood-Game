@@ -600,11 +600,19 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
         {
             break;
         }
-        Send(
-            [&]()
-            {
-                PC->UISetPartyReady(true);
-            });
+        if (!bPartyReadyCancellation || PartyCancelStep == 0)
+        {
+            Send(
+                [&]()
+                {
+                    PC->UISetPartyReady(true);
+                });
+        }
+        if (bPartyReadyCancellation && (PartyCancelStep > 0 || AllReady()) &&
+            !TickPartyReadyCancellation(PC, P, *Party, Now))
+        {
+            break;
+        }
         if (AllReady() && !PC->IsPartyPreparationPending())
         {
             ExpeditionReport->SetNumberField(TEXT("preparationRevision"), Party->PreparationRevision);
@@ -633,6 +641,7 @@ bool UFableOnlineValidationDriver::TickExpeditionPreparation(AFablePlayerControl
             ExpeditionReport->SetStringField(TEXT("expeditionId"),
                                              P->ActiveExpeditionId.ToString(EGuidFormats::DigitsWithHyphensLower));
             Mark(TEXT("entry_exact_two_arrived"));
+            RecordPartyCancellationArrival(PC, P);
             Advance(14);
         }
         break;

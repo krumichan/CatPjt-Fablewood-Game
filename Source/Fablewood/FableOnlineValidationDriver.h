@@ -41,7 +41,27 @@ public:
     void SetObservedService(int32 Index, EFableTownServiceId Service);
     void EndServiceObservation(int32 Index);
 
+    /** 준비 RPC의 실제 전후 상태와 요청 ID만 관측한다. / 準備RPCの前後と要求IDだけを観測する。 */
+    int32 BeginPartyCancellationObservation(AFablePlayerController* Player, FGuid RequestId, const TCHAR* Action,
+                                            FGuid PartyId, int32 PreparationRevision, bool bReady);
+    void EndPartyCancellationObservation(int32 Index, bool bSuccess);
+    void RecordPartyCancellationReply(AFablePlayerController* Player, FGuid RequestId, bool bSuccess,
+                                      int32 PreparationRevision, const FString& Notice);
+
 private:
+    /** 明示取消は本人の通常UIだけで行い、既存の入場手順へ戻る。 / 명시 취소는 본인 UI로만 실행한다. */
+    bool TickPartyReadyCancellation(AFablePlayerController* Player, const AFablePlayerState* Profile,
+                                    const FFablePartyRecord& Party, double Now);
+    void RecordPartyCancellationArrival(AFablePlayerController* Player, const AFablePlayerState* Profile);
+    TSharedRef<FJsonObject> PartyCancellationSnapshot(AFablePlayerController* Player) const;
+
+    bool bPartyReadyCancellation = false, bPartyCancelSent = false;
+    int32 PartyCancelStep = 0;
+    double PartyCancelStepAt = 0, PartyCancelLastSentAt = -10;
+    TSharedPtr<FJsonObject> PartyCancelReport;
+    TArray<TSharedPtr<FJsonValue>> PartyCancelAuthority, PartyCancelReplies;
+    TArray<TWeakObjectPtr<AFablePlayerController>> PartyCancelCallers;
+
     /** 현재 UI 길안내와 권한 서버의 공간 판정만 관측한다. / 現在案内とサーバー空間判定の観測のみ。 */
     TSharedRef<FJsonObject> NavigationObservation(const AFablePlayerController* Player) const;
 

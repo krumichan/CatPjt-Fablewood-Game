@@ -7,6 +7,7 @@ param(
     [string]$PackagedClientExecutable,
     [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results','unit4-legacy-services')][string]$Scenario='connectivity',
     [ValidateSet('none','unit2-legacy-anchors')][string]$TownTravelScenario='none',
+    [switch]$PartyReadyCancellation,
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
 )
@@ -17,6 +18,7 @@ if(-not $IsWindows){throw 'Windows and PowerShell 7.4+ are required.'}
 $backendLink=Get-FableBackendLink -BackendRoot $BackendRoot
 function Assert-Online($Condition,[string]$Code){if(-not $Condition){throw [InvalidOperationException]::new('OnlineValidation:'+$Code)}}
 Assert-Online ($TownTravelScenario -ceq 'none' -or $Scenario -ceq 'party-results') 'town_subscenario_requires_results'
+Assert-Online (-not $PartyReadyCancellation -or $Scenario -ceq 'party-results') 'party_ready_cancellation_requires_results'
 if($TownTravelScenario -ceq 'unit2-legacy-anchors' -and -not $PSBoundParameters.ContainsKey('TimeoutSeconds')){$TimeoutSeconds=830}
 function Initialize-OnlineSocketOwnerReader{
     if('FableOnlineValidation.SocketOwners' -as [type]){return}
@@ -208,6 +210,7 @@ function Start-OnlineValidationProcess([string]$Role,[string]$Phase,[string]$Con
     $log=Join-Path $folder ($Role+'.log')
     $arguments.Add('-FableOnlineValidationRole='+$Role);$arguments.Add('-FableOnlineValidationScenario='+$Scenario);$arguments.Add('-FableOnlineValidationDirectory='+(Quote-Online $folder))
     $arguments.Add('-FableTownTravelScenario='+$TownTravelScenario)
+    if($PartyReadyCancellation){$arguments.Add('-FablePartyReadyCancellation')}
     $arguments.Add('-FableOnlineValidationRun='+$runId);$arguments.Add('-abslog='+(Quote-Online $log))
     $arguments.Add('-LogCmds="LogInit off,LogNet off,LogLoad off"');$arguments.Add('-ExecCmds="t.MaxFPS 30,t.IdleWhenNotForeground 0"')
     try{$process=Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ') -WorkingDirectory $(if($Role -cne 'server' -and $PackagedClientExecutable){Split-Path -Parent $exe}else{$script:FableProjectRoot}) -WindowStyle Hidden -PassThru;$null=$process.Handle}catch{throw [InvalidOperationException]::new('OnlineValidation:owned_process_start_failed')}
@@ -1266,6 +1269,7 @@ $summary=[ordered]@{
     scope=@('One PC, loopback only','Normal in-game registration, authentication, movement, potion and leave UI','Existing saves are not uploaded or injected','API reader sessions only inspect the two new accounts','API restart reuses the same database; PostgreSQL is not restarted here')
     visualReviewPerformed=$false;privateContextFolder=$privateFolder;initialBackendStartupPerformed=$false
 }
+if($PartyReadyCancellation){$summary['partyReadyCancellationEnabled']=$true}
 try{
     $backendUri=[uri]$BackendUrl
     Assert-Online ($backendUri.IsAbsoluteUri -and $backendUri.Scheme -ceq 'http' -and $backendUri.Host -ceq '127.0.0.1' -and $backendUri.Port -ge 1024 -and $backendUri.Port -le 65535 -and $backendUri.AbsolutePath -ceq '/' -and -not $backendUri.UserInfo -and -not $backendUri.Query -and -not $backendUri.Fragment) 'backend_url_must_be_loopback_root'
