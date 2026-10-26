@@ -730,7 +730,86 @@ bool UFableOnlineValidationDriver::TickUnit4LegacyServices(AFablePlayerControlle
                          : ServiceStep == 3 ? 4
                          : ServiceStep < 6  ? (First ? 5 : 6)
                                             : (First ? 7 : 8);
-    if (Phase != Wanted || !ServiceSaved(P))
+
+    // Guide 목표만 기존 의뢰 접근과 같게 두며 실제 서버 서비스 반경은 변경하지 않는다.
+    FVector Target = FableRPG::BoardLocation() + FVector(First ? -100 : 100, -120, 100);
+    if (ServiceStep == 0)
+    {
+        Target = FableRPG::BoardLocation() + FVector(First ? -80 : 80, -700, 100);
+    }
+    else if (ServiceStep == 7 || ServiceStep == 8 || ServiceStep == 9)
+    {
+        Target = FableRPG::MerchantLocation() + FVector(First ? -80 : 80, -100, 100);
+    }
+    else if (ServiceStep == 10 || ServiceStep == 11)
+    {
+        Target = FableRPG::ForgeLocation() + FVector(First ? -80 : 80, -100, 100);
+    }
+    else if (ServiceStep == 12)
+    {
+        Target = FableRPG::PortalLocation() + FVector(First ? -80 : 80, -100, 100);
+    }
+
+    // 대기 전에 실제 이동 상태만 기록한다. 진단 값은 서비스 권한이나 저장 상태를 변경하지 않는다.
+    const bool bServiceSaveReady = ServiceSaved(P);
+    const bool bServiceGrounded = Hero->GetCharacterMovement()->IsMovingOnGround();
+    const double ServiceNavigationDistance = FVector::Dist2D(Hero->GetActorLocation(), Target);
+    const double ServiceMovementSpeed = Hero->GetVelocity().Size2D();
+    const bool bServiceNavigationActive = Phase == Wanted && bServiceSaveReady && ServiceStep != 3 && !bServiceSent;
+    auto ServiceMovementDiagnostics = MakeShared<FJsonObject>();
+    ServiceMovementDiagnostics->SetArrayField(TEXT("actualPosition"), ServicePosition(Hero->GetActorLocation()));
+    ServiceMovementDiagnostics->SetArrayField(TEXT("target"), ServicePosition(Target));
+    ServiceMovementDiagnostics->SetNumberField(TEXT("distance2D"), ServiceNavigationDistance);
+    ServiceMovementDiagnostics->SetNumberField(TEXT("speed"), ServiceMovementSpeed);
+    ServiceMovementDiagnostics->SetBoolField(TEXT("grounded"), bServiceGrounded);
+    ServiceMovementDiagnostics->SetBoolField(TEXT("moveInputIgnored"), PC->IsMoveInputIgnored());
+    ServiceMovementDiagnostics->SetBoolField(TEXT("saveReady"), bServiceSaveReady);
+    ServiceMovementDiagnostics->SetNumberField(TEXT("wantedPhase"), Wanted);
+    ServiceMovementDiagnostics->SetNumberField(TEXT("phase"), Phase);
+    ServiceMovementDiagnostics->SetNumberField(TEXT("localStep"), ServiceStep);
+    ServiceMovementDiagnostics->SetBoolField(TEXT("navigationActive"), bServiceNavigationActive);
+    ServiceReport->SetObjectField(TEXT("movementDiagnostics"), ServiceMovementDiagnostics);
+
+    // 단계별 정상 이동·정착만 제한한다. 동료 순서나 저장 대기 시간은 새 이동 window에 포함하지 않는다.
+    const TSharedPtr<FJsonObject>* ServiceNavigationTimesPointer = nullptr;
+    TSharedPtr<FJsonObject> ServiceNavigationTimes;
+    if (ServiceReport->TryGetObjectField(TEXT("navigationStartedAtByStep"), ServiceNavigationTimesPointer))
+    {
+        ServiceNavigationTimes = *ServiceNavigationTimesPointer;
+    }
+    else
+    {
+        ServiceNavigationTimes = MakeShared<FJsonObject>();
+        ServiceReport->SetObjectField(TEXT("navigationStartedAtByStep"), ServiceNavigationTimes);
+    }
+    const FString ServiceNavigationKey = FString::FromInt(ServiceStep);
+    if (bServiceNavigationActive)
+    {
+        double ServiceNavigationStartedAt = 0;
+        if (!ServiceNavigationTimes->TryGetNumberField(ServiceNavigationKey, ServiceNavigationStartedAt))
+        {
+            ServiceNavigationStartedAt = Now;
+            ServiceNavigationTimes->SetNumberField(ServiceNavigationKey, Now);
+        }
+        ServiceMovementDiagnostics->SetNumberField(TEXT("navigationStartedAt"), ServiceNavigationStartedAt);
+        ServiceMovementDiagnostics->SetNumberField(TEXT("activeNavigationSeconds"), Now - ServiceNavigationStartedAt);
+        if (Now - ServiceNavigationStartedAt > 45)
+        {
+            DungeonHold(PC, EKeys::W, false);
+            ServiceReport->SetStringField(TEXT("status"), TEXT("failed"));
+            Finish(false,
+                   FString::Printf(TEXT("Legacy service movement/settle timed out: step=%d phase=%d wanted=%d "
+                                        "distance2D=%.1f speed=%.1f grounded=%d moveInputIgnored=%d saveReady=%d."),
+                                   ServiceStep, Phase, Wanted, ServiceNavigationDistance, ServiceMovementSpeed,
+                                   int32(bServiceGrounded), int32(PC->IsMoveInputIgnored()), int32(bServiceSaveReady)));
+            return false;
+        }
+    }
+    else
+    {
+        ServiceNavigationTimes->RemoveField(ServiceNavigationKey);
+    }
+    if (Phase != Wanted || !bServiceSaveReady)
     {
         DungeonHold(PC, EKeys::W, false);
         return false;
@@ -770,24 +849,7 @@ bool UFableOnlineValidationDriver::TickUnit4LegacyServices(AFablePlayerControlle
         }
         return false;
     }
-    FVector Target = FableRPG::BoardLocation() + FVector(First ? -80 : 80, -100, 100);
-    if (ServiceStep == 0)
-    {
-        Target = FableRPG::BoardLocation() + FVector(First ? -80 : 80, -700, 100);
-    }
-    else if (ServiceStep == 7 || ServiceStep == 8 || ServiceStep == 9)
-    {
-        Target = FableRPG::MerchantLocation() + FVector(First ? -80 : 80, -100, 100);
-    }
-    else if (ServiceStep == 10 || ServiceStep == 11)
-    {
-        Target = FableRPG::ForgeLocation() + FVector(First ? -80 : 80, -100, 100);
-    }
-    else if (ServiceStep == 12)
-    {
-        Target = FableRPG::PortalLocation() + FVector(First ? -80 : 80, -100, 100);
-    }
-    if (!DungeonWalk(PC, Target, 55) || Hero->GetVelocity().Size2D() > 5 ||
+    if (!DungeonWalk(PC, Target, 100) || Hero->GetVelocity().Size2D() > 5 ||
         !Hero->GetCharacterMovement()->IsMovingOnGround())
     {
         ServiceStationaryAt = 0;
