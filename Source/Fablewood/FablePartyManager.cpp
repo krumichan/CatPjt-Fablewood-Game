@@ -2,9 +2,11 @@
 #include "FableCharacter.h"
 #include "FableGameState.h"
 #include "FableGameMode.h"
+#include "FablePartyEncounter.h"
 #include "FableAdventure.h"
 #include "FablePlayerState.h"
 #include "FableTownManager.h"
+#include "FableTownCatalog.h"
 #include "FableTownTravelCoordinator.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -689,6 +691,174 @@ bool AFablePartyManager::SelectExpedition(APlayerController* Requester, FGuid Pa
     return true;
 }
 
+/** 복제된 스냅샷의 XYZ를 재사용하지 않고 현재 서버 pawn에서 출정 위치를 계산한다. / 現在のサーバーpawnから出発位置を算出する。 */
+bool AFablePartyManager::ResolveDepartureContext(APlayerController* Player, const FFablePartyRecord& Party,
+                                                 FFablePartyDepartureContext& OutContext) const
+{
+    OutContext = FFablePartyDepartureContext();
+    const AFablePlayerState* Profile = ValidatePlayer(Player);
+    const AFableCharacter* Hero = Player ? Player->GetPawn<AFableCharacter>() : nullptr;
+    if (!Profile || GetConnectedPlayer(Profile->PartyPlayerKey) != Player || Profile->PartyId != Party.PartyId ||
+        !Hero || Hero->GetController() != Player || Hero->GetPlayerState<AFablePlayerState>() != Profile)
+    {
+        OutContext.RejectionReason = TEXT("InvalidConnection");
+        return false;
+    }
+
+    // 진행 중인 마을 이동과 private 입장은 같은 연결을 동시에 사용할 수 없다. / 村移動とprivate入場の接続競合を拒否する。
+    if (Profile->bPendingTownTravel)
+    {
+        OutContext.RejectionReason = TEXT("TownTravelPending");
+        return false;
+    }
+
+    // 재도전 자격과 private 공간 예외를 분리한다. 마을로 돌아온 참가자에게는 층 검사를 생략하지 않는다. / 再挑戦資格とprivate空間例外を分離する。
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    if (Party.RetrySourceExpeditionId.IsValid() || Party.RetrySourceCompletionId.IsValid())
+    {
+        const FFablePersonalExpeditionResult* Result =
+            Mode ? Mode->GetResultByExpedition(Profile, Party.RetrySourceExpeditionId) : nullptr;
+        if (!Mode || !Party.RetrySourceExpeditionId.IsValid() || !Party.RetrySourceCompletionId.IsValid() || !Result ||
+            Result->Ticket.PartyId != Party.PartyId || Result->Ticket.Region != Party.SelectedRegion ||
+            Result->Ticket.Difficulty != Party.SelectedDifficulty ||
+            !Result->Ticket.Contains(Profile->PartyPlayerKey) ||
+            !Mode->IsRetryPreparationParticipant(Profile, Party.RetrySourceExpeditionId, Party.RetrySourceCompletionId))
+        {
+            OutContext.RejectionReason = TEXT("RetrySourceMismatch");
+            return false;
+        }
+        OutContext.bCompletedRetry = true;
+
+        const AFablePartyEncounter* Encounter = Mode->FindExpedition(Party.RetrySourceExpeditionId);
+        if (Profile->ActiveExpeditionId == Party.RetrySourceExpeditionId && Encounter && Encounter->IsCommitted() &&
+            Encounter->IsParticipant(Profile) && !Encounter->IsReturning() &&
+            Encounter->GetProgress().AdventureStage == EFableAdventureStage::Cleared &&
+            FableAdventure::For(Profile).IsInRegion(Party.SelectedRegion, Hero->GetActorLocation()))
+        {
+            OutContext.bPrivateRetry = true;
+            return true;
+        }
+    }
+    if (Profile->ActiveExpeditionId.IsValid() && !OutContext.bCompletedRetry)
+    {
+        OutContext.RejectionReason = TEXT("ActiveExpedition");
+        return false;
+    }
+
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    FFableTownConnectionSnapshot Connection;
+    const UFableTownCatalog* Catalog = Towns ? Towns->GetCatalog() : nullptr;
+    if (!Towns || !Catalog || !Towns->GetConnectionSnapshot(Profile, Connection) ||
+        !Towns->IsCurrentConnection(Player, Connection.OwnerConnectionGeneration, Connection.ConnectionNonce))
+    {
+        OutContext.RejectionReason = TEXT("StaleTownConnection");
+        return false;
+    }
+    if (!Towns->ResolvePhysicalContext(Player, OutContext.Physical) || !OutContext.Physical.IsValid() ||
+        !OutContext.Physical.bGeometryReady)
+    {
+        OutContext.RejectionReason = TEXT("UnavailableTown");
+        return false;
+    }
+
+    // 거리 조건은 기존 파티장 포털 상호작용이 유지한다. 전원에게는 정본 포털과 같은 층을 요구한다. / 全員に正本ポータルと同じ階を要求する。
+    FFableTownServiceRef PortalRef;
+    PortalRef.TownId = OutContext.Physical.TownId;
+    PortalRef.CatalogVersion = OutContext.Physical.CatalogVersion;
+    PortalRef.ServiceId = EFableTownServiceId::ExpeditionPortal;
+    FFableTownServiceDescriptor Portal;
+    if (!Catalog->ResolveService(PortalRef, Portal, true) || !Portal.IsValid() || !Portal.bGeometryReady)
+    {
+        OutContext.RejectionReason = TEXT("UnavailablePortal");
+        return false;
+    }
+    OutContext.PortalAnchor = Portal.Anchor;
+    if (OutContext.Physical.FloorId.IsNone() || !OutContext.Physical.ConnectorId.IsNone() ||
+        OutContext.Physical.FloorId != Portal.FloorId)
+    {
+        OutContext.RejectionReason = TEXT("WrongPortalFloor");
+        return false;
+    }
+
+    return true;
+}
+
+/** 각 참가자의 성공 문맥만 비교해 다른 마을·층·정본과 재도전 예외의 혼합을 거절한다. / 成功文脈の村・階・正本と例外種別を比較する。 */
+bool AFablePartyManager::AreDepartureContextsCompatible(const FFablePartyDepartureContext& First,
+                                                        const FFablePartyDepartureContext& Other)
+{
+    if (!First.RejectionReason.IsNone() || !Other.RejectionReason.IsNone() ||
+        First.bCompletedRetry != Other.bCompletedRetry || (First.bPrivateRetry && !First.bCompletedRetry) ||
+        (Other.bPrivateRetry && !Other.bCompletedRetry))
+    {
+        return false;
+    }
+    if (First.bPrivateRetry && Other.bPrivateRetry)
+    {
+        return true;
+    }
+
+    const auto IsTownContext = [](const FFablePartyDepartureContext& Context)
+    {
+        return Context.Physical.IsValid() && Context.Physical.bGeometryReady && Context.Physical.ConnectorId.IsNone() &&
+               !Context.Physical.FloorId.IsNone() && Context.PortalAnchor.IsValid() &&
+               Context.PortalAnchor.TownId == Context.Physical.TownId &&
+               Context.PortalAnchor.CatalogVersion == Context.Physical.CatalogVersion;
+    };
+    if (First.bPrivateRetry || Other.bPrivateRetry)
+    {
+        return IsTownContext(First.bPrivateRetry ? Other : First);
+    }
+
+    return IsTownContext(First) && IsTownContext(Other) && First.Physical.TownId == Other.Physical.TownId &&
+           First.Physical.FloorId == Other.Physical.FloorId &&
+           First.Physical.CatalogVersion == Other.Physical.CatalogVersion &&
+           First.PortalAnchor.TownId == Other.PortalAnchor.TownId &&
+           First.PortalAnchor.AnchorId == Other.PortalAnchor.AnchorId &&
+           First.PortalAnchor.CatalogVersion == Other.PortalAnchor.CatalogVersion;
+}
+
+/** 읽기 전용 재검사를 준비 증서 발급과 이동 직전에 공통 적용한다. / 準備証明の発行と移動直前で同じ再検査を使う。 */
+bool AFablePartyManager::ValidateDepartureLocations(const FFablePartyRecord& Party,
+                                                    const TArray<APlayerController*>& Players) const
+{
+    bool bValid = !Players.IsEmpty() && Players.Num() <= MaxMembers && Players.Num() == Party.Members.Num();
+    FFablePartyDepartureContext First;
+    FFablePartyDepartureContext FirstTown;
+    bool bHasTownContext = false;
+    TSet<APlayerController*> UniquePlayers;
+    for (int32 Index = 0; bValid && Index < Players.Num(); ++Index)
+    {
+        FFablePartyDepartureContext Current;
+        if (UniquePlayers.Contains(Players[Index]) || !ResolveDepartureContext(Players[Index], Party, Current) ||
+            (Index > 0 && !AreDepartureContextsCompatible(First, Current)))
+        {
+            bValid = false;
+            break;
+        }
+        UniquePlayers.Add(Players[Index]);
+        if (Index == 0)
+        {
+            First = Current;
+        }
+        if (!Current.bPrivateRetry)
+        {
+            // 첫 참가자가 private에 남아 있어도 모든 마을 참가자의 공간을 서로 비교한다. / private先頭でも村の参加者同士を比較する。
+            if (bHasTownContext && !AreDepartureContextsCompatible(FirstTown, Current))
+            {
+                bValid = false;
+                break;
+            }
+            FirstTown = Current;
+            bHasTownContext = true;
+        }
+    }
+
+    // 검사 결과를 고정한 뒤 읽기 전용 구독자에게만 알린다. 동의·이동 확정은 이후 별도 경로다. / 判定を固定して観察者へ通知する。
+    DepartureLocationsChecked.Broadcast(Party, Players, bValid);
+    return bValid;
+}
+
 /** 준비 확인 자체는 선택 리비전을 변경하지 않는 멱등 요청이다. */
 bool AFablePartyManager::SetExpeditionReady(APlayerController* Requester, FGuid PartyId,
                                             int32 ExpectedPreparationRevision, bool bReady)
@@ -716,17 +886,14 @@ bool AFablePartyManager::SetExpeditionReady(APlayerController* Requester, FGuid 
             return Entry.PlayerKey == Profile->PartyPlayerKey;
         });
     const AFableCharacter* Hero = Requester->GetPawn<AFableCharacter>();
-    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
-    const bool bRetryPlace =
-        Mode && Party->RetrySourceExpeditionId.IsValid() &&
-        Mode->IsRetryPreparationParticipant(Profile, Party->RetrySourceExpeditionId, Party->RetrySourceCompletionId);
+    FFablePartyDepartureContext Departure;
     if (!Member || !Member->bConnected || GetConnectedPlayer(Member->PlayerKey) != Requester ||
         (bReady && (!Hero || !Hero->IsAlive() || Hero->GetController() != Requester ||
                     Hero->GetPlayerState<AFablePlayerState>() != Profile ||
                     !Profile->IsExpeditionEligible(Party->SelectedRegion) ||
-                    (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) && !bRetryPlace))))
+                    !ResolveDepartureContext(Requester, *Party, Departure))))
     {
-        return Reject(Profile, TEXT("마을에서 생존 상태와 해당 던전 의뢰를 확인한 뒤 준비하세요."));
+        return Reject(Profile, TEXT("마을의 포털과 같은 층에서 생존 상태와 해당 던전 의뢰를 확인한 뒤 준비하세요."));
     }
 
     Member->ReadyRevision = bReady ? Party->PreparationRevision : 0;
@@ -761,6 +928,8 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
     const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
     // 파티 UI의 준비 표시는 신뢰하지 않고 전원의 현재 연결·의뢰·생존을 재검사한다.
     TSet<FString> UniqueKeys;
+    TArray<APlayerController*> Players;
+    TArray<FString> MemberKeys;
     for (const FFablePartyMember& Member : Party->Members)
     {
         APlayerController* Player = GetConnectedPlayer(Member.PlayerKey);
@@ -772,11 +941,8 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
             (Other->ActiveExpeditionId.IsValid() &&
              (!Mode || !Mode->IsRetryPreparationParticipant(Other, Party->RetrySourceExpeditionId,
                                                             Party->RetrySourceCompletionId))) ||
-            !Other->IsExpeditionEligible(Party->SelectedRegion) ||
-            (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) &&
-             (!Mode || !Mode->IsRetryPreparationParticipant(Other, Party->RetrySourceExpeditionId,
-                                                            Party->RetrySourceCompletionId))) ||
-            Member.PlayerKey.IsEmpty() || UniqueKeys.Contains(Member.PlayerKey))
+            !Other->IsExpeditionEligible(Party->SelectedRegion) || Member.PlayerKey.IsEmpty() ||
+            UniqueKeys.Contains(Member.PlayerKey))
         {
             return Reject(Profile, TEXT("모든 파티원이 접속·생존·저장·던전 의뢰 조건을 만족해야 합니다."));
         }
@@ -786,7 +952,12 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
         }
 
         UniqueKeys.Add(Member.PlayerKey);
-        OutTicket.MemberKeys.Add(Member.PlayerKey);
+        Players.Add(Player);
+        MemberKeys.Add(Member.PlayerKey);
+    }
+    if (!ValidateDepartureLocations(*Party, Players))
+    {
+        return Reject(Profile, TEXT("모든 파티원이 같은 마을과 포털 층에 있어야 합니다. 현재 위치를 다시 확인하세요."));
     }
 
     // 전원 동의가 확인된 뒤에만 서버가 새 원정 UUID와 불변 키 명부를 발급한다.
@@ -795,6 +966,7 @@ bool AFablePartyManager::BuildReadySnapshot(APlayerController* Requester, FGuid 
     OutTicket.Region = Party->SelectedRegion;
     OutTicket.Difficulty = Party->SelectedDifficulty;
     OutTicket.PreparationRevision = Party->PreparationRevision;
+    OutTicket.MemberKeys = MoveTemp(MemberKeys);
     return true;
 }
 

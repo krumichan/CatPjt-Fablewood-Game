@@ -10,6 +10,7 @@
 #include "FableGameState.h"
 #include "FablePlayerState.h"
 #include "FableTownManager.h"
+#include "FableTownCatalog.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Engine/Engine.h"
@@ -65,6 +66,12 @@ struct FFablePartyTestAccess
         Encounter->Progress.PartyRecoveryEndServerTime = 0;
         Encounter->NextRecoveryAttemptTime = 0;
         Encounter->CheckPartyState();
+    }
+
+    /** 완료 참가자 한 명의 실제 마을 체크포인트 복귀 경로만 호출한다. / 完了参加者一人の実際の村復帰経路を呼び出す。 */
+    static bool ReturnOneParticipant(AFablePartyEncounter* Encounter, APlayerController* Player)
+    {
+        return Encounter->MovePlayerToCheckpoint(Player, EFableRegion::Village, false);
     }
 
     /** 벽시계 대기만 생략하고 실제 타이머 콜백과 같은 다음 무리 생성 경로를 호출한다. */
@@ -2349,6 +2356,324 @@ bool FFableRetryEligibilityTest::RunTest(const FString& Parameters)
     Leader.Profile->DungeonCompletions = 0;
     TestFalse(TEXT("Moonwell keeps its completed root-dungeon prerequisite"),
               Leader.Profile->IsExpeditionEligible(EFableRegion::Moonwell));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableDepartureLiveFloorTest,
+                                 "Fablewood.Native.Expedition.DepartureResolvesLiveTownAndPortalFloor",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 오래된 마을 스냅샷 대신 실제 pawn의 층을 읽고 실패 증서에 부분 명부를 남기지 않는다. / 古いsnapshotではなく実pawnの階を調べる。 */
+bool FFableDepartureLiveFloorTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(981);
+    FPartyTestPlayer Member = Fixture.AddPlayer(982);
+    if (!TestTrue(TEXT("Live-floor fixture has two owned live heroes"),
+                  Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110))) ||
+        !TestTrue(TEXT("Live-floor fixture has a consenting party"),
+                  Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member) &&
+                      Fixture.Ready(Leader) && Fixture.Ready(Member)))
+    {
+        return false;
+    }
+
+    const FFablePartyRecord* Party = Fixture.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+    AFableTownManager* Towns = AFableTownManager::Find(Fixture.World);
+    const UFableTownCatalog* Catalog = Towns ? Towns->GetCatalog() : nullptr;
+    if (!TestNotNull(TEXT("Live-floor fixture has its owned town catalog"), Catalog))
+    {
+        return false;
+    }
+
+    // 격리 월드의 메모리 정의에만 다른 층을 만든다. 실제 지형 채택이나 바닥 성공 주장이 아니다. / 隔離worldだけの別階fixtureで実地形の採用ではない。
+    FFableTownDefinition* Legacy = const_cast<FFableTownDefinition*>(Catalog->FindTown(EFableTownId::LegacyVillage));
+    if (!TestNotNull(TEXT("Live-floor fixture finds the legacy definition"), Legacy))
+    {
+        return false;
+    }
+    Legacy->Floors[0].LocalBounds.Max.Z = 499;
+    FFableTownFloorDefinition Upper;
+    Upper.FloorId = TEXT("TestUpper");
+    Upper.LocalBounds = FBox(FVector(-4500, -4500, 501), FVector(4499, 4500, 1499));
+    Legacy->Floors.Add(Upper);
+    FString CatalogError;
+    if (!TestTrue(TEXT("The isolated two-floor definition remains valid"), Catalog->Validate(CatalogError)))
+    {
+        return false;
+    }
+
+    FFablePartyDepartureContext Departure;
+    TestTrue(TEXT("Current grounded portal floor resolves successfully"),
+             Fixture.Manager->ResolveDepartureContext(Member.Controller, *Party, Departure));
+    TestEqual(TEXT("The logical departure anchor is the catalog portal"), Departure.PortalAnchor.AnchorId,
+              FName(TEXT("Portal.Expedition")));
+    const FVector LeaderBefore = Leader.Hero->GetActorLocation();
+    const FVector MemberBefore = Member.Hero->GetActorLocation();
+    const int32 RevisionBefore = Party->PreparationRevision;
+    FVector UpperPosition = MemberBefore;
+    UpperPosition.Z = 1000;
+    Member.Hero->SetActorLocation(UpperPosition);
+
+    FFableTownConnectionSnapshot OldSnapshot;
+    TestTrue(TEXT("The old registered snapshot still describes the ground floor"),
+             Towns->GetConnectionSnapshot(Member.Profile, OldSnapshot) &&
+                 OldSnapshot.PhysicalContext.FloorId == FName(TEXT("Ground")));
+    TestFalse(TEXT("The live upper-floor pawn cannot reuse that ground snapshot"),
+              Fixture.Manager->ResolveDepartureContext(Member.Controller, *Party, Departure));
+    TestEqual(TEXT("The authority reports a portal-floor mismatch"), Departure.RejectionReason,
+              FName(TEXT("WrongPortalFloor")));
+    TestEqual(TEXT("The rejected observation retains the actual current floor"), Departure.Physical.FloorId,
+              FName(TEXT("TestUpper")));
+    FFableExpeditionTicket Ticket;
+    TestFalse(TEXT("Old readiness cannot authorize a different current floor"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, Party->PartyId, RevisionBefore, Ticket));
+    TestTrue(TEXT("A spatial failure returns no partial ticket or member list"),
+             !Ticket.ExpeditionId.IsValid() && !Ticket.PartyId.IsValid() && Ticket.MemberKeys.IsEmpty());
+    TestTrue(TEXT("Rejected departure preserves both heroes and expedition bindings"),
+             Leader.Hero->GetActorLocation().Equals(LeaderBefore) &&
+                 Member.Hero->GetActorLocation().Equals(UpperPosition) &&
+                 !Leader.Profile->ActiveExpeditionId.IsValid() && !Member.Profile->ActiveExpeditionId.IsValid() &&
+                 Party->PreparationRevision == RevisionBefore);
+    TestTrue(TEXT("The upper-floor member may explicitly cancel old readiness"), Fixture.Ready(Member, false));
+    TestFalse(TEXT("New readiness is rejected until the member returns to the portal floor"), Fixture.Ready(Member));
+    Member.Hero->SetActorLocation(MemberBefore);
+    TestTrue(TEXT("Returning and explicitly consenting again restores admission eligibility"),
+             Fixture.Ready(Member) && Fixture.Manager->BuildReadySnapshot(Leader.Controller, Party->PartyId,
+                                                                          Party->PreparationRevision, Ticket));
+
+    // 실제 완료·확인된 원정에서 한 명만 마을로 복귀시켜 private 예외가 마을 층 검사까지 지우지 않는지 확인한다. / 実際の完了遠征から一人だけ村へ戻す。
+    FResultTestWorld RetryFixture;
+    if (!TestTrue(TEXT("A genuine completed expedition provides acknowledged retry ownership"),
+                  RetryFixture.Initialize() && RetryFixture.ClearFirst()))
+    {
+        return false;
+    }
+    const FGuid OldId = RetryFixture.One->GetExpeditionId();
+    const FFablePersonalExpeditionResult Previous = RetryFixture.Result(RetryFixture.First, OldId);
+    if (!TestTrue(TEXT("Both completed private participants explicitly prepare and consent"),
+                  RetryFixture.ConfirmFirstResults(OldId) && RetryFixture.PrepareRetry(RetryFixture.First, Previous) &&
+                      RetryFixture.Base.Ready(RetryFixture.First) && RetryFixture.Base.Ready(RetryFixture.FirstPeer)) ||
+        !TestTrue(TEXT("The actual personal checkpoint return places only the peer in town"),
+                  FFablePartyTestAccess::ReturnOneParticipant(RetryFixture.One, RetryFixture.FirstPeer.Controller)))
+    {
+        return false;
+    }
+    const FFablePartyRecord* RetryParty =
+        RetryFixture.Base.Manager->GetPartyForMember(RetryFixture.First.Profile->PartyPlayerKey);
+    const FVector PrivateBefore = RetryFixture.First.Hero->GetActorLocation();
+    const FVector ReturnedBefore = RetryFixture.FirstPeer.Hero->GetActorLocation();
+    FFablePartyDepartureContext PrivateContext;
+    FFablePartyDepartureContext TownContext;
+    TestTrue(TEXT("Only the participant physically inside the owned completed arena uses its spatial exception"),
+             RetryFixture.Base.Manager->ResolveDepartureContext(RetryFixture.First.Controller, *RetryParty,
+                                                                PrivateContext) &&
+                 PrivateContext.bCompletedRetry && PrivateContext.bPrivateRetry);
+    TestTrue(TEXT("A returned participant retains retry eligibility but has a real town portal context"),
+             RetryFixture.Base.Manager->ResolveDepartureContext(RetryFixture.FirstPeer.Controller, *RetryParty,
+                                                                TownContext) &&
+                 TownContext.bCompletedRetry && !TownContext.bPrivateRetry && TownContext.Physical.IsValid() &&
+                 TownContext.PortalAnchor.IsValid());
+    TestTrue(TEXT("A legitimate private-first mixed departure remains spatially valid"),
+             RetryFixture.Base.Manager->ValidateDepartureLocations(
+                 *RetryParty, {RetryFixture.First.Controller, RetryFixture.FirstPeer.Controller}));
+    TestTrue(TEXT("Mixed-departure validation never moves either source participant"),
+             RetryFixture.First.Hero->GetActorLocation().Equals(PrivateBefore) &&
+                 RetryFixture.FirstPeer.Hero->GetActorLocation().Equals(ReturnedBefore));
+
+    AFableTownManager* RetryTowns = AFableTownManager::Find(RetryFixture.Base.World);
+    FFableTownDefinition* RetryLegacy =
+        RetryTowns && RetryTowns->GetCatalog()
+            ? const_cast<FFableTownDefinition*>(RetryTowns->GetCatalog()->FindTown(EFableTownId::LegacyVillage))
+            : nullptr;
+    if (!TestNotNull(TEXT("Completed-retry fixture owns its isolated catalog"), RetryLegacy))
+    {
+        return false;
+    }
+    RetryLegacy->Floors[0].LocalBounds.Max.Z = 499;
+    RetryLegacy->Floors.Add(Upper);
+    FVector ReturnedUpper = ReturnedBefore;
+    ReturnedUpper.Z = 1000;
+    RetryFixture.FirstPeer.Hero->SetActorLocation(ReturnedUpper);
+    TestFalse(TEXT("Retained completed binding does not bypass the returned member's actual portal floor"),
+              RetryFixture.Base.Manager->ResolveDepartureContext(RetryFixture.FirstPeer.Controller, *RetryParty,
+                                                                 TownContext));
+    TestTrue(TEXT("Wrong-floor returned retry still identifies its source result without claiming private space"),
+             TownContext.bCompletedRetry && !TownContext.bPrivateRetry &&
+                 TownContext.RejectionReason == FName(TEXT("WrongPortalFloor")));
+    TestFalse(TEXT("Private-first mixed retry cannot issue a ticket for a returned member on another floor"),
+              RetryFixture.Base.Manager->BuildReadySnapshot(RetryFixture.First.Controller, RetryParty->PartyId,
+                                                            RetryParty->PreparationRevision, Ticket));
+    TestTrue(TEXT("Rejected retry leaves the source encounter, bindings and both positions intact"),
+             Ticket.MemberKeys.IsEmpty() && !Ticket.ExpeditionId.IsValid() &&
+                 RetryFixture.Base.Mode->FindExpedition(OldId) == RetryFixture.One &&
+                 RetryFixture.First.Profile->ActiveExpeditionId == OldId &&
+                 RetryFixture.FirstPeer.Profile->ActiveExpeditionId == OldId &&
+                 RetryFixture.First.Hero->GetActorLocation().Equals(PrivateBefore) &&
+                 RetryFixture.FirstPeer.Hero->GetActorLocation().Equals(ReturnedUpper));
+
+    // 메모리 fixture의 완료 binding만 해제해 이미 마을로 확정 복귀한 경우도 같은 층 검사를 거치는지 확인한다. / 完了bindingを解除した村参加者も同じ階検査を受ける。
+    RetryFixture.FirstPeer.Profile->ActiveExpeditionId.Invalidate();
+    TestFalse(TEXT("An already unbound returned retry participant also cannot bypass the portal floor"),
+              RetryFixture.Base.Manager->ResolveDepartureContext(RetryFixture.FirstPeer.Controller, *RetryParty,
+                                                                 TownContext));
+    TestTrue(TEXT("Unbound wrong-floor retry is rejected as a town floor mismatch"),
+             TownContext.bCompletedRetry && !TownContext.bPrivateRetry &&
+                 TownContext.RejectionReason == FName(TEXT("WrongPortalFloor")));
+    RetryFixture.FirstPeer.Profile->ActiveExpeditionId = OldId;
+    RetryFixture.FirstPeer.Hero->SetActorLocation(ReturnedBefore);
+    FFablePartyRecord WrongCompletion = *RetryParty;
+    WrongCompletion.RetrySourceCompletionId = FGuid::NewGuid();
+    TestFalse(TEXT("A private exception is bound to the party's exact completed result"),
+              RetryFixture.Base.Manager->ResolveDepartureContext(RetryFixture.First.Controller, WrongCompletion,
+                                                                 PrivateContext));
+    TestEqual(TEXT("A foreign completion cannot be classified as the owned retry"), PrivateContext.RejectionReason,
+              FName(TEXT("RetrySourceMismatch")));
+    TestTrue(TEXT("Returning to the portal floor restores the legitimate mixed retry without moving source positions"),
+             RetryFixture.Base.Manager->BuildReadySnapshot(RetryFixture.First.Controller, RetryParty->PartyId,
+                                                           RetryParty->PreparationRevision, Ticket) &&
+                 Ticket.MemberKeys.Num() == 2 && RetryFixture.First.Hero->GetActorLocation().Equals(PrivateBefore) &&
+                 RetryFixture.FirstPeer.Hero->GetActorLocation().Equals(ReturnedBefore));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableDepartureContextBoundaryTest,
+                                 "Fablewood.Native.Expedition.DepartureRejectsDifferentSpatialContexts",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 同じXYでも村・階・catalog・アンカー・例外種別が違えば同じ出発集合ではない。 / 같은 XY라도 출정 공간 정체성을 모두 비교한다. */
+bool FFableDepartureContextBoundaryTest::RunTest(const FString& Parameters)
+{
+    FFablePartyDepartureContext First;
+    First.Physical.AreaKind = EFableAreaKind::Town;
+    First.Physical.TownId = EFableTownId::LegacyVillage;
+    First.Physical.FloorId = TEXT("Ground");
+    First.Physical.CatalogVersion = 1;
+    First.Physical.bGeometryReady = true;
+    First.PortalAnchor.TownId = EFableTownId::LegacyVillage;
+    First.PortalAnchor.AnchorId = TEXT("Portal.Expedition");
+    First.PortalAnchor.CatalogVersion = 1;
+    TestTrue(TEXT("Two resolved members on the same portal floor are compatible"),
+             AFablePartyManager::AreDepartureContextsCompatible(First, First));
+
+    FFablePartyDepartureContext Other = First;
+    Other.Physical.TownId = EFableTownId::Sunbrook;
+    Other.PortalAnchor.TownId = EFableTownId::Sunbrook;
+    TestFalse(TEXT("A different town never shares the departure set"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.Physical.FloorId = TEXT("Upper");
+    TestFalse(TEXT("A vertically different floor never shares the departure set"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.Physical.CatalogVersion = 2;
+    Other.PortalAnchor.CatalogVersion = 2;
+    TestFalse(TEXT("An old catalog revision cannot join the current departure set"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.PortalAnchor.AnchorId = TEXT("Portal.Other");
+    TestFalse(TEXT("Another logical portal is not silently treated as the agreed departure point"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.Physical.ConnectorId = TEXT("Stairs");
+    TestFalse(TEXT("A connector cannot stand in for a stable portal floor"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.Physical.bGeometryReady = false;
+    TestFalse(TEXT("Unavailable geometry is rejected independently of valid-looking IDs"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.RejectionReason = TEXT("StaleTownConnection");
+    TestFalse(TEXT("A rejected connection context cannot be compared as a success"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+    Other = First;
+    Other.bCompletedRetry = true;
+    TestFalse(TEXT("Completed private retry exceptions cannot mix with ordinary town departures"),
+              AFablePartyManager::AreDepartureContextsCompatible(First, Other));
+
+    FFablePartyDepartureContext ReturnedRetry = First;
+    ReturnedRetry.bCompletedRetry = true;
+    FFablePartyDepartureContext PrivateRetry;
+    PrivateRetry.bCompletedRetry = true;
+    PrivateRetry.bPrivateRetry = true;
+    TestTrue(TEXT("The same completed retry may combine a real town context with a private arena exception"),
+             AFablePartyManager::AreDepartureContextsCompatible(PrivateRetry, ReturnedRetry) &&
+                 AFablePartyManager::AreDepartureContextsCompatible(ReturnedRetry, PrivateRetry));
+    ReturnedRetry.Physical.bGeometryReady = false;
+    TestFalse(TEXT("A private-first retry does not waive the returned participant's town geometry"),
+              AFablePartyManager::AreDepartureContextsCompatible(PrivateRetry, ReturnedRetry));
+    ReturnedRetry = First;
+    ReturnedRetry.bCompletedRetry = true;
+    Other = ReturnedRetry;
+    Other.Physical.FloorId = TEXT("Upper");
+    TestFalse(TEXT("Returned-town retry members still require the same normal departure floor"),
+              AFablePartyManager::AreDepartureContextsCompatible(ReturnedRetry, Other));
+    PrivateRetry.bCompletedRetry = false;
+    TestFalse(TEXT("A private-space flag alone cannot create a completed retry exception"),
+              AFablePartyManager::AreDepartureContextsCompatible(PrivateRetry, PrivateRetry));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableDepartureCancelReconnectTest,
+                                 "Fablewood.Native.Expedition.DepartureCancellationAndReconnectRemainAtomic",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 취소·미채택 목적지·연결 종료 뒤에도 전원 동의와 기존 위치를 보존한다. / 取消・未採用の村・切断後の全員同意を検証する。 */
+bool FFableDepartureCancelReconnectTest::RunTest(const FString& Parameters)
+{
+    FPartyTestWorld Fixture(true);
+    FPartyTestPlayer Leader = Fixture.AddPlayer(991);
+    FPartyTestPlayer Member = Fixture.AddPlayer(992);
+    if (!TestTrue(TEXT("Cancellation fixture has two consenting current connections"),
+                  Fixture.AddHero(Leader, FableRPG::PortalLocation() + FVector(-80, -100, 110)) &&
+                      Fixture.AddHero(Member, FableRPG::PortalLocation() + FVector(160, -100, 110)) &&
+                      Fixture.Act(Leader, EFablePartyAction::Create) && Fixture.Join(Leader, Member) &&
+                      Fixture.Ready(Leader) && Fixture.Ready(Member)))
+    {
+        return false;
+    }
+
+    const FFablePartyRecord* Party = Fixture.Manager->GetPartyForMember(Leader.Profile->PartyPlayerKey);
+    const FGuid PartyId = Party->PartyId;
+    const FVector LeaderBefore = Leader.Hero->GetActorLocation();
+    const FVector MemberBefore = Member.Hero->GetActorLocation();
+    FFablePartyDepartureContext Departure;
+    FFableExpeditionTicket Ticket;
+
+    Member.Profile->bPendingTownTravel = true;
+    TestFalse(TEXT("A pending town transfer blocks private departure before any move"),
+              Fixture.Manager->ResolveDepartureContext(Member.Controller, *Party, Departure));
+    TestEqual(TEXT("The authority identifies the competing town transfer"), Departure.RejectionReason,
+              FName(TEXT("TownTravelPending")));
+    TestTrue(TEXT("Readiness cancellation remains available during that pending transfer"),
+             Fixture.Ready(Member, false));
+    Member.Profile->bPendingTownTravel = false;
+    TestFalse(TEXT("Clearing the transfer never restores cancelled consent"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    TestTrue(TEXT("A fresh explicit ready request is required after cancellation"), Fixture.Ready(Member));
+
+    // 미채택 마을의 후보 좌표로 이동한 메모리 pawn은 실제 활성 마을로 인정하지 않는다. / 未採用村の候補座標を有効な村と認定しない。
+    Member.Hero->SetActorLocation(FVector(0, -77000, MemberBefore.Z));
+    TestFalse(TEXT("A candidate new town cannot reuse legacy readiness"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    TestTrue(TEXT("Rejected candidate placement leaves no partial admission ticket"),
+             Ticket.MemberKeys.IsEmpty() && !Ticket.ExpeditionId.IsValid());
+    Member.Hero->SetActorLocation(MemberBefore);
+    Fixture.Manager->DisconnectPlayer(Member.Controller);
+    TestFalse(TEXT("A disconnected reserved member cannot be admitted"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    Fixture.Manager->RegisterPlayer(Member.Controller);
+    TestFalse(TEXT("Reconnection restores membership without restoring old agreement"),
+              Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    TestTrue(TEXT("Fresh consent from both restored current connections produces a full ticket"),
+             Fixture.Ready(Leader) && Fixture.Ready(Member) &&
+                 Fixture.Manager->BuildReadySnapshot(Leader.Controller, PartyId, Party->PreparationRevision, Ticket));
+    TestTrue(
+        TEXT("No rejection or cancellation moved either member or bound an expedition"),
+        Leader.Hero->GetActorLocation().Equals(LeaderBefore) && Member.Hero->GetActorLocation().Equals(MemberBefore) &&
+            !Leader.Profile->ActiveExpeditionId.IsValid() && !Member.Profile->ActiveExpeditionId.IsValid() &&
+            Ticket.MemberKeys.Num() == 2 && Leader.Profile->PartyId == PartyId && Member.Profile->PartyId == PartyId);
     return true;
 }
 

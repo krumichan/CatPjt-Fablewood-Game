@@ -1724,9 +1724,6 @@ bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket, TAr
               !ReplacedEncounter->IsParticipant(Profile))) ||
             Profile->PartyId != Ticket.PartyId || !Hero || !Hero->IsAlive() || Hero->GetController() != Player ||
             Hero->GetPlayerState<AFablePlayerState>() != Profile || !Profile->IsExpeditionEligible(Ticket.Region) ||
-            (!FableRPG::IsInRegion(EFableRegion::Village, Hero->GetActorLocation()) &&
-             (!ReplacedEncounter || !IsRetryPreparationParticipant(Profile, Party->RetrySourceExpeditionId,
-                                                                   Party->RetrySourceCompletionId))) ||
             !Member || !Member->bConnected || Member->ReadyRevision != Ticket.PreparationRevision)
         {
             return false;
@@ -1735,7 +1732,14 @@ bool AFableGameMode::ValidateAdmission(const FFableExpeditionTicket& Ticket, TAr
         OutPlayers.Add(Player);
     }
 
-    return OutPlayers.Num() == Ticket.MemberKeys.Num();
+    // 준비 뒤 이동한 동료도 현재 마을·층·정본 포털로 다시 판정한다. / 準備後に移動した仲間も現位置から再判定する。
+    if (OutPlayers.Num() != Ticket.MemberKeys.Num() || !Parties->ValidateDepartureLocations(*Party, OutPlayers))
+    {
+        OutPlayers.Reset();
+        return false;
+    }
+
+    return true;
 }
 
 /** 적 UUID에 따라 독립 원정과 공유 필드의 처치 경로를 구분한다. */

@@ -3,11 +3,22 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "FableExpeditionTypes.h"
+#include "FableTownTypes.h"
 #include "TimerManager.h"
 #include "FablePartyManager.generated.h"
 
 class AFablePlayerState;
 class APlayerController;
+
+/** 현재 서버 연결에서 계산한 출정 문맥. 저장된 XYZ나 클라이언트 준비 표시는 권한이 아니다. / 現接続から算出する出発文脈。 */
+struct FABLEWOOD_API FFablePartyDepartureContext
+{
+    FFableTownLocationContext Physical;
+    FFableTownAnchorRef PortalAnchor;
+    bool bCompletedRetry = false;
+    bool bPrivateRetry = false;
+    FName RejectionReason = NAME_None;
+};
 
 /** 클라이언트는 의도만 전달하고 실제 구성 변경은 서버가 결정한다. */
 UENUM()
@@ -103,6 +114,10 @@ struct FFablePartyInvite
     float ExpiresAt = 0;
 };
 
+/** 서버 공간 판정 직후의 관찰 전용 C++ 통지이며 전체 입장 성공을 뜻하지 않는다. / 空間判定直後の観察通知で入場成功ではない。 */
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnFableDepartureLocationsChecked, const FFablePartyRecord&,
+                                       const TArray<APlayerController*>&, bool);
+
 /** 파티 초대·권한·탈퇴·재접속 유예를 서버에서 판정하고 명부를 복제한다. */
 UCLASS()
 class FABLEWOOD_API AFablePartyManager : public AActor
@@ -153,6 +168,20 @@ public:
     /** 연결·명부·동의를 재검사한 뒤 새 불변 참가 증서를 발급한다. */
     bool BuildReadySnapshot(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision,
                             FFableExpeditionTicket& OutTicket);
+
+    /** 실제 현재 pawn·마을·층·포털 앵커를 읽기 전용으로 재검사한다. / 実pawn・村・階・ポータルを再検査する。 */
+    bool ResolveDepartureContext(APlayerController* Player, const FFablePartyRecord& Party,
+                                 FFablePartyDepartureContext& OutContext) const;
+
+    /** 전원의 정상 출정은 같은 마을·층·정본 앵커에 속해야 한다. / 通常出発は全員同じ村・階・正本アンカーに属する。 */
+    bool ValidateDepartureLocations(const FFablePartyRecord& Party, const TArray<APlayerController*>& Players) const;
+
+    /** 같은 재도전의 private·마을 혼합은 허용하되 모든 마을 문맥은 재검사한다. / 同じ再挑戦のprivate・村混在でも村文脈は再検査する。 */
+    static bool AreDepartureContextsCompatible(const FFablePartyDepartureContext& First,
+                                               const FFablePartyDepartureContext& Other);
+
+    /** 구독자는 위치·명부·준비를 바꾸지 않고 관찰만 한다. / 購読側は位置・名簿・同意を変更せず観察だけ行う。 */
+    mutable FOnFableDepartureLocationsChecked DepartureLocationsChecked;
 
     /** 서버가 소유한 현재 연결만 불변 키로 반환한다. */
     APlayerController* GetConnectedPlayer(const FString& PlayerKey) const;
