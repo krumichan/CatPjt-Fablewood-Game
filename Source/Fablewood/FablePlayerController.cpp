@@ -31,6 +31,7 @@
 #include "FableFrontEndValidationDriver.h"
 #include "FableCoopValidationDriver.h"
 #include "FableDedicatedValidationDriver.h"
+#include "FableTownRouteUiRenderDriver.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
@@ -172,6 +173,14 @@ void AFablePlayerController::BeginPlay()
 
     ApplyUIMode();
 #if !UE_BUILD_SHIPPING
+    // 정상 로컬 초기화 뒤에 다른 개발 모드와 섞이지 않는 화면 검증만 선택한다. / 正常初期化後に画面検証だけを選ぶ。
+    if (FParse::Param(FCommandLine::Get(), TEXT("FableTownRouteUiFixture")))
+    {
+        UFableTownRouteUiRenderDriver* Driver = NewObject<UFableTownRouteUiRenderDriver>(this);
+        Driver->RegisterComponent();
+        return;
+    }
+
     if (FParse::Param(FCommandLine::Get(), TEXT("FableArtReview")))
     {
         StartArtReview(this);
