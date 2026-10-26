@@ -2955,17 +2955,23 @@ int32 AFablePlayerController::GetNearbyStoryObjectIndex() const
 }
 
 /** 현재 목표의 안내 위치 값을 반환한다. */
-bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& OutLabel) const
+bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& OutLabel,
+                                                 FFableTownNavigationGuide* OutGuide) const
 {
     // 화면 표시와 사용자 안내 처리
     OutLocation = FVector::ZeroVector;
     OutLabel.Empty();
+    if (OutGuide)
+    {
+        // 구조·전투 우선 목표에는 이전 층간 안내가 섞이지 않는다. / 救助・戦闘へ前の階間案内を混ぜない。
+        *OutGuide = FFableTownNavigationGuide();
+    }
     const AFableCharacter* Hero = Cast<AFableCharacter>(GetPawn());
     const AFablePlayerState* State = GetPlayerState<AFablePlayerState>();
     const FFableAdventureView Adventure = FableAdventure::For(this);
 
     // 화면 표시와 사용자 안내 조건 검사
-    if (!Hero || !State || !Adventure)
+    if (!Hero || !State || !State->bProfileLoaded || !Adventure)
     {
         return false;
     }
@@ -2997,9 +3003,9 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         (!Catalog || !Catalog->ResolveLocation(Hero->GetActorLocation(), Physical, true)))
     {
         // 위치가 불명확하거나 지형이 미준비이면 이전 마을 안내로 돌아가지 않는다.
-        FFableTownServiceDescriptor UnusedService;
-        OutLabel = FableTownNavigation::UnavailableText(FableTownNavigation::ResolveService(
-            Catalog, Hero->GetActorLocation(), EFableTownServiceId::QuestGuide, UnusedService));
+        FFableTownNavigationGuide UnusedGuide;
+        OutLabel = FableTownNavigation::UnavailableRouteText(FableTownNavigation::ResolveServiceGuide(
+            Catalog, Hero->GetActorLocation(), EFableTownServiceId::QuestGuide, UnusedGuide));
         return false;
     }
 
@@ -3089,10 +3095,15 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
 
     // 화면 표시와 사용자 안내 조건 검사
     EFableRegion TargetRegion = EFableRegion::Village;
-    if (State->GetStoryTarget(OutLocation, OutLabel, &TargetRegion))
+    FFableTownNavigationGuide StoryGuide;
+    if (State->GetStoryTarget(OutLocation, OutLabel, &TargetRegion, &StoryGuide))
     {
         // 안내 함수의 공개 계약은 실제 월드 좌표로 통일한다.
         OutLocation = Adventure.ToWorld(TargetRegion, OutLocation);
+        if (OutGuide && TargetRegion == EFableRegion::Village && StoryGuide.bValid)
+        {
+            *OutGuide = StoryGuide;
+        }
         return true;
     }
 
@@ -3108,18 +3119,23 @@ bool AFablePlayerController::GetNavigationTarget(FVector& OutLocation, FString& 
         const EFableQuestId Quest = GetSelectedQuestId();
         const bool bPortal = (Quest == EFableQuestId::RootRuins || Quest == EFableQuestId::Moonwell) &&
                              State->GetQuestStage(Quest) == EFableQuestStage::Active;
-        FFableTownServiceDescriptor Service;
-        const EFableTownNavigationStatus Status = FableTownNavigation::ResolveService(
+        FFableTownNavigationGuide Guide;
+        const EFableTownRouteStatus Status = FableTownNavigation::ResolveServiceGuide(
             Catalog, Hero->GetActorLocation(),
-            bPortal ? EFableTownServiceId::ExpeditionPortal : EFableTownServiceId::QuestGuide, Service);
-        if (Status != EFableTownNavigationStatus::Ready)
+            bPortal ? EFableTownServiceId::ExpeditionPortal : EFableTownServiceId::QuestGuide, Guide);
+        if (Status != EFableTownRouteStatus::Ready)
         {
-            OutLabel = FableTownNavigation::UnavailableText(Status);
+            OutLabel = FableTownNavigation::UnavailableRouteText(Status);
             return false;
         }
 
-        OutLocation = Service.WorldLocation;
-        OutLabel = bPortal ? TEXT("선택 의뢰의 원정 차원문") : TEXT("안내인 로완 · 의뢰 수락 / 보고");
+        OutLocation = Guide.WaypointWorld;
+        OutLabel = FableTownNavigation::GuideLabel(
+            bPortal ? TEXT("선택 의뢰의 원정 차원문") : TEXT("안내인 로완 · 의뢰 수락 / 보고"), Guide);
+        if (OutGuide)
+        {
+            *OutGuide = Guide;
+        }
         return true;
     }
 

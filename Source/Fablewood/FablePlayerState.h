@@ -10,6 +10,7 @@
 
 class UFableSaveGame;
 struct FFableBackendSession;
+struct FFableTownNavigationGuide;
 
 /** 서버가 관리하는 성장·퀘스트·재화·장비와 저장 상태. */
 UCLASS()
@@ -344,8 +345,9 @@ public:
     /** 이야기 보상의 안내 문구 값을 반환한다. */
     FString GetStoryRewardText() const;
 
-    /** 이야기 목표의 위치 값을 반환한다. */
-    bool GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion = nullptr) const;
+    /** 이야기 목표와 실제 선택된 마을 안내를 함께 반환한다. / 選択した町案内も同じ照会で返す。 */
+    bool GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion = nullptr,
+                        FFableTownNavigationGuide* OutGuide = nullptr) const;
 
     /** 퀘스트의 수락·진행·보상 수령을 현재 단계에 맞게 처리한다. */
     void InteractQuest();

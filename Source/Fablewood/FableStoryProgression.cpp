@@ -289,10 +289,16 @@ FString AFablePlayerState::GetStoryRewardText() const
 }
 
 /** 마을 목표는 현재 마을의 월드 좌표, 원정 목표는 해당 원정의 정본 좌표로 반환한다. */
-bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion) const
+bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, EFableRegion* OutRegion,
+                                       FFableTownNavigationGuide* OutGuide) const
 {
     OutLocation = FVector::ZeroVector;
     OutLabel.Empty();
+    if (OutGuide)
+    {
+        // 전투·원정·실패 목표로 바뀔 때 이전 마을 경로를 남기지 않는다. / 前の町経路を残さない。
+        *OutGuide = FFableTownNavigationGuide();
+    }
     if (OutRegion)
     {
         *OutRegion = EFableRegion::Village;
@@ -429,17 +435,23 @@ bool AFablePlayerState::GetStoryTarget(FVector& OutLocation, FString& OutLabel, 
 
     if (bResolveTownService)
     {
-        FFableTownServiceDescriptor Service;
-        const EFableTownNavigationStatus Status =
-            FableTownNavigation::ResolveService(Catalog, Position, TownService, Service);
-        if (Status != EFableTownNavigationStatus::Ready)
+        FFableTownNavigationGuide Guide;
+        const EFableTownRouteStatus Status =
+            FableTownNavigation::ResolveServiceGuide(Catalog, Position, TownService, Guide);
+        if (Status != EFableTownRouteStatus::Ready)
         {
             OutLocation = FVector::ZeroVector;
-            OutLabel = FableTownNavigation::UnavailableText(Status);
+            OutLabel = FableTownNavigation::UnavailableRouteText(Status);
             return false;
         }
 
-        OutLocation = Service.WorldLocation;
+        // 실제 서비스 좌표는 보존하고 현재 층의 다음 진입점만 표시한다. / サービス座標と案内点を分ける。
+        OutLocation = Guide.WaypointWorld;
+        OutLabel = FableTownNavigation::GuideLabel(OutLabel, Guide);
+        if (OutGuide)
+        {
+            *OutGuide = Guide;
+        }
     }
     else if (Current == EFableRegion::Village && Destination == EFableRegion::Village &&
              (!bInPreparedTown || Physical.TownId != EFableTownId::LegacyVillage ||

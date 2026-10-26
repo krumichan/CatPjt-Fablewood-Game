@@ -7,6 +7,7 @@
 
 class AFableCharacter;
 struct FFablePersonalExpeditionResult;
+struct FFableTownNavigationGuide;
 
 /** 현재 열려 있는 NPC 대화 종류 값의 종류를 정의한다. */
 enum class EFableDialogue : uint8
@@ -688,8 +689,9 @@ public:
     /** 주변 이야기 오브젝트의 위치 번호 값을 반환한다. */
     int32 GetNearbyStoryObjectIndex() const;
 
-    /** 현재 소유 원정의 목표를 실제 월드 좌표로 반환한다. */
-    bool GetNavigationTarget(FVector& OutLocation, FString& OutLabel) const;
+    /** 실제 선택한 목표와 같은 안내 결과를 HUD에 전달한다. / 選択済み目標と同じ案内をHUDへ渡す。 */
+    bool GetNavigationTarget(FVector& OutLocation, FString& OutLabel,
+                             FFableTownNavigationGuide* OutGuide = nullptr) const;
 
     /** 아직 확인하지 않은 임시 안내를 표시할지 판단한다. */
     bool ShouldShowTransientNotice() const;
