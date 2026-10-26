@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "FableTownTypes.h"
+#include "FableTownServiceTypes.h"
 #include "FableTownCatalog.generated.h"
 
 class UWorld;
@@ -112,6 +113,18 @@ public:
     bool ToLocal(EFableTownId TownId, const FVector& WorldPosition, FVector& OutLocalPosition) const;
     bool ResolveAnchor(const FFableTownAnchorRef& Anchor, int32 SlotIndex, FTransform& OutWorldTransform,
                        bool bRequireGeometryReady = true) const;
+
+    /** 기존 앵커에서만 서비스를 파생하며 후보 배치를 생성하지 않는다. / 既存アンカーだけからサービスを導く。 */
+    bool ResolveService(const FFableTownServiceRef& Service, FFableTownServiceDescriptor& OutService,
+                        bool bRequireGeometryReady = true) const;
+
+    /** 표시/선택용 순수 범위 조회이며 서버 권한을 부여하지 않는다. / 表示・選択向けの範囲照会でサーバー権限を付与しない。 */
+    bool ResolveNearbyService(const FVector& WorldPosition, EFableTownServiceId ServiceId,
+                              FFableTownServiceDescriptor& OutService) const;
+
+    /** 단일 정의의 순수 조회이며 Actor·접지·소유권 승인이 아니다. / 単一定義の照会でActor・接地・所有権の承認ではない。 */
+    static bool ResolveDefinitionService(const FFableTownDefinition& Definition, const FFableTownServiceRef& Service,
+                                         FFableTownServiceDescriptor& OutService, bool bRequireGeometryReady = true);
 
     /** 메모리 fixture도 동일한 순수 검사를 사용한다. / メモリーfixtureも同じ純粋検査を利用する。 */
     static bool ValidateDefinition(const FFableTownDefinition& Definition, FString& OutError);

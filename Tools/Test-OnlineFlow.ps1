@@ -5,7 +5,7 @@ param(
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results','unit4-legacy-services')][string]$Scenario='connectivity',
     [ValidateSet('none','unit2-legacy-anchors')][string]$TownTravelScenario='none',
     [ValidateRange(1024,65535)][int]$Port=7821,
     [ValidateRange(300,1800)][int]$TimeoutSeconds=650
@@ -225,6 +225,7 @@ function Stop-OnlineOwned($Record,[bool]$Scenario=$false){
     if($process){Stop-Process -InputObject $process -Force -ErrorAction Stop;Assert-Online ($handle.WaitForExit(10000)) 'owned_process_stop_timeout'}
     else{Assert-Online ($handle.WaitForExit(10000)) 'owned_process_exit_unobserved'}
     $Record.exitCode=$handle.ExitCode;Assert-Online ($null -ne $Record.exitCode) 'owned_process_exit_code_missing'
+    if($script:Scenario -ceq 'unit4-legacy-services'){$Record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
     if($Scenario){$Record.forcedForScenario=$true}else{$Record.cleanupForced=$true}
 }
 function Read-OnlineReport($Record,[switch]$AllowMissing){
@@ -276,6 +277,9 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$fa
             Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq $(if($extra){100}else{65}) -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'results_pending_quest_progression_mismatch'
         }elseif($Scenario -ceq 'party-entry'){
             Assert-Online ($Checkpoint.level -eq 2 -and $Checkpoint.experience -eq 105 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 1 -and $Checkpoint.dungeonCompletions -eq 0) 'entry_forest_progression_totals_mismatch'
+        }elseif($Scenario -ceq 'unit4-legacy-services'){
+            # 포털은 준비 UI까지만 열며 별도 던전 의뢰 수락·입장·완료는 하지 않는다.
+            Assert-Online ($Checkpoint.level -eq 2 -and $Checkpoint.experience -eq 105 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 0 -and $Checkpoint.dungeonCompletions -eq 0) 'services_final_progression_mismatch'
         }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.level -eq 4 -and $Checkpoint.experience -eq 65 -and $Checkpoint.forestQuest -eq 3 -and $Checkpoint.dungeonQuest -eq 2 -and $Checkpoint.dungeonCompletions -eq 0) 'dungeon_progression_totals_mismatch'
         }else{
@@ -292,12 +296,19 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$fa
         Assert-Online ($Checkpoint.wallet.healthPotions -eq 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'normal_potion_durable_quantity_mismatch'
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
-        Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
+        if($Scenario -ceq 'unit4-legacy-services'){
+            # 서비스 run만 초기 마나 물약 사용을 건너뛰며 숲 전투의 체력 물약 사용은 허용한다.
+            Assert-Online ($Checkpoint.wallet.healthPotions -ge 1 -and $Checkpoint.wallet.healthPotions -le 4 -and $Checkpoint.wallet.manaPotions -eq 2) 'services_potion_quantity_mismatch'
+        }else{
+            Assert-Online ($Checkpoint.wallet.healthPotions -ge 0 -and $Checkpoint.wallet.healthPotions -le 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'dungeon_potion_quantity_mismatch'
+        }
         if($Scenario -ceq 'party-results'){
             $extra=$Role -ceq 'client1' -and -not $BeforeSolo
             Assert-Online ($Checkpoint.wallet.gold -eq $(if($extra){401}else{383}) -and $Checkpoint.wallet.ore -eq $(if($extra){22}else{21}) -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'results_personal_reward_totals_mismatch'
         }elseif($Scenario -ceq 'party-entry'){
             Assert-Online ($Checkpoint.wallet.gold -eq 135 -and $Checkpoint.wallet.ore -eq 7 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 0 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 5 -and $Checkpoint.stashCount -eq 0) 'entry_forest_reward_totals_mismatch'
+        }elseif($Scenario -ceq 'unit4-legacy-services'){
+            Assert-Online ($Checkpoint.wallet.gold -eq 90 -and $Checkpoint.wallet.ore -eq 5 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 0 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 5 -and $Checkpoint.stashCount -eq 0) 'services_final_economy_mismatch'
         }elseif($Scenario -ceq 'dungeon'){
             Assert-Online ($Checkpoint.wallet.gold -eq 383 -and $Checkpoint.wallet.ore -eq 21 -and $Checkpoint.wallet.essence -eq 0 -and $Checkpoint.wallet.rootCores -eq 1 -and $Checkpoint.wallet.moonCrystals -eq 0 -and $Checkpoint.bagCount -eq 6 -and $Checkpoint.stashCount -eq 0) 'dungeon_reward_totals_mismatch'
         }else{
@@ -760,13 +771,185 @@ function Assert-OnlineResultsClient($Report,[string]$Role,[string]$Phase,[bool]$
     Assert-OnlineResultsSameGrant $value.abandonedResult $value.acknowledgedAbandonedResult
     Assert-Online ($value.acknowledgedAbandonedResult.acknowledged -eq $true -and (Equal-Online $value.finalProfile $Report.checkpoint)) 'results_terminal_checkpoint_or_ack_changed'
 }
+
+# Unit4 opt-in 보고서는 일반 UI와 서버 authority/ACK를 서로 다른 증거로 검증한다.
+function Get-OnlineTownServiceLabels{
+    return @('guide-out-of-range-reject','guide-open','forest-accept','forest-three-kills','guide-turnin-open','forest-turnin','shop-wrong-service-reject','shop-open','shop-buy-one','forge-wrong-service-reject','forge-open','forge-upgrade-one','portal-open')
+}
+function Get-OnlineTownServiceOutcome([string]$Label){
+    if($Label -cin @('guide-out-of-range-reject','shop-wrong-service-reject','forge-wrong-service-reject')){return 'authority-rejected'}
+    if($Label -cin @('guide-open','guide-turnin-open','shop-open','forge-open','portal-open')){return 'opened-ui'}
+    if($Label -ceq 'forest-three-kills'){return 'shared-forest-ack'}
+    return 'acknowledged-save'
+}
+function Assert-OnlineTownServiceInteger($Value,[long]$Minimum,[string]$Code){
+    Assert-Online ($Value -isnot [bool] -and ($Value -is [int] -or $Value -is [long] -or $Value -is [double]) -and
+        -not [double]::IsNaN([double]$Value) -and -not [double]::IsInfinity([double]$Value) -and
+        [double]$Value -eq [math]::Truncate([double]$Value) -and [double]$Value -ge $Minimum -and
+        [double]$Value -le 9007199254740991) $Code
+}
+function Assert-OnlineTownServiceProfile($Profile,[string]$PlayerId){
+    Require-OnlineFields $Profile @('playerId','revision','acknowledgedRevision','profileHash','ready','savePending','wallet','items','bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId','forestQuest','forestKills','moonwellQuest','moonwellCompletions','storyChapter','storyObjectMask','storySealMask') 'services_full_profile_incomplete'
+    Assert-Online ([string]$Profile.playerId -ceq $PlayerId -and $PlayerId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and
+        [string]$Profile.profileHash -cmatch '^[a-f0-9]{64}$' -and $Profile.ready -is [bool] -and $Profile.ready -eq $true -and
+        $Profile.savePending -is [bool] -and $Profile.savePending -eq $false) 'services_profile_not_saved_ready'
+    Assert-OnlineTownServiceInteger $Profile.revision 1 'services_profile_revision_invalid'
+    Assert-OnlineTownServiceInteger $Profile.acknowledgedRevision 1 'services_profile_ack_invalid'
+    Assert-Online ($Profile.revision -eq $Profile.acknowledgedRevision) 'services_profile_not_exact_ack'
+    Require-OnlineFields $Profile.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'services_wallet_incomplete'
+}
+function Assert-OnlineTownServicesNoRawNonce($Value){
+    if($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]){return}
+    if($Value -is [array]){foreach($item in $Value){Assert-OnlineTownServicesNoRawNonce $item};return}
+    foreach($property in $Value.PSObject.Properties){
+        Assert-Online ($property.Name -cnotmatch '(?i)^(nonce|rawNonce|connectionNonce)$') 'services_raw_nonce_in_public_report'
+        Assert-OnlineTownServicesNoRawNonce $property.Value
+    }
+}
+function Assert-OnlineTownServicesClient($Report,[string]$Role){
+    Require-OnlineFields $Report @('townServiceCheckpoints','processId','checkpoint') 'services_client_report_missing'
+    $rows=@($Report.townServiceCheckpoints);$labels=@(Get-OnlineTownServiceLabels)
+    Assert-Online ($rows.Count -eq 13 -and (Equal-Online @($rows.label) $labels)) 'services_exact_thirteen_labels_missing'
+    $ownerId=[string]$Report.checkpoint.playerId;$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$lastSequence=0
+    foreach($row in $rows){
+        Require-OnlineFields $row @('label','expectedOutcome','ownerRole','clientProcessId','networkMode','actualUiObserved','clientBefore','before','after','serverObservation','peerUnchangedRequired','peerUnchanged','terminal') 'services_client_row_incomplete'
+        $outcome=Get-OnlineTownServiceOutcome ([string]$row.label)
+        Assert-Online ($row.expectedOutcome -ceq $outcome -and $row.terminal -ceq $outcome -and $row.ownerRole -ceq $Role -and
+            $row.clientProcessId -eq $Report.processId -and $row.networkMode -ceq 'client' -and $row.actualUiObserved -is [bool]) 'services_client_row_identity_or_terminal'
+        if($outcome -ceq 'opened-ui'){Assert-Online ($row.actualUiObserved -eq $true) 'services_actual_ui_not_observed'}
+        # 최초 client 관측과 서버 before 사본을 별도 보존하며 둘의 기록 시점은 혼동하지 않는다.
+        Assert-OnlineTownServiceProfile $row.clientBefore $ownerId
+        Assert-OnlineTownServiceProfile $row.before $ownerId
+        Assert-OnlineTownServiceProfile $row.after $ownerId
+        $event=$row.serverObservation
+        Require-OnlineFields $event @('observationId','sequence','ownerRole','ownerPlayerId','serverProcessId','networkMode','action','ownerCurrent','grounded','inRange','authorityAllowedBefore','rpgGateAccepted','rpcReceived','noticeBefore','noticeAfter','noticeMatched','before','after','ownerBeforeCore','ownerAfterCore','peerBeforeCore','peerAfterCore','peerBefore','peerAfter','peerUnchangedRequired','peerUnchanged','terminal') 'services_server_event_incomplete'
+        Assert-OnlineTownServicesNoRawNonce $row
+        Assert-Online (-not [string]::IsNullOrWhiteSpace([string]$event.observationId) -and $seen.Add([string]$event.observationId) -and
+            $event.ownerRole -ceq $Role -and $event.ownerPlayerId -ceq $ownerId -and $event.networkMode -ceq 'dedicated' -and
+            $event.ownerCurrent -is [bool] -and $event.ownerCurrent -eq $true) 'services_server_event_owner_or_identity'
+        Assert-OnlineTownServiceInteger $event.sequence 1 'services_server_sequence_invalid'
+        Assert-Online ($event.sequence -gt $lastSequence) 'services_owner_event_sequence_not_monotonic'
+        $lastSequence=$event.sequence
+        Assert-OnlineTownServiceInteger $event.serverProcessId 1 'services_server_process_invalid'
+        foreach($flag in @('grounded','inRange','authorityAllowedBefore','rpgGateAccepted','rpcReceived','noticeMatched','peerUnchangedRequired','peerUnchanged')){
+            Assert-Online ($event.$flag -is [bool]) 'services_server_event_flag_type'
+        }
+        foreach($name in @('ownerBeforeCore','ownerAfterCore','peerBeforeCore','peerAfterCore')){
+            Assert-Online ($null -ne $event.$name -and $event.$name -is [pscustomobject] -and @($event.$name.PSObject.Properties).Count -gt 0) 'services_core_object_missing'
+        }
+        Assert-OnlineTownServiceInteger $event.noticeBefore 0 'services_notice_before_invalid'
+        Assert-OnlineTownServiceInteger $event.noticeAfter 0 'services_notice_after_invalid'
+        Assert-OnlineTownServiceProfile $event.before $ownerId
+        Assert-OnlineTownServiceProfile $event.after $ownerId
+        foreach($endpoint in @('before','after')){
+            foreach($field in @('revision','acknowledgedRevision','profileHash')){
+                Assert-Online (Equal-Online $row.$endpoint.$field $event.$endpoint.$field) 'services_client_server_ack_mismatch'
+            }
+        }
+        $peerId=[string]$event.peerBefore.playerId
+        Assert-Online ($peerId -cne $ownerId -and $event.peerAfter.playerId -ceq $peerId) 'services_distinct_peer_missing'
+        Assert-OnlineTownServiceProfile $event.peerBefore $peerId
+        Assert-OnlineTownServiceProfile $event.peerAfter $peerId
+        $peerRequired=$row.label -cne 'forest-three-kills'
+        Assert-Online ($row.peerUnchangedRequired -is [bool] -and $row.peerUnchanged -is [bool] -and
+            $row.peerUnchangedRequired -eq $peerRequired -and $event.peerUnchangedRequired -eq $peerRequired -and
+            $row.peerUnchanged -eq $event.peerUnchanged) 'services_peer_scope_flags_mismatch'
+        if($peerRequired){
+            # 동료의 경제·아이템·장비·퀘스트 core만 비교하며 이동/UTC 저장 bookkeeping의 hash·revision은 구별한다.
+            Assert-Online ($row.peerUnchanged -eq $true -and (Equal-Online $event.peerBeforeCore $event.peerAfterCore)) 'services_peer_profile_changed'
+        }
+        if($outcome -ceq 'shared-forest-ack'){
+            Assert-Online ($event.action -ceq 'forest' -and $event.rpcReceived -eq $false -and $event.rpgGateAccepted -eq $false -and
+                $event.terminal -ceq 'shared-forest-ack' -and $row.after.revision -gt $row.before.revision) 'services_shared_forest_ack_invalid'
+        }else{
+            Assert-Online ($event.rpcReceived -eq $true -and $event.rpgGateAccepted -eq $true) 'services_rpc_not_received_or_gate_skipped'
+            if($outcome -ceq 'authority-rejected'){
+                Assert-Online ($event.authorityAllowedBefore -eq $false -and $event.inRange -eq $false -and
+                    $event.noticeMatched -eq $true -and $event.noticeAfter -gt $event.noticeBefore -and
+                    $event.terminal -ceq 'authority-rejected') 'services_authority_rejection_not_observed'
+            }else{
+                Assert-Online ($event.authorityAllowedBefore -eq $true -and $event.grounded -eq $true -and $event.inRange -eq $true) 'services_current_owner_ground_or_range_missing'
+                Assert-Online ($event.terminal -ceq $(if($outcome -ceq 'opened-ui'){'dialogue-authorized'}else{'acknowledged-save'})) 'services_server_terminal_invalid'
+            }
+        }
+        if($outcome -ceq 'acknowledged-save'){
+            Assert-Online ($row.after.revision -eq $row.before.revision+1 -and $row.after.profileHash -cne $row.before.profileHash -and
+                $event.after.revision -eq $event.before.revision+1) 'services_single_exact_ack_not_observed'
+        }elseif($outcome -cne 'shared-forest-ack'){
+            Assert-Online ($row.before.revision -eq $row.after.revision -and $row.before.profileHash -ceq $row.after.profileHash -and
+                (Equal-Online $event.ownerBeforeCore $event.ownerAfterCore)) 'services_nonmutation_changed_profile'
+        }
+        $actions=switch([string]$row.label){
+            'guide-out-of-range-reject' {@('interact','quest')}
+            {$_ -in @('guide-open','guide-turnin-open','shop-open','forge-open','portal-open')} {@('interact')}
+            {$_ -in @('forest-accept','forest-turnin')} {@('quest')}
+            'forest-three-kills' {@('forest')}
+            {$_ -in @('shop-wrong-service-reject','shop-buy-one')} {@('shop')}
+            default {@('enhance')}
+        }
+        Assert-Online ($event.action -cin @($actions)) 'services_action_kind_mismatch'
+        if($row.label -ceq 'forest-three-kills'){
+            Assert-Online ($row.after.forestQuest -eq 2 -and $row.after.forestKills -eq 3 -and $row.after.wallet.gold -eq 45 -and $row.after.wallet.ore -eq 3) 'services_actual_three_kill_totals_mismatch'
+        }elseif($row.label -ceq 'forest-turnin'){
+            Assert-Online ($row.after.forestQuest -eq 3 -and $row.after.forestKills -eq 3 -and $row.after.wallet.gold -eq 135 -and $row.after.wallet.ore -eq 7 -and $row.after.level -eq 2 -and $row.after.experience -eq 105 -and $row.after.bagCount -eq 5) 'services_quest_turnin_totals_mismatch'
+        }elseif($row.label -ceq 'shop-buy-one'){
+            Assert-Online ($row.after.wallet.gold -eq $row.before.wallet.gold-15 -and $row.after.wallet.healthPotions -eq $row.before.wallet.healthPotions+1 -and
+                $row.after.wallet.ore -eq $row.before.wallet.ore -and $row.after.wallet.manaPotions -eq $row.before.wallet.manaPotions -and
+                (Equal-Online @($row.before.items) @($row.after.items))) 'services_purchase_delta_mismatch'
+        }elseif($row.label -ceq 'forge-upgrade-one'){
+            Assert-Online ($row.after.wallet.gold -eq $row.before.wallet.gold-30 -and $row.after.wallet.ore -eq $row.before.wallet.ore-2 -and
+                @($row.before.items).Count -eq @($row.after.items).Count) 'services_upgrade_cost_or_count_mismatch'
+            $changed=0
+            for($index=0;$index -lt @($row.before.items).Count;$index++){
+                $beforeItem=$row.before.items[$index];$afterItem=$row.after.items[$index]
+                if(Equal-Online $beforeItem $afterItem){continue}
+                $expectedItem=$beforeItem|ConvertTo-Json -Depth 80|ConvertFrom-Json -Depth 80
+                Assert-Online ($beforeItem.upgrade -eq 0 -and $beforeItem.slot -eq 0) 'services_upgrade_target_not_zero_weapon'
+                $expectedItem.upgrade=1
+                Assert-Online (Equal-Online $expectedItem $afterItem) 'services_upgrade_changed_identity_or_other_item_fields'
+                $changed++
+            }
+            Assert-Online ($changed -eq 1 -and $row.before.equippedWeaponInstanceId -ceq $row.after.equippedWeaponInstanceId -and
+                $row.before.equippedArmorInstanceId -ceq $row.after.equippedArmorInstanceId) 'services_upgrade_not_exactly_one_preserved_weapon'
+        }
+    }
+}
+function Assert-OnlineTownServicesServer($ServerReport,$ClientReports){
+    Require-OnlineFields $ServerReport @('serverTownServices','processId') 'services_server_report_missing'
+    $value=$ServerReport.serverTownServices
+    Require-OnlineFields $value @('phase','status','events','actualAirborneNegativeClaimed') 'services_server_report_incomplete'
+    Assert-Online ($value.phase -eq 9 -and $value.status -ceq 'complete' -and $value.actualAirborneNegativeClaimed -is [bool] -and
+        $value.actualAirborneNegativeClaimed -eq $false) 'services_terminal_server_scope_invalid'
+    $events=@($value.events);Assert-Online ($events.Count -eq 26) 'services_exact_both_role_events_missing'
+    Assert-OnlineTownServicesNoRawNonce $value
+    $sequences=[Collections.Generic.HashSet[long]]::new();$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($event in $events){
+        # 계정 간 비동기 ACK의 완료 순서와 사건의 sequence를 구별한다. 역할별 순서는 client row에서 검사한다.
+        Assert-OnlineTownServiceInteger $event.sequence 1 'services_server_sequence_invalid'
+        Assert-Online ($event.ownerRole -cin @('client1','client2') -and $event.serverProcessId -eq $ServerReport.processId -and
+            $sequences.Add([long]$event.sequence) -and $seen.Add([string]$event.observationId)) 'services_server_sequence_or_process_mismatch'
+    }
+    foreach($role in @('client1','client2')){
+        $report=$ClientReports.$role
+        Assert-OnlineTownServicesClient $report $role
+        $peer=if($role -ceq 'client1'){'client2'}else{'client1'}
+        foreach($row in @($report.townServiceCheckpoints)){
+            $event=$row.serverObservation
+            Assert-Online ($event.peerBefore.playerId -ceq $ClientReports.$peer.checkpoint.playerId) 'services_event_peer_identity_mismatch'
+            $matches=@($events|Where-Object {$_.observationId -ceq $event.observationId -and $_.ownerRole -ceq $role})
+            Assert-Online ($matches.Count -eq 1 -and (Equal-Online $matches[0] $event)) 'services_embedded_event_not_exact_server_event'
+        }
+    }
+    $summary['unit4LegacyServices']=[ordered]@{status='running';exactClientCheckpointLabels=$true;serverAuthorityAndExactAckValidated=$true;peerInvarianceValidated=$true;actualAirborneNegativeClaimed=$false;serverEventCount=26;reports=@('register/client1.json','register/client2.json','register/server.json');nativeOnlyProofUsed=$false;servicePlacementValidationClaimed=$false;newTownAdoptionClaimed=$false}
+}
+
 function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$Crash){
     Require-OnlineFields $Report @('movementCm','checkpoint','joinAttempts','hasSession','flowState') 'client_report_incomplete'
     Assert-Online ($Report.movementCm -ge 65) 'normal_movement_missing'
     foreach($name in @('wrong_password_rejected','character_preview','two_distinct_remote_players','normal_movement')){Assert-Online (Test-OnlineCheck $Report $name) 'required_ui_check_missing'}
     if($Phase -ceq 'register'){
         Assert-Online (Test-OnlineCheck $Report 'connection_failure_visible') 'offline_failure_missing'
-        Assert-Online (Test-OnlineCheck $Report 'normal_potion_saved_once') 'potion_ack_missing'
+        if($Scenario -cne 'unit4-legacy-services'){Assert-Online (Test-OnlineCheck $Report 'normal_potion_saved_once') 'potion_ack_missing'}
         if($Scenario -in @('dungeon','growth')){
             foreach($name in @('both_forest_quests_active','forest_reward_equipped','entered_root_ruins','second_wave','boss_seen','ally_downed','boss_defeated','ally_revived','server_reward_totals')){
                 Assert-Online (Test-OnlineCheck $Report $name) 'dungeon_normal_gameplay_check_missing'
@@ -774,6 +957,7 @@ function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$C
         }
         Assert-Online ($Report.joinAttempts -ge 2) 'fresh_ticket_retry_missing'
     }
+    if($Scenario -ceq 'unit4-legacy-services' -and $Phase -ceq 'register'){Assert-OnlineTownServicesClient $Report $Role}
     if($Scenario -ceq 'growth' -and $Phase -ceq 'register'){Assert-OnlineGrowth $Report $Role}
     if($Scenario -ceq 'reconnect' -and $Phase -in @('register','resume')){Assert-OnlineMidrun $Report $Role $false}
     if($Scenario -ceq 'party' -and $Phase -in @('register','resume')){Assert-OnlineParty $Report $Role ($Phase -ceq 'resume')}
@@ -866,6 +1050,9 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'unit4-legacy-services' -and $ClientReports.client1.mode -ceq 'register'){
+        Assert-OnlineTownServicesServer $ServerReport $ClientReports
+    }
     if($Scenario -ceq 'party-results' -and $ClientReports.client1.mode -ceq 'register'){
         Assert-OnlineResultsServer $ServerReport $ClientReports
     }
@@ -1005,6 +1192,7 @@ function Wait-OnlineDrain([string]$Phase,$Server,$Clients,$Reports){
             # Wait within the existing drain deadline; only a signaled handle proves an exit code.
             if($null -ne $running -or -not $handle.WaitForExit(0)){$closed=$false;continue}
             $record.exitCode=$handle.ExitCode;Assert-Online ($null -ne $record.exitCode) 'client_exit_code_missing'
+            if($Scenario -ceq 'unit4-legacy-services'){$record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
             if(-not $record.forcedForScenario){Assert-Online ($record.exitCode -eq 0) 'client_terminal_exit_failed'}
         }
         $zero=$null -ne $report -and $report.networkMode -ceq 'dedicated' -and $report.localControllerCount -eq 0 -and @($report.profiles).Count -eq 0
@@ -1028,6 +1216,7 @@ function Quit-OnlineServer([string]$Phase,$Server){
     Assert-Online ($handle.WaitForExit(30000)) 'server_graceful_quit_timeout';$Server.exitCode=$handle.ExitCode
     Assert-Online ($null -ne $Server.exitCode) 'server_exit_code_missing'
     Assert-Online ($Server.exitCode -eq 0) 'server_graceful_exit_failed'
+    if($Scenario -ceq 'unit4-legacy-services'){$Server|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
 }
 function Get-OnlineProtectedFiles{
     $items=@();$saved=Join-Path $script:FableProjectRoot 'Saved';$builds=Join-Path $script:FableProjectRoot 'Builds'
@@ -1098,6 +1287,7 @@ try{
         $summary.packagedClient=[ordered]@{executable=$clientExecutable;sha256=(Hash-Online $clientExecutable);isolatedUserDirectories=$true;usesEditorClient=$false}
     }
     foreach($path in @($serverExecutable,$clientExecutable)){Assert-Online (Test-Path -LiteralPath $path -PathType Leaf) 'editor_executable_missing'}
+    if($Scenario -ceq 'unit4-legacy-services'){Assert-Online (-not [string]::IsNullOrWhiteSpace($PackagedClientExecutable)) 'services_requires_packaged_clients'}
     $backendBefore=Read-OnlineBackendIdentity
     $summary.backendIdentity=[ordered]@{root=$backendLink.root;serverId=$backendBefore.serverId;databasePort=$backendBefore.databasePort;schema=$backendBefore.schema;containerName=$backendBefore.containerName;volume=$backendBefore.volume;composeProject=$backendBefore.composeProject;initialPid=$backendBefore.backendPid}
     $originalFiles=@(Get-OnlineProtectedFiles|ForEach-Object {[pscustomobject]@{path=$_.FullName;sha256=Hash-Online $_.FullName}})
@@ -1120,7 +1310,7 @@ try{
         $accounts[$role]=[ordered]@{name=('o'+[Guid]::NewGuid().ToString('N').Substring(0,24));password=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(30));initialClass=$(if($role -ceq 'client1'){1}else{2})}
     }
     $contextPath=Join-Path $privateFolder 'register-context.private.json'
-    $crashSecond=$Scenario -cnotin @('party-entry','party-isolation')
+    $crashSecond=$Scenario -cnotin @('party-entry','party-isolation','unit4-legacy-services')
     Write-OnlineJson $contextPath @{mode='register';scenario=$Scenario;offlineFailure=$true;crashRole=$(if($crashSecond){'client2'}else{''});accounts=$accounts}
     $stage='register-offline-failure';$clients=@{}
     foreach($role in @('client1','client2')){$clients[$role]=Start-OnlineValidationProcess $role 'register' $contextPath}
@@ -1188,6 +1378,40 @@ try{
     $shots=@();foreach($role in @('client1','client2')){$shots+=@(Assert-OnlineShots $reports[$role] 'login' 5)}
     $summary.phases.login=[ordered]@{status='passed';serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;resumeWalletItemsSummaryExact=$true;reports=@((Join-Path $runFolder 'login\client1.json'),(Join-Path $runFolder 'login\client2.json'));canonical=(Join-Path $runFolder 'login\canonical.json')}
     Quit-OnlineServer 'login' $server
+    if($Scenario -ceq 'unit4-legacy-services'){
+        # 기존 register→안전 이탈→같은 DB API 재시작→두 계정 login을 그대로 사용한다.
+        $clients=@($ownedProcesses|Where-Object role -IN @('client1','client2'))
+        $servers=@($ownedProcesses|Where-Object role -CEQ 'server')
+        Assert-Online ($ownedProcesses.Count -eq 6 -and $clients.Count -eq 4 -and $servers.Count -eq 2 -and
+            @($ownedProcesses|Where-Object {$_.forcedForScenario -or $_.cleanupForced -or $null -eq $_.exitCode -or $_.exitCode -ne 0}).Count -eq 0) 'services_exact_four_clean_packaged_starts_missing'
+        Assert-Online ($summary.unit4LegacyServices.status -ceq 'running' -and $summary.phases.register.status -ceq 'passed' -and
+            $summary.phases.login.resumeWalletItemsSummaryExact -eq $true -and $summary.backendRestart.sameDatabaseIdentity -eq $true -and
+            $summary.backendRestart.healthy -eq $true) 'services_safe_leave_restart_relogin_not_verified'
+        $timeline=@()
+        foreach($record in $ownedProcesses){
+            Require-OnlineFields $record @('startedUtc','exitedUtc') 'services_actual_process_exit_time_missing'
+            $start=Online-UtcTicks $record.startedUtc;$finish=Online-UtcTicks $record.exitedUtc
+            Assert-Online ($finish -ge $start) 'services_process_lifetime_invalid'
+            if($record.role -cne 'server'){
+                Assert-Online ($record.executable -ieq $clientExecutable) 'services_client_not_packaged_executable'
+                $timeline+=@([pscustomobject]@{ticks=$start;delta=1},[pscustomobject]@{ticks=$finish;delta=-1})
+            }
+        }
+        foreach($phase in @('register','login')){
+            Assert-Online ((Equal-Online @($ownedProcesses|Where-Object phase -CEQ $phase|ForEach-Object role|Sort-Object) @('client1','client2','server'))) 'services_phase_process_roles_invalid'
+        }
+        $active=0;$peak=0
+        foreach($point in @($timeline|Sort-Object ticks,delta)){$active+=$point.delta;$peak=[math]::Max($peak,$active)}
+        Assert-Online ($active -eq 0 -and $peak -eq 2 -and $timeline.Count -eq 8) 'services_client_concurrency_not_two'
+        $first=@($servers|Where-Object phase -CEQ 'register')[0];$second=@($servers|Where-Object phase -CEQ 'login')[0]
+        Assert-Online ((Online-UtcTicks $first.exitedUtc) -le (Online-UtcTicks $second.startedUtc)) 'services_editor_servers_overlapped'
+        $summary.unit4LegacyServices.actualPackagedClientStarts=4
+        $summary.unit4LegacyServices.actualPackagedClientPeak=2
+        $summary.unit4LegacyServices.actualSequentialEditorServers=2
+        $summary.unit4LegacyServices.safeLeaveAndApiRestartFullProfileExact=$true
+        $summary.unit4LegacyServices['reloginReports']=@('login/client1.json','login/client2.json','login/server.json')
+        $summary.unit4LegacyServices.status='passed'
+    }
     if($Scenario -ceq 'party-results'){
         $startedClients=@($ownedProcesses|Where-Object role -IN @('client1','client2'))
         $interrupted=@($ownedProcesses|Where-Object forcedForScenario -EQ $true)

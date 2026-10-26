@@ -5,6 +5,7 @@
 #include "FableRPGTypes.h"
 #include "FableExpeditionTypes.h"
 #include "FableExpeditionResultTypes.h"
+#include "FableTownServiceTypes.h"
 #include "FableGameMode.generated.h"
 
 class AFableEnemy;
@@ -30,6 +31,7 @@ class FABLEWOOD_API AFableGameMode : public AGameModeBase
     GENERATED_BODY()
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FFableTownTravelTestAccess;
+    friend struct FFableTownServiceTestAccess;
 #endif
 
 public:
@@ -156,6 +158,13 @@ public:
 
     /** 살아 있는 요청자가 마을 서비스 범위 안에 있는지 확인한다. */
     bool CanUseTownService(APlayerController* Requester, FVector Location, float Radius = 300.0f) const;
+
+    /** 변경 동작은 현재 소유 pawn의 마을에서 논리 서비스를 다시 검사한다. / 変更操作は現所有pawnの村で論理サービスを再検査する。 */
+    bool CanUseTownService(APlayerController* Requester, EFableTownServiceId ServiceId) const;
+
+    /** 정확한 현 소유 연결과 실제 지지 바닥에서 논리 서비스를 확인한다. / 現所有接続と実際の支持床で論理サービスを確認する。 */
+    bool CanUseTownService(APlayerController* Requester, const FFableTownServiceRef& Service,
+                           FFableTownServiceDescriptor& OutService) const;
 
     /** 파티 UUID와 준비 리비전으로 전원 입장을 서버에서 원자적으로 확정한다. */
     bool RequestStartExpedition(APlayerController* Requester, FGuid PartyId, int32 ExpectedPreparationRevision);

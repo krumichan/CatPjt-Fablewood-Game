@@ -15,6 +15,8 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/AutomationTest.h"
@@ -160,6 +162,18 @@ namespace
             {
                 FFableTownTestAccess::AttachState(Mode, State);
                 Towns = AFableTownManager::Ensure(World);
+
+                // 실제 Legacy 서비스의 지원 바닥만 합성한다. 후보 지형은 생성하지 않는다. / Legacyの支持床だけを合成する。
+                AActor* GroundActor = World->SpawnActor<AActor>();
+                UBoxComponent* Ground = NewObject<UBoxComponent>(GroundActor);
+                GroundActor->SetRootComponent(Ground);
+                Ground->SetBoxExtent(FVector(3000, 3000, 10));
+                Ground->SetCollisionObjectType(ECC_WorldStatic);
+                Ground->SetCollisionResponseToAllChannels(ECR_Block);
+                Ground->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+                Ground->ComponentTags.Add(TEXT("Meadow"));
+                Ground->RegisterComponent();
+                GroundActor->SetActorLocation(FVector(0, 0, -10));
             }
         }
 
@@ -214,6 +228,21 @@ namespace
             World->AddController(Player.Controller);
             Controllers.Add(Player.Controller);
             Parties->RegisterPlayer(Player.Controller);
+
+            // Legacy 양성 대조만 실제 capsule 높이로 접지한다. 합성 후보 문맥은 그대로 둔다. / Legacy陽性対照だけを接地する。
+            FFableTownLocationContext Physical;
+            if (Towns && Towns->ResolvePhysicalContext(Player.Controller, Physical) &&
+                Physical.TownId == EFableTownId::LegacyVillage)
+            {
+                Position.Z = Player.Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 2.15f;
+                Player.Hero->SetActorLocation(Position);
+                Player.Hero->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+            }
+            if (Towns)
+            {
+                Towns->RegisterOrRefreshConnection(Player.Controller);
+                Towns->RefreshPhysicalPresence(Player.Controller);
+            }
             return Player;
         }
 

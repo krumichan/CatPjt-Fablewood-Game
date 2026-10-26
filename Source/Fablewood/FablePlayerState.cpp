@@ -310,11 +310,13 @@ bool AFablePlayerState::AllowMutation()
     return true;
 }
 
-/** 플레이어가 요청한 마을 서비스의 이용 거리 안에 있는지 확인한다. */
-bool AFablePlayerState::AtTownService(const FVector& Location) const
+/** 현재 소유 연결·pawn·서비스 층·지원 바닥을 변경 직전에 검사한다. / 変更直前に現所有接続・pawn・階・支持床を検査する。 */
+bool AFablePlayerState::AtTownService(EFableTownServiceId ServiceId) const
 {
-    const AFableGameMode* Mode = GetWorld() ? GetWorld()->GetAuthGameMode<AFableGameMode>() : nullptr;
-    return Mode && Mode->CanUseTownService(Cast<APlayerController>(GetOwner()), Location, 330.0f);
+    const APlayerController* Player = Cast<APlayerController>(GetOwner());
+    const AFableGameMode* Mode = AFableGameMode::Find(GetWorld());
+    return HasAuthority() && Player && Player->GetPlayerState<AFablePlayerState>() == this && Mode &&
+           Mode->CanUseTownService(const_cast<APlayerController*>(Player), ServiceId);
 }
 
 /** 안내 문구 값을 설정한다. */
@@ -843,7 +845,7 @@ void AFablePlayerState::UpgradeSkill(int32 Slot)
     {
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         SetNotice(TEXT("살아 있는 상태로 안내인 로완 근처에서 스킬을 강화하세요."));
         return;
@@ -908,7 +910,7 @@ void AFablePlayerState::SelectClass(EFableClass NewClass)
         SetNotice(TEXT("알 수 없는 직업입니다."));
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         SetNotice(TEXT("안내인 로완 근처에서 직업을 선택하세요. (1 / 2 / 3)"));
         return;
@@ -954,7 +956,7 @@ void AFablePlayerState::EquipItem(int32 ItemId)
     {
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()) && !AtTownService(FableRPG::ForgeLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide) && !AtTownService(EFableTownServiceId::Workshop))
     {
         SetNotice(TEXT("안내인 로완이나 대장간 근처에서 장비를 착용하세요."));
         return;
@@ -1009,7 +1011,7 @@ void AFablePlayerState::EnhanceItem(int32 ItemId)
     {
         return;
     }
-    if (!AtTownService(FableRPG::ForgeLocation()))
+    if (!AtTownService(EFableTownServiceId::Workshop))
     {
         SetNotice(TEXT("대장간에서 장비를 강화할 수 있습니다. I로 가방을 여세요."));
         return;
@@ -1068,7 +1070,7 @@ void AFablePlayerState::BuyShopItem(EFableShopOffer Offer)
         SetNotice(TEXT("판매하지 않는 상품입니다."));
         return;
     }
-    if (!AtTownService(FableRPG::MerchantLocation()))
+    if (!AtTownService(EFableTownServiceId::Merchant))
     {
         SetNotice(TEXT("살아 있는 상태로 마을 상인에게 가까이 다가가세요."));
         return;
@@ -1156,7 +1158,7 @@ void AFablePlayerState::SellItem(int32 ItemId)
     {
         return;
     }
-    if (!AtTownService(FableRPG::MerchantLocation()))
+    if (!AtTownService(EFableTownServiceId::Merchant))
     {
         SetNotice(TEXT("살아 있는 상태로 마을 상인에게 가까이 다가가세요."));
         return;
@@ -1661,7 +1663,7 @@ void AFablePlayerState::InteractQuest(EFableQuestId Quest)
     {
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         SetNotice(TEXT("살아 있는 상태로 안내인 로완에게 의뢰를 받거나 보상을 받으세요."));
         return;
@@ -2258,7 +2260,7 @@ bool AFablePlayerState::BeginWorkshopMutation()
         SetNotice(Common);
         return false;
     }
-    if (!AtTownService(FableRPG::ForgeLocation()))
+    if (!AtTownService(EFableTownServiceId::Workshop))
     {
         SetNotice(TEXT("살아 있는 상태로 마을 공방의 브람에게 가까이 다가가세요."));
         return false;

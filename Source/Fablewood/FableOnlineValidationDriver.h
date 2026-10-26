@@ -4,6 +4,7 @@
 #include "InputCoreTypes.h"
 #include "FableRPGTypes.h"
 #include "FableTownTravelTypes.h"
+#include "FableTownServiceTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "FableOnlineValidationDriver.generated.h"
 class FJsonObject;
@@ -31,7 +32,40 @@ public:
     /** 온라인 연결 하위 시스템의 요청과 콜백을 정리한다. */
     virtual void Deinitialize() override;
 
+    /** QA 전용 관측이며 기존 RPC의 판정과 경제 상태를 변경하지 않는다. */
+    int32 BeginServiceObservation(AFablePlayerController* Player, const TCHAR* Action, EFableTownServiceId Service);
+    void AcceptServiceRpgGate(int32 Index);
+    void SetObservedService(int32 Index, EFableTownServiceId Service);
+    void EndServiceObservation(int32 Index);
+
 private:
+    /** 기존 Legacy 입력과 저장 ACK만 사용한다. 새 네 마을은 채택하지 않는다. */
+    bool TickUnit4LegacyServices(AFablePlayerController* PC, AFablePlayerState* P, AFableCharacter* Hero, double Now);
+    void ObserveUnit4ServicesServer(UWorld* World);
+    TSharedRef<FJsonObject> ServiceProfile(const AFablePlayerState* P) const;
+    TSharedRef<FJsonObject> ServiceCore(const AFablePlayerState* P) const;
+    FString ServiceRole(const AFablePlayerState* P) const;
+    void CompleteServiceObservation(int32 Index);
+
+    struct FServiceObservation
+    {
+        TWeakObjectPtr<AFablePlayerController> Player;
+        TWeakObjectPtr<AFablePlayerState> Peer;
+        TSharedPtr<FJsonObject> Row;
+        EFableTownServiceId Service = EFableTownServiceId::Invalid;
+        double Started = 0;
+        bool bEnded = false, bPublished = false;
+    };
+
+    TArray<FServiceObservation> ServiceObservations;
+    TArray<TSharedPtr<FJsonValue>> ServiceCheckpoints, ServiceServerEvents;
+    TSharedPtr<FJsonObject> ServiceReport, ServiceServerReport, ServiceClientBefore;
+    TSharedPtr<FJsonObject> ServiceForestBefore[2];
+    int32 ServiceStep = 0, ServicePhase = 0, ServiceWeaponId = 0, ServiceSequence = 0;
+    double ServiceStationaryAt = 0, ServiceSentAt = 0, ServiceForestStartedAt = 0, ServiceForestReleasedAt = 0;
+    bool bServiceSent = false, bServiceForestReleased = false, bServiceForestCaptureFailed = false;
+    FFableItem ServiceWeaponBefore;
+
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
     bool Tick(float Delta);
 

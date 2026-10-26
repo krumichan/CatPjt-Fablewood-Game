@@ -493,7 +493,7 @@ bool AFableGameMode::RequestRetryExpedition(APlayerController* Requester, FGuid 
     {
         return false;
     }
-    if (!Previous && !CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    if (!Previous && !CanUseTownService(Requester, EFableTownServiceId::ExpeditionPortal))
     {
         Profile->SetNotice(TEXT("마을 포털 근처에서 재도전을 시작하세요."));
         return false;

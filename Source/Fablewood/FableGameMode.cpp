@@ -480,6 +480,67 @@ bool AFableGameMode::CanUseTownService(APlayerController* Requester, FVector Loc
            FMath::Abs(PawnLocation.Z - Location.Z) < 300.0f;
 }
 
+/** 클라이언트가 town/XYZ를 고르지 않는 변경 동작용 서버 진입점이다. / 変更操作でclientに村・XYZを選ばせない。 */
+bool AFableGameMode::CanUseTownService(APlayerController* Requester, EFableTownServiceId ServiceId) const
+{
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    FFableTownLocationContext Physical;
+    if (!Towns || !Towns->ResolvePhysicalContext(Requester, Physical))
+    {
+        return false;
+    }
+
+    FFableTownServiceRef Reference;
+    Reference.TownId = Physical.TownId;
+    Reference.ServiceId = ServiceId;
+    Reference.CatalogVersion = Physical.CatalogVersion;
+    FFableTownServiceDescriptor Service;
+    return CanUseTownService(Requester, Reference, Service);
+}
+
+/** 좌표형 기존 규칙과 분리한 서버 서비스 권한 경계다. / 座標型の既存規則と分離したサーバーサービス権限境界。 */
+bool AFableGameMode::CanUseTownService(APlayerController* Requester, const FFableTownServiceRef& Service,
+                                       FFableTownServiceDescriptor& OutService) const
+{
+    OutService = FFableTownServiceDescriptor();
+    const AFablePlayerState* Profile = IsValid(Requester) ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    const AFableCharacter* Hero = IsValid(Requester) ? Requester->GetPawn<AFableCharacter>() : nullptr;
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    FFableTownConnectionSnapshot Connection;
+    FFableTownLocationContext Physical;
+    FFableTownServiceDescriptor Resolved;
+    const AFablePartyEncounter* ResumeEncounter =
+        IsValid(Profile) && Service.ServiceId == EFableTownServiceId::ExpeditionPortal ? GetExpeditionFor(Profile)
+                                                                                       : nullptr;
+    const bool bRetainedPortalTicket =
+        ResumeEncounter && ResumeEncounter->IsParticipant(Profile) && !ResumeEncounter->IsReturning();
+
+    // 등록된 현재 controller·profile·pawn은 서로 정확히 같은 소유 관계여야 한다. / 現在の所有関係を厳密に照合する。
+    if (!HasAuthority() || Find(GetWorld()) != this || !Service.IsValid() || !IsValid(Profile) || !IsValid(Hero) ||
+        Requester->GetWorld() != GetWorld() || !Requester->HasAuthority() || !Profile->HasAuthority() ||
+        !Hero->HasAuthority() || Profile->GetOwner() != Requester || Profile->GetWorld() != GetWorld() ||
+        Hero->GetWorld() != GetWorld() || Hero->GetController() != Requester ||
+        Hero->GetPlayerState<AFablePlayerState>() != Profile || !IsRequesterAlive(Requester) ||
+        (Profile->ActiveExpeditionId.IsValid() && !bRetainedPortalTicket) || Profile->HasPendingTownTravel() ||
+        !IsValid(Towns) || !Towns->GetConnectionSnapshot(Profile, Connection) ||
+        !Towns->IsCurrentConnection(Requester, Connection.OwnerConnectionGeneration, Connection.ConnectionNonce))
+    {
+        return false;
+    }
+
+    // 저장된 presence나 클라이언트 XYZ 대신 현재 pawn 위치와 catalog를 다시 읽는다. / 現pawnとcatalogを再照会する。
+    const UFableTownCatalog* Catalog = Towns->GetCatalog();
+    if (!Catalog || !Towns->ResolvePhysicalContext(Requester, Physical) ||
+        !Catalog->ResolveService(Service, Resolved, true) || !Resolved.IsInRange(Physical, Hero->GetActorLocation()) ||
+        !Hero->IsGroundedAtCurrentTownAnchor(Resolved.Anchor))
+    {
+        return false;
+    }
+
+    OutService = Resolved;
+    return true;
+}
+
 /** NotifyParty는 인증 또는 공유 필드의 기존 규칙을 처리한다. */
 void AFableGameMode::NotifyParty(const FString& Notice) const
 {
@@ -588,7 +649,7 @@ void AFableGameMode::SpawnEncounter()
 void AFableGameMode::RequestForestEncounter(APlayerController* Requester)
 {
     // HTTP 요청·응답과 연결 상태 조건 검사
-    if (bLegacyMode || !CanUseTownService(Requester, FableRPG::BoardLocation(), 330.0f))
+    if (bLegacyMode || !CanUseTownService(Requester, EFableTownServiceId::QuestGuide))
     {
         return;
     }
@@ -1067,7 +1128,7 @@ void AFableGameMode::RequestRetryEncounter(APlayerController* Requester)
     // 퀘스트와 이야기 진행 처리
     if (State->RetryRegion == EFableRegion::Village)
     {
-        if (!CanUseTownService(Requester, FableRPG::BoardLocation(), 330.0f))
+        if (!CanUseTownService(Requester, EFableTownServiceId::QuestGuide))
         {
             Profile->SetNotice(TEXT("로완 근처에서 R을 눌러 숲 순찰에 다시 도전하세요."));
             return;
@@ -1311,7 +1372,7 @@ bool AFableGameMode::JoinPublicField(APlayerController* Requester)
         Profile->ActiveExpeditionId.IsValid() || (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) ||
         (State && State->FieldProgress.bPartyRecoveryPending) || bReturnPending ||
         (!bLegacyMode && (Profile->ForestQuest != EFableQuestStage::Active ||
-                          !CanUseTownService(Requester, FableRPG::BoardLocation(), 330))))
+                          !CanUseTownService(Requester, EFableTownServiceId::QuestGuide))))
     {
         return false;
     }
@@ -1451,7 +1512,7 @@ void AFableGameMode::RequestEnterRegion(APlayerController* Requester, EFableRegi
         return;
     }
     AFablePlayerState* Profile = Requester->GetPlayerState<AFablePlayerState>();
-    if (!Profile || !CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    if (!Profile || !CanUseTownService(Requester, EFableTownServiceId::ExpeditionPortal))
     {
         return;
     }
@@ -1508,7 +1569,7 @@ bool AFableGameMode::StartPreparedExpedition(APlayerController* Requester, FGuid
     {
         return false;
     }
-    if (!ReplacedEncounter && !CanUseTownService(Requester, FableRPG::PortalLocation(), 330))
+    if (!ReplacedEncounter && !CanUseTownService(Requester, EFableTownServiceId::ExpeditionPortal))
     {
         Profile->SetNotice(TEXT("파티장이 마을의 파란 포털 근처에서 입장을 요청해야 합니다."));
         return false;

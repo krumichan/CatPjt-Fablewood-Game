@@ -3,11 +3,16 @@
 #include "FableCharacter.h"
 #include "FableGameState.h"
 #include "FableGameMode.h"
+#include "FableTownManager.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
+#include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 
 // Isolated native fixtures only: no profile initialization, save slots, file I/O or running game mutation.
 
@@ -109,20 +114,41 @@ namespace
     {
         UWorld* World = nullptr;
         TWeakObjectPtr<APlayerController> RegisteredController;
+        bool bOwnsEngineContext = false;
 
         /** 이야기 회귀 검증용 월드와 플레이어를 만들고 이전 실행 문맥을 보존한다. */
-        FStoryTestWorld()
+        explicit FStoryTestWorld(bool bPhysics = false)
         {
             const UWorld::InitializationValues Values = UWorld::InitializationValues()
                                                             .RequiresHitProxies(false)
-                                                            .CreatePhysicsScene(false)
+                                                            .CreatePhysicsScene(bPhysics)
                                                             .ShouldSimulatePhysics(false)
-                                                            .EnableTraceCollision(false)
+                                                            .EnableTraceCollision(bPhysics)
                                                             .CreateNavigation(false)
                                                             .CreateAISystem(false)
                                                             .AllowAudioPlayback(false);
             World =
                 UWorld::CreateWorld(EWorldType::Game, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Values);
+            if (World && bPhysics)
+            {
+                if (GEngine)
+                {
+                    GEngine->CreateNewWorldContext(EWorldType::Game).SetCurrentWorld(World);
+                    bOwnsEngineContext = true;
+                }
+
+                // 게시판 변경 양성 대조에만 필요한 Legacy 지지 바닥이다. / 掲示板変更の陽性対照向けLegacy支持床。
+                AActor* GroundActor = World->SpawnActor<AActor>();
+                UBoxComponent* Ground = NewObject<UBoxComponent>(GroundActor);
+                GroundActor->SetRootComponent(Ground);
+                Ground->SetBoxExtent(FVector(3000, 3000, 10));
+                Ground->SetCollisionObjectType(ECC_WorldStatic);
+                Ground->SetCollisionResponseToAllChannels(ECR_Block);
+                Ground->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+                Ground->ComponentTags.Add(TEXT("Meadow"));
+                Ground->RegisterComponent();
+                GroundActor->SetActorLocation(FVector(0, 0, -10));
+            }
         }
 
         /** 검증 월드와 소유 객체를 해제하고 이전 실행 문맥을 복구한다. */
@@ -137,6 +163,10 @@ namespace
                 }
 
                 World->DestroyWorld(false);
+                if (GEngine && bOwnsEngineContext)
+                {
+                    GEngine->DestroyWorldContext(World);
+                }
             }
         }
 
@@ -494,7 +524,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableStoryAuthorityTest, "Fablewood.Story.Auth
 bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
 {
     // 현재 월드와 플레이어 참조에 필요한 값 준비
-    FStoryTestWorld Fixture;
+    FStoryTestWorld Fixture(true);
     AFablePlayerState* State = Fixture.MakeState();
 
     // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
@@ -582,11 +612,21 @@ bool FFableStoryAuthorityTest::RunTest(const FString& Parameters)
     // 루트 룬과 봉인 검증도 실제로 명시 참가한 사용자의 공개 진행만 참조한다.
     const FVector PreviousLocation = Hero->GetActorLocation();
     const EFableQuestStage PreviousForestQuest = State->ForestQuest;
+    const EMovementMode PreviousMovement = Hero->GetCharacterMovement()->MovementMode;
+    const uint8 PreviousCustomMovement = Hero->GetCharacterMovement()->CustomMovementMode;
     State->ForestQuest = EFableQuestStage::Active;
-    MoveHero(FableRPG::BoardLocation() + FVector(0, -100, 110));
-    const bool bJoinedField = Mode->JoinPublicField(Controller);
+
+    // 게시판 참가 때만 실제 소유 연결과 접지를 구성하고 story 좌표·이동 상태는 복원한다. / 掲示板参加時だけ接地し元のstory状態へ戻す。
+    MoveHero(FableRPG::BoardLocation() +
+             FVector(0, -100, Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 2.15f));
+    Hero->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+    AFableTownManager* Towns = AFableTownManager::Ensure(Fixture.World);
+    const bool bRegistered =
+        Towns && Towns->RegisterOrRefreshConnection(Controller) && Towns->RefreshPhysicalPresence(Controller);
+    const bool bJoinedField = bRegistered && Mode->JoinPublicField(Controller);
     State->ForestQuest = PreviousForestQuest;
     MoveHero(PreviousLocation);
+    Hero->GetCharacterMovement()->SetMovementMode(PreviousMovement, PreviousCustomMovement);
     if (!TestTrue(TEXT("Story root and seal fixture explicitly joins the public field"), bJoinedField))
     {
         return false;

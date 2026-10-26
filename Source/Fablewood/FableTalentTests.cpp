@@ -3,11 +3,17 @@
 #include "FableCharacter.h"
 #include "FableGameMode.h"
 #include "FableGameState.h"
+#include "FableTownManager.h"
+#include "FableTownCatalog.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
+#include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 
 // Memory-only fixtures. Never initialize a profile, open a slot, or enable persistence.
 
@@ -161,6 +167,7 @@ namespace
         AFableGameMode* Mode = nullptr;
         APlayerController* Controller = nullptr;
         bool bControllerRegistered = false;
+        bool bOwnsEngineContext = false;
 
         /** 특성 회귀 검증용 월드와 플레이어를 만들고 이전 실행 문맥을 보존한다. */
         FTalentWorld()
@@ -168,9 +175,9 @@ namespace
             // 현재 월드와 플레이어 참조에 필요한 값 준비
             const UWorld::InitializationValues Values = UWorld::InitializationValues()
                                                             .RequiresHitProxies(false)
-                                                            .CreatePhysicsScene(false)
+                                                            .CreatePhysicsScene(true)
                                                             .ShouldSimulatePhysics(false)
-                                                            .EnableTraceCollision(false)
+                                                            .EnableTraceCollision(true)
                                                             .CreateNavigation(false)
                                                             .CreateAISystem(false)
                                                             .AllowAudioPlayback(false);
@@ -181,6 +188,13 @@ namespace
             if (!World)
             {
                 return;
+            }
+
+            // 이 fixture가 소유한 물리 월드 문맥만 등록한다. / このfixtureの物理world contextだけを登録する。
+            if (GEngine)
+            {
+                GEngine->CreateNewWorldContext(EWorldType::Game).SetCurrentWorld(World);
+                bOwnsEngineContext = true;
             }
 
             // 현재 월드와 플레이어 참조 처리
@@ -208,6 +222,27 @@ namespace
             World->AddController(Controller);
             bControllerRegistered = true;
             FFableTalentTestAccess::Prepare(State);
+
+            // 지원 바닥·소유 연결·walking을 실제 query에 제공한다. / 支持床・所有接続・walkingを実queryへ提供する。
+            AActor* GroundActor = World->SpawnActor<AActor>();
+            UBoxComponent* Ground = NewObject<UBoxComponent>(GroundActor);
+            GroundActor->SetRootComponent(Ground);
+            Ground->SetBoxExtent(FVector(3000, 3000, 10));
+            Ground->SetCollisionObjectType(ECC_WorldStatic);
+            Ground->SetCollisionResponseToAllChannels(ECR_Block);
+            Ground->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+            Ground->ComponentTags.Add(TEXT("Meadow"));
+            Ground->RegisterComponent();
+            GroundActor->SetActorLocation(FVector(0, 0, -10));
+            FVector Grounded = Hero->GetActorLocation();
+            Grounded.Z = GroundedHeight();
+            Hero->SetActorLocation(Grounded);
+            Hero->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+            if (AFableTownManager* Towns = AFableTownManager::Ensure(World))
+            {
+                Towns->RegisterOrRefreshConnection(Controller);
+                Towns->RefreshPhysicalPresence(Controller);
+            }
             State->Inventory = TalentProfile()->Inventory;
             State->Level = 10;
             State->Gold = 500;
@@ -242,7 +277,17 @@ namespace
                 }
 
                 World->DestroyWorld(false);
+                if (GEngine && bOwnsEngineContext)
+                {
+                    GEngine->DestroyWorldContext(World);
+                }
             }
+        }
+
+        /** 임의 Z 대신 실제 capsule과 바닥 사이의 정상 거리를 사용한다. / 実capsuleと床の正常距離を使用する。 */
+        double GroundedHeight() const
+        {
+            return Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 2.15f;
         }
 
         /** 실제 특성 선택 경로를 호출해 검증 결과를 반환한다. */
@@ -425,13 +470,13 @@ bool FFableTalentSelectionTest::RunTest(const FString& Parameters)
     F.Select(2, EFableTalentPath::First);
     S->SetRole(ROLE_Authority);
     TestEqual(TEXT("Unloaded, blocked and client roles cannot choose"), int32(S->GetTalentChoice(2)), 0);
-    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(331, 0, 110));
+    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(331, 0, F.GroundedHeight()));
     F.Select(2, EFableTalentPath::First);
     TestEqual(TEXT("Remote selection is rejected"), int32(S->GetTalentChoice(2)), 0);
     F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(100, 0, 300));
     F.Select(2, EFableTalentPath::First);
     TestEqual(TEXT("Vertical boundary is rejected"), int32(S->GetTalentChoice(2)), 0);
-    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(100, 0, 110));
+    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(100, 0, F.GroundedHeight()));
 
     // 진행 중인 전투의 빌드 제한은 게시판에서 명시 등록한 본인에게 적용한다.
     const EFableQuestStage PreviousForestQuest = S->ForestQuest;
@@ -458,7 +503,21 @@ bool FFableTalentSelectionTest::RunTest(const FString& Parameters)
     F.Select(2, EFableTalentPath::First);
     F.GS->FieldProgress.bPartyRecoveryPending = false;
     TestEqual(TEXT("Party recovery rejects selection"), int32(S->GetTalentChoice(2)), 0);
-    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(330, 0, 299));
+    // 299/300의 순수 높이 경계 의미는 유지하고, 변경 양성 대조는 실제 바닥 위에서 검사한다. / 高さ境界と実接地を別々に保持する。
+    const UFableTownCatalog* Catalog = GetDefault<UFableTownCatalog>();
+    FFableTownServiceRef GuideRef;
+    GuideRef.TownId = EFableTownId::LegacyVillage;
+    GuideRef.ServiceId = EFableTownServiceId::QuestGuide;
+    GuideRef.CatalogVersion = 1;
+    FFableTownServiceDescriptor Guide;
+    FFableTownLocationContext Physical;
+    TestTrue(TEXT("Pure guide range retains the valid 299cm vertical boundary"),
+             Catalog->ResolveService(GuideRef, Guide) &&
+                 Catalog->ResolveLocation(FableRPG::BoardLocation() + FVector(330, 0, 299), Physical) &&
+                 Guide.IsInRange(Physical, FableRPG::BoardLocation() + FVector(330, 0, 299)));
+    TestFalse(TEXT("Pure guide range rejects exactly 300cm height"),
+              Guide.IsInRange(Physical, FableRPG::BoardLocation() + FVector(330, 0, 300)));
+    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(330, 0, F.GroundedHeight()));
     F.Select(2, EFableTalentPath::First);
     TestEqual(TEXT("Exact valid range permits second choice"), int32(S->GetTalentChoice(2)), 1);
     const int32 Revision = S->ClassBuildRevision;
@@ -514,10 +573,10 @@ bool FFableTalentResetTest::RunTest(const FString& Parameters)
     F.Reset(S->HeroClass, S->ClassBuildRevision);
     TestEqual(TEXT("Insufficient gold is not partially charged"), S->Gold, 49);
     S->Gold = BeforeGold;
-    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(331, 0, 110));
+    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(331, 0, F.GroundedHeight()));
     F.Reset(S->HeroClass, S->ClassBuildRevision);
     TestEqual(TEXT("Remote reset does not charge"), S->Gold, BeforeGold);
-    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(0, -100, 110));
+    F.Hero->SetActorLocation(FableRPG::BoardLocation() + FVector(0, -100, F.GroundedHeight()));
     const int32 Revision = S->ClassBuildRevision;
     F.Reset(S->HeroClass, Revision);
     TestTrue(TEXT("Successful reset clears only current ranks and choices"),

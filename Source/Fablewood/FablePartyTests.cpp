@@ -9,6 +9,7 @@
 #include "FableGameMode.h"
 #include "FableGameState.h"
 #include "FablePlayerState.h"
+#include "FableTownManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Engine/Engine.h"
@@ -251,6 +252,7 @@ namespace
         AFableGameState* State = nullptr;
         AFablePartyManager* Manager = nullptr;
         AFableGameMode* Mode = nullptr;
+        UBoxComponent* TownSupport = nullptr;
         TArray<TWeakObjectPtr<APlayerController>> RegisteredControllers;
         bool bOwnsEngineContext = false;
 
@@ -280,6 +282,20 @@ namespace
                 State = World->SpawnActor<AFableGameState>();
                 Manager = World->SpawnActor<AFablePartyManager>();
                 World->SetGameState(State);
+                if (bPhysics)
+                {
+                    // 실제 마을 서비스의 Meadow·높이0 계약만 재현한다. private 바닥은 만들지 않는다. / 村の支持契約だけを再現する。
+                    AActor* GroundActor = World->SpawnActor<AActor>();
+                    TownSupport = NewObject<UBoxComponent>(GroundActor);
+                    GroundActor->SetRootComponent(TownSupport);
+                    TownSupport->SetBoxExtent(FVector(3000, 3000, 10));
+                    TownSupport->SetCollisionObjectType(ECC_WorldStatic);
+                    TownSupport->SetCollisionResponseToAllChannels(ECR_Block);
+                    TownSupport->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+                    TownSupport->ComponentTags.Add(TEXT("Meadow"));
+                    TownSupport->RegisterComponent();
+                    GroundActor->SetActorLocation(FVector(0, 0, -10));
+                }
             }
         }
 
@@ -350,6 +366,7 @@ namespace
             if (Mode && State)
             {
                 FFablePartyTestAccess::AttachState(Mode, State);
+                AFableTownManager::Ensure(World);
             }
 
             return Mode && State;
@@ -376,6 +393,26 @@ namespace
             Player.Profile->DungeonQuest = EFableQuestStage::Active;
             Player.Profile->MoonwellQuest = EFableQuestStage::Active;
             Player.Profile->DungeonCompletions = 1;
+
+            // 서비스 변경 검사는 실제 소유 pawn을 지원면에 두고 현 연결을 등록한다. / 実pawnを支持面に置き現接続を登録する。
+            if (AFableTownManager* Towns = AFableTownManager::Find(World))
+            {
+                if (!TownSupport)
+                {
+                    return false;
+                }
+
+                FVector Grounded = Location;
+                Grounded.Z = Player.Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 2.15f;
+                Player.Hero->SetActorLocation(Grounded);
+                Player.Hero->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+                if (!Towns->RegisterOrRefreshConnection(Player.Controller) ||
+                    !Towns->RefreshPhysicalPresence(Player.Controller))
+                {
+                    return false;
+                }
+            }
+
             return Player.Hero->IsAlive() && Player.Hero->GetPlayerState() == Player.Profile;
         }
 
@@ -479,6 +516,15 @@ namespace
             RegisteredControllers.Add(Player.Controller);
             Player.Controller->Possess(Player.Hero);
             Manager->RegisterPlayer(Player.Controller);
+            if (AFableTownManager* Towns = AFableTownManager::Find(World))
+            {
+                // private 복귀의 물리 문맥이 없어도 현재 소유 연결 세대는 새로 발급한다. / private復帰でも新所有接続を発行する。
+                if (!Towns->RegisterOrRefreshConnection(Player.Controller))
+                {
+                    return false;
+                }
+                Towns->RefreshPhysicalPresence(Player.Controller);
+            }
             Previous->Destroy();
             return Manager->GetConnectedPlayer(Player.Profile->PartyPlayerKey) == Player.Controller;
         }
@@ -965,7 +1011,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFablePartyGuardTest, "Fablewood.Native.Party.A
 /** 인증·소유권·서버 권한·전투 상태를 우회한 명부 수정 요청을 거절한다. */
 bool FFablePartyGuardTest::RunTest(const FString& Parameters)
 {
-    FPartyTestWorld Fixture;
+    FPartyTestWorld Fixture(true);
     FPartyTestWorld OtherWorld;
     FPartyTestPlayer Leader = Fixture.AddPlayer(401);
     FPartyTestPlayer Unloaded = Fixture.AddPlayer(402, false);

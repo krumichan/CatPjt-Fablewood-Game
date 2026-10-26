@@ -5,6 +5,7 @@
 #include "FableExpeditionResultTypes.h"
 #include "FableTownTravelTypes.h"
 #include "FableTownPersistenceTypes.h"
+#include "FableTownServiceTypes.h"
 #include "FablePlayerState.generated.h"
 
 class UFableSaveGame;
@@ -21,6 +22,7 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
     friend class AFableTownManager;
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FFableTownTravelTestAccess;
+    friend struct FFableTownServiceTestAccess;
     friend struct FFableTownStreamingTestAccess;
     friend struct FFableBackendSessionTestAccess;
 #endif
@@ -637,7 +639,7 @@ private:
     void InteractAdvancementTrial(int32 TargetTier);
 
     /** 플레이어가 요청한 마을 서비스의 이용 거리 안에 있는지 확인한다. */
-    bool AtTownService(const FVector& Location) const;
+    bool AtTownService(EFableTownServiceId ServiceId) const;
 
     /** 경험치를 추가하고 레벨 상승 조건을 적용한다. */
     void AddExperience(int32 Amount);

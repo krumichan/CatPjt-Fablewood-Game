@@ -2,6 +2,8 @@
 #include "FableCharacter.h"
 #include "FableGameState.h"
 #include "FableAdventure.h"
+#include "FableTownManager.h"
+#include "FableTownCatalog.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 
@@ -73,11 +75,12 @@ FString AFablePlayerState::ClassBuildBlockReason() const
         return TEXT("활동 가능한 상태로 로완 근처에서 육성을 변경하세요.");
     }
 
-    const FVector Delta = Hero->GetActorLocation() - FableRPG::BoardLocation();
-
-    // 지역·적·전투 진행 조건 검사
-    if (Delta.SizeSquared2D() > FMath::Square(330.0f) || FMath::Abs(Delta.Z) >= 300.0f || !GS ||
-        GS->ActiveRegion != EFableRegion::Village)
+    // 표시용 조회는 client에서도 가능하며 변경 함수가 별도로 서버 권한·접지를 재검사한다. / 表示照会と変更時の権限検査を分離する。
+    const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+    const UFableTownCatalog* Catalog = Towns ? Towns->GetCatalog() : nullptr;
+    FFableTownServiceDescriptor Guide;
+    if (!Catalog || !Catalog->ResolveNearbyService(Hero->GetActorLocation(), EFableTownServiceId::QuestGuide, Guide) ||
+        !GS || GS->ActiveRegion != EFableRegion::Village)
     {
         return TEXT("마을의 안내인 로완 근처에서 육성을 변경하세요.");
     }
@@ -202,7 +205,7 @@ void AFablePlayerState::SelectTalent(int32 TargetTier, EFableTalentPath Path)
         SetNotice(Reason);
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         return;
     }
@@ -237,7 +240,7 @@ void AFablePlayerState::ResetCurrentClassBuild(EFableClass ExpectedClass, int32 
         SetNotice(Reason);
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         return;
     }

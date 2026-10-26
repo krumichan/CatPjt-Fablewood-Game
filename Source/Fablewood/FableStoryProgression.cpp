@@ -185,7 +185,7 @@ void AFablePlayerState::InteractStory()
     {
         return;
     }
-    if (!AtTownService(FableRPG::BoardLocation()))
+    if (!AtTownService(EFableTownServiceId::QuestGuide))
     {
         SetNotice(TEXT("살아 있는 상태로 안내인 로완 가까이에서 이야기를 나누세요."));
         return;

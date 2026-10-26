@@ -436,3 +436,100 @@ bool UFableTownCatalog::ResolveAnchor(const FFableTownAnchorRef& Anchor, int32 S
     OutWorldTransform = Match->LocalSlots[SlotIndex] * Definition->LocalToWorld;
     return ValidTransform(OutWorldTransform);
 }
+
+/** 역할은 서버의 명시 앵커 이름만 선택한다. / 役割はサーバーの明示アンカー名だけを選択する。 */
+bool UFableTownCatalog::ResolveDefinitionService(const FFableTownDefinition& Definition,
+                                                 const FFableTownServiceRef& Service,
+                                                 FFableTownServiceDescriptor& OutService, bool bRequireGeometryReady)
+{
+    OutService = FFableTownServiceDescriptor();
+    FString Error;
+    if (!Service.IsValid() || Definition.TownId != Service.TownId ||
+        Definition.CatalogVersion != Service.CatalogVersion || !ValidateDefinition(Definition, Error) ||
+        (bRequireGeometryReady && !Definition.bGeometryReady))
+    {
+        return false;
+    }
+
+    // 주민 모델이나 새 XYZ 없이 기존 catalog의 서비스 역할만 연결한다. / 新しいモデルやXYZを作らない。
+    FName AnchorId = NAME_None;
+    switch (Service.ServiceId)
+    {
+    case EFableTownServiceId::QuestGuide:
+        AnchorId = TEXT("Service.Board");
+        break;
+    case EFableTownServiceId::Workshop:
+        AnchorId = TEXT("Service.Forge");
+        break;
+    case EFableTownServiceId::Merchant:
+        AnchorId = TEXT("Service.Merchant");
+        break;
+    case EFableTownServiceId::ExpeditionPortal:
+        AnchorId = TEXT("Portal.Expedition");
+        break;
+    default:
+        return false;
+    }
+
+    const FFableTownAnchorDefinition* Anchor = Definition.Anchors.FindByPredicate(
+        [AnchorId](const FFableTownAnchorDefinition& Value)
+        {
+            return Value.AnchorId == AnchorId;
+        });
+    if (!Anchor || Anchor->LocalSlots.IsEmpty() || Anchor->ExpectedSupportTag.IsNone())
+    {
+        return false;
+    }
+
+    FFableTownServiceDescriptor Resolved;
+    Resolved.Service = Service;
+    Resolved.Anchor.TownId = Service.TownId;
+    Resolved.Anchor.AnchorId = AnchorId;
+    Resolved.Anchor.CatalogVersion = Service.CatalogVersion;
+    Resolved.FloorId = Anchor->FloorId;
+    Resolved.WorldLocation = (Anchor->LocalSlots[0] * Definition.LocalToWorld).GetLocation();
+    Resolved.bGeometryReady = Definition.bGeometryReady;
+    if (!Resolved.IsValid())
+    {
+        return false;
+    }
+
+    OutService = Resolved;
+    return true;
+}
+
+/** 전체 정본의 유효성·마을·버전·준비 상태를 확인한다. / 全正本の有効性・村・版・準備状態を確認する。 */
+bool UFableTownCatalog::ResolveService(const FFableTownServiceRef& Service, FFableTownServiceDescriptor& OutService,
+                                       bool bRequireGeometryReady) const
+{
+    OutService = FFableTownServiceDescriptor();
+    FString Error;
+    const FFableTownDefinition* Definition = FindTown(Service.TownId);
+    return Definition && Validate(Error) &&
+           ResolveDefinitionService(*Definition, Service, OutService, bRequireGeometryReady);
+}
+
+/** 현재 위치의 마을·층에서만 UI용 서비스를 조회한다. / 現在位置の村・階だけからUI向けサービスを照会する。 */
+bool UFableTownCatalog::ResolveNearbyService(const FVector& WorldPosition, EFableTownServiceId ServiceId,
+                                             FFableTownServiceDescriptor& OutService) const
+{
+    OutService = FFableTownServiceDescriptor();
+    FFableTownLocationContext Physical;
+    if (!ResolveLocation(WorldPosition, Physical, true))
+    {
+        return false;
+    }
+
+    FFableTownServiceRef Reference;
+    Reference.TownId = Physical.TownId;
+    Reference.ServiceId = ServiceId;
+    Reference.CatalogVersion = Physical.CatalogVersion;
+    FFableTownServiceDescriptor Resolved;
+    if (!ResolveService(Reference, Resolved, true) || !Resolved.IsInRange(Physical, WorldPosition))
+    {
+        return false;
+    }
+
+    OutService = Resolved;
+    return true;
+}

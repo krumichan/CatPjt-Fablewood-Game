@@ -4,6 +4,7 @@
 #include "FableGameMode.h"
 #include "FableGameInstance.h"
 #include "FableOnlineFlowSubsystem.h"
+#include "FableOnlineServicesValidation.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "HAL/PlatformApplicationMisc.h"
@@ -276,12 +277,36 @@ namespace
             return EFableService::None;
         }
 
-        // 지역·적·전투 진행에 필요한 값 준비
+        float NearestSquared = TNumericLimits<float>::Max();
+        EFableService Nearest = EFableService::None;
+
+        // 네 마을 역할은 현재 town/catalog에서만 고른다. 이 UI 조회는 서버 권한을 대신하지 않는다. / 現在の村だけを選び権限検査は別に行う。
+        const AFableTownManager* Towns = AFableTownManager::Find(PC->GetWorld());
+        const UFableTownCatalog* Catalog = Towns ? Towns->GetCatalog() : nullptr;
+        const EFableTownServiceId TownIds[] = {EFableTownServiceId::QuestGuide, EFableTownServiceId::Workshop,
+                                               EFableTownServiceId::Merchant, EFableTownServiceId::ExpeditionPortal};
+        const EFableService TownServices[] = {EFableService::Board, EFableService::Forge, EFableService::Merchant,
+                                              EFableService::Portal};
+        if (Catalog)
+        {
+            for (int32 Index = 0; Index < UE_ARRAY_COUNT(TownIds); ++Index)
+            {
+                FFableTownServiceDescriptor Service;
+                if (Catalog->ResolveNearbyService(Pawn->GetActorLocation(), TownIds[Index], Service))
+                {
+                    const float DistanceSquared =
+                        FVector::DistSquared2D(Pawn->GetActorLocation(), Service.WorldLocation);
+                    if (DistanceSquared < NearestSquared)
+                    {
+                        NearestSquared = DistanceSquared;
+                        Nearest = TownServices[Index];
+                    }
+                }
+            }
+        }
+
+        // 사설 원정·봉인의 지역 좌표는 기존 경로를 유지한다. / 私有遠征・封印の地域座標を維持する。
         const FVector Locations[] = {
-            FableRPG::BoardLocation(),
-            FableRPG::ForgeLocation(),
-            FableRPG::MerchantLocation(),
-            FableRPG::PortalLocation(),
             Adventure.ToWorld(EFableRegion::RootRuins, FableRPG::RegionEntrance(EFableRegion::RootRuins)),
             Adventure.ToWorld(EFableRegion::RootRuins, FableRPG::RegionReturnPortal(EFableRegion::RootRuins)),
             Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::RegionEntrance(EFableRegion::Moonwell)),
@@ -289,13 +314,10 @@ namespace
             Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(0)),
             Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(1)),
             Adventure.ToWorld(EFableRegion::Moonwell, FableRPG::MoonSealLocation(2))};
-        const EFableService Services[] = {
-            EFableService::Board,        EFableService::Forge,        EFableService::Merchant,
-            EFableService::Portal,       EFableService::ReturnPortal, EFableService::ReturnPortal,
-            EFableService::ReturnPortal, EFableService::ReturnPortal, EFableService::MoonSeal,
-            EFableService::MoonSeal,     EFableService::MoonSeal};
-        float NearestSquared = TNumericLimits<float>::Max();
-        EFableService Nearest = EFableService::None;
+        const EFableService Services[] = {EFableService::ReturnPortal, EFableService::ReturnPortal,
+                                          EFableService::ReturnPortal, EFableService::ReturnPortal,
+                                          EFableService::MoonSeal,     EFableService::MoonSeal,
+                                          EFableService::MoonSeal};
 
         // 위치·방향·거리 계산 순회
         for (int32 Index = 0; Index < UE_ARRAY_COUNT(Locations); ++Index)
@@ -3955,29 +3977,57 @@ void AFablePlayerController::ServerRetryEncounter_Implementation()
 /** 주변 대상 상호작용 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFablePlayerController::ServerInteract_Implementation()
 {
+    FFableScopedServiceValidationObservation Observation(this, TEXT("interact"), EFableTownServiceId::Invalid);
     // HTTP 요청·응답과 연결 상태 조건 검사
     if (!AcceptRPGRequest())
     {
         return;
     }
 
+    Observation.AcceptRpgGate();
     AFableGameMode* Mode = GetWorld()->GetAuthGameMode<AFableGameMode>();
+
+    // 기존 E 대상 선택은 유지하고 마을 대화만 서버 정본·현 소유자·지지면을 통과시킨다. / 村会話に現所有者と支持床の検査を適用する。
+    const auto OpenTownDialogue =
+        [this, Mode, &Observation](EFableTownServiceId ServiceId, EFableDialogue TargetDialogue)
+    {
+        Observation.SetService(ServiceId);
+        const AFableTownManager* Towns = AFableTownManager::Find(GetWorld());
+        FFableTownLocationContext Physical;
+        FFableTownServiceDescriptor Service;
+        FFableTownServiceRef Request;
+        if (Towns && Towns->ResolvePhysicalContext(this, Physical))
+        {
+            Request.TownId = Physical.TownId;
+            Request.ServiceId = ServiceId;
+            Request.CatalogVersion = Physical.CatalogVersion;
+        }
+
+        if (Mode && Mode->CanUseTownService(this, Request, Service))
+        {
+            ClientOpenDialogue(static_cast<uint8>(TargetDialogue));
+        }
+        else if (AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>())
+        {
+            Profile->SetNotice(TEXT("현재 마을의 주민이나 포털에 조금 더 가까이 다가가세요."));
+        }
+    };
 
     // 퀘스트와 이야기 진행 처리
     switch (NearestService(this))
     {
     // HTTP 요청·응답과 연결 상태 처리
     case EFableService::Board:
-        ClientOpenDialogue(static_cast<uint8>(EFableDialogue::Guide));
+        OpenTownDialogue(EFableTownServiceId::QuestGuide, EFableDialogue::Guide);
         break;
     case EFableService::Forge:
-        ClientOpenDialogue(static_cast<uint8>(EFableDialogue::Forge));
+        OpenTownDialogue(EFableTownServiceId::Workshop, EFableDialogue::Forge);
         break;
     case EFableService::Merchant:
-        ClientOpenDialogue(static_cast<uint8>(EFableDialogue::Shop));
+        OpenTownDialogue(EFableTownServiceId::Merchant, EFableDialogue::Shop);
         break;
     case EFableService::Portal:
-        ClientOpenDialogue(static_cast<uint8>(EFableDialogue::Portal));
+        OpenTownDialogue(EFableTownServiceId::ExpeditionPortal, EFableDialogue::Portal);
         break;
     case EFableService::MoonSeal:
         if (Mode)
@@ -4024,10 +4074,12 @@ void AFablePlayerController::ClientOpenDialogue_Implementation(uint8 Service)
 /** 퀘스트 확인 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFablePlayerController::ServerConfirmQuest_Implementation(EFableQuestId QuestId)
 {
+    FFableScopedServiceValidationObservation Observation(this, TEXT("quest"), EFableTownServiceId::QuestGuide);
     if (!AcceptRPGRequest() || uint8(QuestId) > uint8(EFableQuestId::Story))
     {
         return;
     }
+    Observation.AcceptRpgGate();
     GetPlayerState<AFablePlayerState>()->InteractQuest(QuestId);
 }
 
@@ -4081,8 +4133,10 @@ void AFablePlayerController::ServerEquip_Implementation(int32 Id)
 /** 장비 강화 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFablePlayerController::ServerEnhance_Implementation(int32 Id)
 {
+    FFableScopedServiceValidationObservation Observation(this, TEXT("enhance"), EFableTownServiceId::Workshop);
     if (AcceptRPGRequest())
     {
+        Observation.AcceptRpgGate();
         GetPlayerState<AFablePlayerState>()->EnhanceItem(Id);
     }
 }
@@ -4144,8 +4198,10 @@ void AFablePlayerController::ServerWithdraw_Implementation(int32 ItemId)
 /** 상점 구매 요청을 서버의 권한 검사와 게임 규칙에 전달한다. */
 void AFablePlayerController::ServerShopBuy_Implementation(EFableShopOffer Offer)
 {
+    FFableScopedServiceValidationObservation Observation(this, TEXT("shop"), EFableTownServiceId::Merchant);
     if (AcceptRPGRequest())
     {
+        Observation.AcceptRpgGate();
         GetPlayerState<AFablePlayerState>()->BuyShopItem(Offer);
     }
 }

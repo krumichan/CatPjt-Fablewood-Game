@@ -117,7 +117,8 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
         // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
             Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry") &&
-            Scenario != TEXT("party-isolation") && Scenario != TEXT("party-results"))
+            Scenario != TEXT("party-isolation") && Scenario != TEXT("party-results") &&
+            Scenario != TEXT("unit4-legacy-services"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -311,6 +312,18 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     if (ServerResultsReport)
     {
         J->SetObjectField(TEXT("serverResults"), ServerResultsReport);
+    }
+    if (Scenario == TEXT("unit4-legacy-services"))
+    {
+        J->SetArrayField(TEXT("townServiceCheckpoints"), ServiceCheckpoints);
+        if (ServiceReport)
+        {
+            J->SetObjectField(TEXT("townServices"), ServiceReport);
+        }
+        if (ServiceServerReport)
+        {
+            J->SetObjectField(TEXT("serverTownServices"), ServiceServerReport);
+        }
     }
     J->SetStringField(TEXT("townTravelScenario"), TownTravelScenario);
     if (TownReport)
@@ -644,6 +657,10 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        if (Scenario == TEXT("unit4-legacy-services"))
+        {
+            ObserveUnit4ServicesServer(World);
+        }
         if (TownTravelScenario == TEXT("unit2-legacy-anchors"))
         {
             ObserveTownTravelServer(World);
@@ -968,6 +985,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
             }
             break;
         }
+        if (Scenario == TEXT("unit4-legacy-services"))
+        {
+            Advance(100);
+            break;
+        }
         PC->InputKey(
             FInputKeyEventArgs::CreateSimulated(EKeys::K, IE_Pressed, 1.f, 0, FInputDeviceId::CreateFromInternalId(0)));
         bReleaseSkill = true;
@@ -1003,7 +1025,9 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         {
             return true;
         }
-        if (Scenario == TEXT("party") ? TickParty(PC, P, Now) : TickDungeon(PC, P, Hero, Now))
+        if (Scenario == TEXT("unit4-legacy-services") ? TickUnit4LegacyServices(PC, P, Hero, Now)
+            : Scenario == TEXT("party")               ? TickParty(PC, P, Now)
+                                                      : TickDungeon(PC, P, Hero, Now))
         {
             Checkpoint = Profile(P);
             TownDurabilityCheckpoint = ObserveTownPersistence(P);
