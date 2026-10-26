@@ -15,6 +15,9 @@ class AFableCharacter;
 class AFableEnemy;
 class UFableTownTravelCoordinator;
 class UWorld;
+class AFablePartyManager;
+class APlayerController;
+struct FFablePartyRecord;
 /** Opt-in UI workflow observer. Uses real account APIs and normal gameplay inputs. */
 /** 온라인의 일반 입력과 관찰 결과로 자동 검증을 진행하는 컴포넌트. */
 UCLASS()
@@ -39,6 +42,24 @@ public:
     void EndServiceObservation(int32 Index);
 
 private:
+    /** 현재 UI 길안내와 권한 서버의 공간 판정만 관측한다. / 現在案内とサーバー空間判定の観測のみ。 */
+    TSharedRef<FJsonObject> NavigationObservation(const AFablePlayerController* Player) const;
+
+    /** 한 서버 시점의 현재 연결·준비·공간 문맥을 보존한다. / 一時点の現接続・準備・空間文脈を保存する。 */
+    TSharedRef<FJsonObject> PartySpatialObservation(UWorld* World, const FFablePartyRecord& Party) const;
+
+    /** 연결과 준비 상태가 변한 관측을 유한 개수만 저장한다. / 接続・準備変化の観測を有界保存する。 */
+    void ObserveUnit5PartyServer(UWorld* World);
+
+    /** 동기 공간 판정의 결과만 기록하고 게임 상태를 수정하지 않는다. / 同期空間判定を記録し状態を変更しない。 */
+    void OnUnit5DepartureChecked(const FFablePartyRecord& Party, const TArray<APlayerController*>& Players,
+                                 bool bSpatialAllowed);
+
+    TArray<TSharedPtr<FJsonValue>> Unit5PartySamples, Unit5DepartureChecks;
+    TSet<FString> Unit5PartySignatures;
+    TWeakObjectPtr<AFablePartyManager> Unit5ObservedPartyManager;
+    FDelegateHandle Unit5DepartureHandle;
+
     /** 기존 Legacy 입력과 저장 ACK만 사용한다. 새 네 마을은 채택하지 않는다. */
     bool TickUnit4LegacyServices(AFablePlayerController* PC, AFablePlayerState* P, AFableCharacter* Hero, double Now);
     void ObserveUnit4ServicesServer(UWorld* World);

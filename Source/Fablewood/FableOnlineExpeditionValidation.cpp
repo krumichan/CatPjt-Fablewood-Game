@@ -117,6 +117,7 @@ void UFableOnlineValidationDriver::ObserveExpeditionServer(UWorld* World)
     }
 
     ServerExpeditionArrival = MakeShared<FJsonObject>();
+    ServerExpeditionArrival->SetNumberField(TEXT("observedAtServerSeconds"), World->GetTimeSeconds());
     ServerExpeditionArrival->SetStringField(TEXT("expeditionId"),
                                             Ticket.ExpeditionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     ServerExpeditionArrival->SetStringField(TEXT("partyId"),

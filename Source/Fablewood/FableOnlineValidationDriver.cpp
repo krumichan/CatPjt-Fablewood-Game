@@ -6,6 +6,7 @@
 #include "FableCharacter.h"
 #include "FableGameState.h"
 #include "FableInventorySnapshot.h"
+#include "FablePartyManager.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -152,6 +153,11 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
 /** 온라인 연결 하위 시스템의 요청과 콜백을 정리한다. */
 void UFableOnlineValidationDriver::Deinitialize()
 {
+    if (Unit5ObservedPartyManager.IsValid())
+    {
+        Unit5ObservedPartyManager->DepartureLocationsChecked.Remove(Unit5DepartureHandle);
+    }
+    Unit5ObservedPartyManager.Reset();
     UnbindTownTravel();
     FTSTicker::RemoveTicker(Ticker);
     ReleaseSkillInput();
@@ -326,6 +332,8 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
         }
     }
     J->SetStringField(TEXT("townTravelScenario"), TownTravelScenario);
+    J->SetArrayField(TEXT("unit5PartySpatialSamples"), Unit5PartySamples);
+    J->SetArrayField(TEXT("unit5DepartureChecks"), Unit5DepartureChecks);
     if (TownReport)
     {
         J->SetObjectField(TEXT("townTravel"), TownReport);
@@ -667,6 +675,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         }
         if (Scenario == TEXT("party-results"))
         {
+            ObserveUnit5PartyServer(World);
             ObserveResultsServer(World);
         }
         if (Scenario == TEXT("party-isolation"))

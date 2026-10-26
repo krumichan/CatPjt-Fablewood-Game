@@ -251,6 +251,7 @@ int32 UFableOnlineValidationDriver::BeginServiceObservation(AFablePlayerControll
     J->SetBoolField(TEXT("peerUnchangedRequired"), true);
     J->SetNumberField(TEXT("noticeBefore"), P->NoticeSerial);
     J->SetObjectField(TEXT("before"), ServiceProfile(P));
+    J->SetObjectField(TEXT("logicalNavigation"), NavigationObservation(PC));
     J->SetObjectField(TEXT("peerBefore"), ServiceProfile(O.Peer.Get()));
     J->SetObjectField(TEXT("ownerBeforeCore"), ServiceCore(P));
     J->SetObjectField(TEXT("peerBeforeCore"), ServiceCore(O.Peer.Get()));
@@ -686,6 +687,7 @@ bool UFableOnlineValidationDriver::TickUnit4LegacyServices(AFablePlayerControlle
             Row->SetObjectField(TEXT("before"), Before);
             Row->SetObjectField(TEXT("after"), ServiceProfile(P));
             Row->SetObjectField(TEXT("serverObservation"), Event);
+            Row->SetObjectField(TEXT("logicalNavigation"), NavigationObservation(PC));
             Row->SetBoolField(TEXT("peerUnchangedRequired"), Event->GetBoolField(TEXT("peerUnchangedRequired")));
             Row->SetBoolField(TEXT("peerUnchanged"), Event->GetBoolField(TEXT("peerUnchanged")));
             ServiceCheckpoints.Add(MakeShared<FJsonValueObject>(Row));
