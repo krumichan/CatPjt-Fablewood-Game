@@ -74,7 +74,8 @@ bool FFableSummaryDerivationTest::RunTest(const FString& Parameters)
             auto Profile = SummaryFixture(EFableClass(ClassIndex), Tier);
 
             // 기대값과 상태 보존 검증 조건 검사
-            if (!TestTrue(TEXT("Valid migrated character fixture"), Profile->Version == 9 && Profile->IsValidProfile()))
+            if (!TestTrue(TEXT("Valid migrated character fixture"),
+                          Profile->Version == FableProfileSchema::CurrentVersion && Profile->IsValidProfile()))
             {
                 return false;
             }
@@ -190,7 +191,7 @@ bool FFableSummaryProfileValidationTest::RunTest(const FString& Parameters)
     Profile->Version = 8;
     TestFalse(TEXT("Unmigrated profile cannot be committed with a current summary"),
               FableCharacterSummary::MakeSummary(Profile).IsValid());
-    Profile->Version = 9;
+    Profile->Version = FableProfileSchema::CurrentVersion;
     Profile->Inventory[0].InstanceId.Invalidate();
     TestFalse(TEXT("Malformed identity cannot be hidden by a plausible summary"),
               FableCharacterSummary::MakeSummary(Profile).IsValid());

@@ -1,5 +1,8 @@
 #include "FablePlayerState.h"
 #include "FableSaveGame.h"
+#include "FableProfileSchema.h"
+#include "FableProfileStorage.h"
+#include "FableTownTravelCoordinator.h"
 #include "FableCharacter.h"
 #include "GameFramework/GameStateBase.h"
 #include "Misc/DateTime.h"
@@ -26,6 +29,12 @@ void AFablePlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     // 일반 파티 정보와 소유자에게만 전달할 저장·창고 정보를 등록한다.
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AFablePlayerState, PartyPlayerKey);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, LastSafeTownAnchor, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, LoadedProfileVersion, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, ProfileReadStatus, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, bAwaitingProfileRestore, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, ProfileRestoreError, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AFablePlayerState, TownAnchorSaveStatus, COND_OwnerOnly);
     DOREPLIFETIME(AFablePlayerState, PartyId);
     DOREPLIFETIME(AFablePlayerState, ActiveExpeditionId);
     DOREPLIFETIME_CONDITION(AFablePlayerState, TownConnectionSnapshot, COND_OwnerOnly);
@@ -118,6 +127,8 @@ void AFablePlayerState::InitializeProfile(bool bHost, const FString& ProfilePref
     }
 
     // 새 프로필의 직업·전직·퀘스트·기본 장비·물약 상태를 준비한다.
+    LoadedProfileVersion = FableProfileSchema::CurrentVersion;
+    LastSafeTownAnchor = FableProfileSchema::BootstrapAnchor(EFableTownBootstrapPolicy::LegacyVillageV1);
     InitializeStarterItems();
     StoryChapter = StoryObjectMask = StorySealMask = 0;
     ClassProgress.Init(FFableClassProgress(), 3);
@@ -191,14 +202,19 @@ void AFablePlayerState::InitializeProfile(bool bHost, const FString& ProfilePref
         }
     }
 
+    bool bLoadedVerified = false;
+
     // 프로필과 저장 스냅숏 처리
     if (bPersistenceEnabled && UGameplayStatics::DoesSaveGameExist(ProfileSlot, 0))
     {
-        UFableSaveGame* Data = Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromSlot(ProfileSlot, 0));
-        const bool bValid = Data && Data->MigrateAndValidate();
+        TArray<uint8> OriginalBytes;
+        UFableSaveGame* Data = FableProfileStorage::ReadCandidate(ProfileSlot, OriginalBytes);
+        // 최초 이전도 같은 후보 bytes를 기록하며 원본 backup/readback 확인을 먼저 수행한다.
+        const bool bValid = Data && FableProfileStorage::WriteVerified(ProfileSlot, Data);
         if (bValid)
         {
             ApplyProfileSnapshot(Data);
+            bLoadedVerified = true;
             LastNotice = TEXT("진행 상황을 불러왔습니다. 안내인 로완에게 의뢰와 전직 시험을 확인하세요.");
         }
         else
@@ -214,7 +230,7 @@ void AFablePlayerState::InitializeProfile(bool bHost, const FString& ProfilePref
     bProfileLoaded = true;
 
     // 프로필 저장과 완료 응답 처리
-    if (!bStorageBlocked)
+    if (!bStorageBlocked && !bLoadedVerified)
     {
         RefreshTrialReadiness();
         SaveProfile();
@@ -257,7 +273,7 @@ bool AFablePlayerState::SaveProfile()
         return false;
     }
 
-    bLastSaveSucceeded = UGameplayStatics::SaveGameToSlot(Data, ProfileSlot, 0);
+    bLastSaveSucceeded = FableProfileStorage::WriteVerified(ProfileSlot, Data);
 
     // 프로필과 저장 스냅숏 처리
     if (!bLastSaveSucceeded)
@@ -276,7 +292,7 @@ bool AFablePlayerState::AllowMutation()
     {
         return false;
     }
-    if (bBackendEnabled && (!IsBackendReady() || bBackendSavePending))
+    if (IsTownPersistenceBlocked() || (bBackendEnabled && (!IsBackendReady() || bBackendSavePending)))
     {
         return false;
     }
@@ -2562,7 +2578,10 @@ UFableSaveGame* AFablePlayerState::MakeProfileSnapshot()
 {
     // 퀘스트와 이야기 진행에 필요한 값 준비
     UFableSaveGame* Data = NewObject<UFableSaveGame>(this);
-    Data->Version = 9;
+    Data->Version = FableProfileSchema::CurrentVersion;
+    Data->LastSafeTownId = LastSafeTownAnchor.TownId;
+    Data->LastSafeAnchorId = LastSafeTownAnchor.AnchorId;
+    Data->TownCatalogVersion = LastSafeTownAnchor.CatalogVersion;
     Data->StoryChapter = StoryChapter;
     Data->StoryObjectMask = StoryObjectMask;
     Data->StorySealMask = StorySealMask;
@@ -2599,6 +2618,8 @@ UFableSaveGame* AFablePlayerState::MakeProfileSnapshot()
 void AFablePlayerState::ApplyProfileSnapshot(const UFableSaveGame* Data)
 {
     // 재화와 작업 비용 처리
+    LoadedProfileVersion = Data->Version;
+    LastSafeTownAnchor = Data->GetLastSafeTownAnchor();
     HeroClass = Data->HeroClass;
     Level = Data->Level;
     Experience = Data->Experience;

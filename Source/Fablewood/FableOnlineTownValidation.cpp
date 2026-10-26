@@ -317,6 +317,16 @@ TSharedPtr<FJsonObject> UFableOnlineValidationDriver::TownTravelSnapshot(UWorld*
         }
         Economy->SetArrayField(TEXT("classProgress"), Classes);
         Member->SetObjectField(TEXT("economy"), Economy);
+        const auto& Save = ProfileState->GetTownAnchorSaveStatus();
+        auto Persistence = MakeShared<FJsonObject>();
+        Persistence->SetStringField(TEXT("transactionId"), TownGuid(Save.TravelTransactionId));
+        Persistence->SetNumberField(TEXT("anchorSequence"), double(Save.AnchorSequence));
+        Persistence->SetNumberField(TEXT("state"), int32(Save.State));
+        Persistence->SetStringField(TEXT("acknowledgedHash"), Save.AcknowledgedProfileHash);
+        Persistence->SetNumberField(TEXT("acknowledgedRevision"), double(Save.AcknowledgedRevision));
+        Persistence->SetBoolField(TEXT("durable"), ProfileState->IsTownAnchorDurable(Save.TravelTransactionId));
+        Persistence->SetBoolField(TEXT("restorePending"), ProfileState->IsProfileRestorePending());
+        Member->SetObjectField(TEXT("anchorPersistence"), Persistence);
         Member->SetStringField(TEXT("publicPlayerKey"), ProfileState->PartyPlayerKey);
         Member->SetStringField(TEXT("privateExpeditionId"), TownGuid(ProfileState->ActiveExpeditionId));
         Member->SetNumberField(TEXT("controllerId"), Player->GetUniqueID());

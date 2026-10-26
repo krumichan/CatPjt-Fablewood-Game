@@ -225,7 +225,7 @@ bool FFableStoryMigrationTest::RunTest(const FString& Parameters)
 
             // 퀘스트와 이야기 진행에 필요한 값 준비
             const int32 ExpectedChapter = History == 0 ? 0 : History + 2;
-            TestEqual(TEXT("Migration reaches version 9"), Profile->Version, 9);
+            TestEqual(TEXT("Migration reaches current schema"), Profile->Version, FableProfileSchema::CurrentVersion);
             TestEqual(TEXT("Only existing completed chapters are skipped"), Profile->StoryChapter, ExpectedChapter);
             TestEqual(TEXT("Only prerequisite object bits are filled"), Profile->StoryObjectMask,
                       ExpectedChapter >= 4   ? 31
@@ -286,7 +286,7 @@ bool FFableStoryMigrationTest::RunTest(const FString& Parameters)
     Reject(TEXT("Unknown version 10 is preserved and rejected"),
            [](UFableSaveGame* P)
            {
-               P->Version = 10;
+               P->Version = FableProfileSchema::CurrentVersion + 1;
            });
     Reject(TEXT("Negative chapter rejected"),
            [](UFableSaveGame* P)

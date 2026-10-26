@@ -1,6 +1,7 @@
 #include "FableGameMode.h"
 #include "FablePartyManager.h"
 #include "FableBackend.h"
+#include "FableProfileSchema.h"
 #include "FableDedicatedValidationDriver.h"
 #include "GameFramework/GameSession.h"
 #include "FableCharacter.h"
@@ -24,6 +25,7 @@
 #include "FableAdventure.h"
 #include "FablePartyEncounter.h"
 #include "FableTownManager.h"
+#include "FableTownCatalog.h"
 #include "FableTownTravelCoordinator.h"
 #include "Misc/ScopeExit.h"
 
@@ -64,6 +66,11 @@ void AFableGameMode::PreLogin(const FString& Options, const FString& Address, co
 {
     Super::PreLogin(Options, Address, UniqueId, ErrorMessage);
 
+    if (ErrorMessage.IsEmpty() && bDedicatedMode && !FableProfileSchema::HasCompatibleOptions(Options))
+    {
+        ErrorMessage = TEXT("Unsupported client profile/town schema. Update the game client.");
+    }
+
     // 이 단계에서 접속을 허용하기 전에 기본 연결 조건을 검사한다.
     if (ErrorMessage.IsEmpty() && bDedicatedMode && !FFableBackend::CanRunDedicated())
     {
@@ -96,6 +103,12 @@ APlayerController* AFableGameMode::Login(UPlayer* NewPlayer, ENetRole InRemoteRo
     if (GetWorld()->GetNumPlayerControllers() >= 2)
     {
         ErrorMessage = TEXT("이 모험에는 최대 두 명까지 참가할 수 있습니다.");
+        return nullptr;
+    }
+
+    if (bDedicatedMode && !FableProfileSchema::HasCompatibleOptions(Options))
+    {
+        ErrorMessage = TEXT("Unsupported client profile/town schema. Update the game client.");
         return nullptr;
     }
 
@@ -1342,7 +1355,9 @@ bool AFableGameMode::IsRequesterAlive(APlayerController* Requester) const
     }
     const auto Adventure = FableAdventure::For(Requester);
     const auto* Hero = Requester->GetPawn<AFableCharacter>();
-    return Adventure && !Adventure->bPartyRecoveryPending && Hero && Hero->IsAlive();
+    const auto* Profile = Requester->GetPlayerState<AFablePlayerState>();
+    return Profile && !Profile->IsTownPersistenceBlocked() && Adventure && !Adventure->bPartyRecoveryPending && Hero &&
+           Hero->IsAlive();
 }
 
 /** 현재 프로필의 불변 증서를 복구한 뒤 올바른 체크포인트에 생성한다. */
@@ -1352,6 +1367,24 @@ void AFableGameMode::RestartPlayer(AController* NewPlayer)
     if (bDedicatedMode && (!Profile || !Profile->IsBackendReady()))
     {
         return;
+    }
+    if (Profile && !bLegacyMode && !bFrontEnd)
+    {
+        Profile->bAwaitingProfileRestore = true;
+        Profile->ProfileRestoreError = EFableTownTravelError::None;
+        Profile->ForceNetUpdate();
+        // known-but-unready保存はpawn生成より前に拒否し、別の町へ置かない。
+        if (!GetExpeditionFor(Profile) && !Profile->ActiveExpeditionId.IsValid())
+        {
+            FTransform Declared;
+            if (!FableProfileSchema::IsSafeAnchor(Profile->GetLastSafeTownAnchor()) ||
+                !GetDefault<UFableTownCatalog>()->ResolveAnchor(Profile->GetLastSafeTownAnchor(), 0, Declared, true))
+            {
+                Profile->ProfileRestoreError = EFableTownTravelError::DestinationNotReady;
+                Profile->SetNotice(TEXT("저장된 마을을 불러올 수 없습니다. 원본을 보존하고 복원을 보류합니다."));
+                return;
+            }
+        }
     }
     Super::RestartPlayer(NewPlayer);
     if (bLegacyMode)
@@ -1364,10 +1397,16 @@ void AFableGameMode::RestartPlayer(AController* NewPlayer)
         return;
     }
     AFablePartyEncounter* Encounter = GetExpeditionFor(Profile);
-    if (Profile)
+    const bool bUnresolvedPrivate = Profile && Profile->ActiveExpeditionId.IsValid() && !Encounter;
+    if (Profile && !bUnresolvedPrivate)
     {
         Profile->ActiveExpeditionId = Encounter ? Encounter->GetExpeditionId() : FGuid();
         Profile->ForceNetUpdate();
+    }
+    if (bUnresolvedPrivate)
+    {
+        Profile->SetNotice(TEXT("원정 참가 증서를 확인 중입니다. 마을로 대체 복원하지 않습니다."));
+        return;
     }
     const bool bDungeon = Encounter && !Encounter->GetProgress().bPartyRecoveryPending && !Encounter->IsReturning();
     AFableCharacter* Hero = NewPlayer->GetPawn<AFableCharacter>();
@@ -1375,13 +1414,26 @@ void AFableGameMode::RestartPlayer(AController* NewPlayer)
                                  : GetConnectionSlot(NewPlayer);
     if (bDungeon)
     {
+        Profile->bAwaitingProfileRestore = false;
+        Profile->ForceNetUpdate();
         Hero->SetCheckpoint(FableRPG::RegionEntrance(Encounter->GetTicket().Region) + Encounter->GetWorldOrigin() +
                                 FVector(Slot * 240, 0, 10),
                             FRotator(0, 90, 0));
     }
     else
     {
-        MovePlayerToCheckpoint(NewPlayer, EFableRegion::Village, Slot);
+        if (Encounter)
+        {
+            Profile->SetNotice(TEXT("기존 원정 복구를 기다리고 있습니다. 저장 귀환지로 대체하지 않습니다."));
+            return;
+        }
+        auto* Towns = AFableTownManager::Ensure(GetWorld());
+        auto* Restore = Towns ? Towns->GetTravelCoordinator() : nullptr;
+        if (!Restore || !Restore->BeginProfileRestore(Cast<APlayerController>(NewPlayer)))
+        {
+            Profile->ProfileRestoreError = EFableTownTravelError::GeometryUnavailable;
+            Profile->SetNotice(TEXT("저장된 안전 지점으로 복원할 수 없습니다. 기존 데이터를 보존합니다."));
+        }
     }
 }
 

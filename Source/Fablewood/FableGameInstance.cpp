@@ -1,6 +1,8 @@
 #include "FableGameInstance.h"
 
 #include "FableSaveGame.h"
+#include "FableProfileSchema.h"
+#include "FableProfileStorage.h"
 #include "FableOnlineFlowSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -42,6 +44,13 @@ namespace
         }
 
         return true;
+    }
+
+    /** 원본 파일을 바꾸지 않고 메뉴 표시용 후보만 만든다. */
+    UFableSaveGame* ReadProfileCandidate(const FString& Slot)
+    {
+        TArray<uint8> OriginalBytes;
+        return FableProfileStorage::ReadCandidate(Slot, OriginalBytes);
     }
 
     /** 읽을 수 있는 저장 프로필 여부를 확인한다. */
@@ -198,8 +207,7 @@ void UFableGameInstance::RefreshContinueState()
         return;
     }
 
-    UFableSaveGame* Profile =
-        Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromSlot(ContinueProfilePrefix + TEXT("_Host"), 0));
+    UFableSaveGame* Profile = ReadProfileCandidate(ContinueProfilePrefix + TEXT("_Host"));
 
     // 재화와 작업 비용 처리
     if (IsReadableProfile(Profile))
@@ -352,8 +360,7 @@ bool UFableGameInstance::ContinueGame(bool bHost)
         return false;
     }
 
-    UFableSaveGame* Profile =
-        Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromSlot(ContinueProfilePrefix + TEXT("_Host"), 0));
+    UFableSaveGame* Profile = ReadProfileCandidate(ContinueProfilePrefix + TEXT("_Host"));
 
     // 프로필과 저장 스냅숏 조건 검사
     if (!IsReadableProfile(Profile))
@@ -562,7 +569,8 @@ bool UFableGameInstance::JoinOnlineServer(const FString& Address, const FString&
     bTravelInProgress = true;
     bRecoveringToFrontEnd = false;
     // Only the short-lived one-use ticket travels; the account token/password stay in RAM.
-    Controller->ClientTravel(Target + TEXT("?FableTicket=") + OneUseTicket, TRAVEL_Absolute);
+    Controller->ClientTravel(Target + TEXT("?FableTicket=") + OneUseTicket + FableProfileSchema::CompatibilityOptions(),
+                             TRAVEL_Absolute);
 
     return true;
 }
@@ -584,8 +592,7 @@ bool UFableGameInstance::CommitPendingProfile()
         return false;
     }
 
-    UFableSaveGame* SavedProfile =
-        Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromSlot(PendingProfilePrefix + TEXT("_Host"), 0));
+    UFableSaveGame* SavedProfile = FableProfileStorage::ReadVerifiedCurrent(PendingProfilePrefix + TEXT("_Host"));
 
     // 프로필과 저장 스냅숏 조건 검사
     if (!IsReadableProfile(SavedProfile))

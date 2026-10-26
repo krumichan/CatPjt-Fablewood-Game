@@ -97,7 +97,7 @@ try {
     [void][IO.Directory]::CreateDirectory($runRoot)
     $log=Join-Path $runRoot 'client.log'
     # Only the single-use ticket is present in the URL. Password/session bearer never enter argv or state.
-    $arguments=$launchPrefix+$Address+'?FableTicket='+$ticket+' -game -d3d11 -windowed -nosplash -ResX='+$Width+' -ResY='+$Height+' -ForceRes -WinX='+$WindowX+' -WinY=40'+
+    $arguments=$launchPrefix+$Address+'?FableTicket='+$ticket+'?FableProfileSchema=10?FableTownCatalog=1?FableTownProtocol=1 -game -d3d11 -windowed -nosplash -ResX='+$Width+' -ResY='+$Height+' -ForceRes -WinX='+$WindowX+' -WinY=40'+
         ' -abslog='+(Quote-OnlineArgument $log)+' -LogCmds="LogInit off,LogNet off,LogLoad off" -ini:Engine:[ConsoleVariables]:r.WarnOfBadDrivers=0 -ExecCmds="t.MaxFPS 60,t.IdleWhenNotForeground 0"'
     try { $process=Start-Process -FilePath $clientExe -ArgumentList $arguments -WorkingDirectory $script:FableProjectRoot -WindowStyle Normal -PassThru }
     catch { throw 'Could not start the game client. Private account data and process arguments were omitted.' }

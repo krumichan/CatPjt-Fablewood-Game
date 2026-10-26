@@ -287,7 +287,7 @@ bool FFableTalentMigrationTest::RunTest(const FString& Parameters)
         }
 
         // 아이템·장비 옵션·인벤토리와 창고 처리
-        TestEqual(TEXT("Migration reaches nine"), P->Version, 9);
+        TestEqual(TEXT("Migration reaches current schema"), P->Version, FableProfileSchema::CurrentVersion);
         TestTrue(TEXT("Migration grants no currency, XP or equipment"),
                  P->Gold == 237 && P->Ore == 17 && P->Level == 1 && P->Experience == 0 && P->Inventory.Num() == 4);
 
@@ -317,7 +317,7 @@ bool FFableTalentMigrationTest::RunTest(const FString& Parameters)
     Reject(TEXT("Unknown schema ten is rejected"),
            [](UFableSaveGame* P)
            {
-               P->Version = 10;
+               P->Version = FableProfileSchema::CurrentVersion + 1;
            });
     Reject(TEXT("Invalid second path is rejected"),
            [](UFableSaveGame* P)
@@ -612,7 +612,7 @@ bool FFableTalentMemoryTest::RunTest(const FString& Parameters)
 
     // 기대값과 상태 보존 검증 처리
     TestTrue(TEXT("Restored profile validates without filling choices"), R->MigrateAndValidate());
-    TestEqual(TEXT("Stored v8 migrates to nine"), R->Version, 9);
+    TestEqual(TEXT("Stored v8 migrates to current schema"), R->Version, FableProfileSchema::CurrentVersion);
 
     // 직업·스킬·특성 빌드 순회
     for (int32 I = 0; I < 3; ++I)

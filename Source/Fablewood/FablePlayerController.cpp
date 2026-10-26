@@ -4357,7 +4357,8 @@ FOnFableTownTravelEvent& AFablePlayerController::OnTownTravelProgress()
 /** 여행 화면의 실제 확인 대기 상태를 읽는다. */
 bool AFablePlayerController::IsTownTravelInputBlocked() const
 {
-    return bTownTravelUiLocked;
+    const auto* Profile = GetPlayerState<AFablePlayerState>();
+    return bTownTravelUiLocked || (Profile && Profile->IsTownPersistenceBlocked());
 }
 
 /** 소유 pawn의 실제 연속 도착 샘플 수를 읽는다. */
@@ -4443,6 +4444,7 @@ void AFablePlayerController::ClientPrepareTownGeometry_Implementation(const FFab
     TownArrivalSamples = 0;
     bTownArrivalConfirmationSent = false;
     bTownArrivalFailed = false;
+    bTownPhysicalArrivalObserved = false;
     TownAwaitingArrival = FFableTownTravelCommitReceipt();
     TownPreparedEvents.Broadcast(TownPrepared);
 
@@ -4496,7 +4498,7 @@ void AFablePlayerController::TryAutoAcknowledgeTownGeometry()
         Source.LocalToWorld = FTransform::Identity;
         Source.FixedInstanceName = TEXT("FableTown_LegacyVillage_Geometry_v1");
         Source.ContentIdentity = TEXT("LegacyPersistentV1");
-        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::SourceRetention;
+        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::ClientSourceRetention;
         if (!Streaming->AcquireGeometry(Source, GeometryOwner, TownSourceLease, Failure))
         {
             if (Failure != EFableTownGeometryFailure::InvalidOwner)
@@ -4511,7 +4513,7 @@ void AFablePlayerController::TryAutoAcknowledgeTownGeometry()
     }
     if (!TownTargetLease.IsValid())
     {
-        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::TargetPending;
+        GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::ClientTargetPending;
         if (!Streaming->AcquireGeometry(TownPrepared.Geometry, GeometryOwner, TownTargetLease, Failure))
         {
             if (Failure != EFableTownGeometryFailure::InvalidOwner)
@@ -4558,6 +4560,7 @@ void AFablePlayerController::ClientTownTravelResponse_Implementation(const FFabl
             {
                 bTownArrivalConfirmationSent = false;
                 TownArrivalSamples = 0;
+                bTownPhysicalArrivalObserved = false;
                 EmitLocalTownEvent(EFableTownTravelEventKind::AttemptRejected, Response.Error);
             }
             return;
@@ -4573,6 +4576,7 @@ void AFablePlayerController::ClientTownTravelResponse_Implementation(const FFabl
                 bTownTravelUiLocked = true;
                 bTownArrivalConfirmationSent = false;
                 bTownArrivalFailed = false;
+                bTownPhysicalArrivalObserved = false;
                 TownArrivalDeadline = GetWorld()->GetTimeSeconds() + 5.0;
                 if (!bTownMoveInputHeld)
                 {
@@ -4637,6 +4641,14 @@ void AFablePlayerController::TickTownTravel()
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
     const AFableCharacter* Hero = GetPawn<AFableCharacter>();
     const auto* Movement = Hero ? Hero->GetCharacterMovement() : nullptr;
+    if (Profile && TownLastResponse.Operation == EFableTownTravelOperation::ConfirmArrival &&
+        TownLastResponse.Error == EFableTownTravelError::None && TownLastResponse.bOwnArrivalConfirmed &&
+        TownLastResponse.TransactionId == TownAwaitingArrival.TransactionId &&
+        Profile->IsTownAnchorDurable(TownAwaitingArrival.TransactionId))
+    {
+        CompleteTownArrivalAfterConfirmation();
+        return;
+    }
     const auto& Commit = TownAwaitingArrival;
     const auto* Connection = Profile ? &Profile->GetTownConnectionSnapshot() : nullptr;
     const FVector Delta = Hero ? Hero->GetActorLocation() - Commit.AcceptedTransform.GetLocation() : FVector(MAX_flt);
@@ -4647,42 +4659,51 @@ void AFablePlayerController::TickTownTravel()
         Connection->SafeCheckpointRevision == Commit.SafeCheckpointRevision && FVector2D(Delta).Size() <= 10.0f &&
         FMath::Abs(Delta.Z) <= 10.0f && Movement->IsMovingOnGround();
     const double Now = GetWorld()->GetTimeSeconds();
-    if (Now >= TownArrivalDeadline)
+    if (!bArrived)
+    {
+        TownArrivalSamples = 0;
+        bTownPhysicalArrivalObserved = false;
+    }
+
+    // 실제 도착은 원래 5초 안에 확인한다. 저장 ACK 대기는 그 물리 제한과 구분한다.
+    if (!bTownPhysicalArrivalObserved && Now >= TownArrivalDeadline)
     {
         bTownArrivalFailed = true;
-        bTownTravelUiLocked = false;
-        if (bTownMoveInputHeld)
-        {
-            SetIgnoreMoveInput(false);
-            bTownMoveInputHeld = false;
-        }
+        bTownTravelUiLocked = true;
         EmitLocalTownEvent(EFableTownTravelEventKind::AttemptRejected, EFableTownTravelError::ArrivalUnconfirmed);
         return;
     }
     if (!bArrived)
     {
-        TownArrivalSamples = 0;
         return;
     }
-    if (TownArrivalSamples == 0)
+
+    if (!bTownPhysicalArrivalObserved)
     {
-        TownArrivalFirstSampleTime = Now;
-        TownArrivalLastSampleTime = Now;
-        TownArrivalSamples = 1;
+        if (TownArrivalSamples == 0)
+        {
+            TownArrivalFirstSampleTime = Now;
+            TownArrivalLastSampleTime = Now;
+            TownArrivalSamples = 1;
+        }
+        else if (Now - TownArrivalLastSampleTime >= 0.1)
+        {
+            ++TownArrivalSamples;
+            TownArrivalLastSampleTime = Now;
+        }
+        if (TownArrivalSamples < 3 || Now - TownArrivalFirstSampleTime < 0.3)
+        {
+            return;
+        }
+
+        bTownPhysicalArrivalObserved = true;
+        EmitLocalTownEvent(EFableTownTravelEventKind::OwnArrivalObserved, EFableTownTravelError::None);
     }
-    else if (Now - TownArrivalLastSampleTime >= 0.1)
-    {
-        ++TownArrivalSamples;
-        TownArrivalLastSampleTime = Now;
-    }
-    if (TownArrivalSamples < 3 || Now - TownArrivalFirstSampleTime < 0.3)
-    {
-        return;
-    }
-    if (!bTownArrivalConfirmationSent)
+
+    // 同じ移動のACKが来るまでsourceと入力停止を保持し、確認RPCを連打しない。
+    if (!bTownArrivalConfirmationSent && Profile->IsTownAnchorDurable(Commit.TransactionId))
     {
         bTownArrivalConfirmationSent = true;
-        EmitLocalTownEvent(EFableTownTravelEventKind::OwnArrivalObserved, EFableTownTravelError::None);
         ServerConfirmTownArrival(FGuid::NewGuid(), Commit.TransactionId, Commit.Generation,
                                  TownPrepared.ConnectionNonce, Commit.CommitSequence);
     }
@@ -4692,7 +4713,8 @@ void AFablePlayerController::TickTownTravel()
 void AFablePlayerController::CompleteTownArrivalAfterConfirmation()
 {
     const AFablePlayerState* Profile = GetPlayerState<AFablePlayerState>();
-    if (!Profile || !TownAwaitingArrival.TransactionId.IsValid())
+    if (!Profile || !TownAwaitingArrival.TransactionId.IsValid() ||
+        !Profile->IsTownAnchorDurable(TownAwaitingArrival.TransactionId))
     {
         return;
     }
@@ -4705,7 +4727,7 @@ void AFablePlayerController::CompleteTownArrivalAfterConfirmation()
     FFableTownGeometryLeaseOwner GeometryOwner;
     GeometryOwner.OwnerConnectionGeneration = TownPrepared.OwnerConnectionGeneration;
     GeometryOwner.OwnerPlayerState = const_cast<AFablePlayerState*>(Profile);
-    GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::Presence;
+    GeometryOwner.Purpose = EFableTownGeometryLeasePurpose::ClientPresence;
     FFableTownGeometryLease Presence;
     EFableTownGeometryFailure Failure;
     if (!Streaming->AcquireGeometry(TownPrepared.Geometry, GeometryOwner, Presence, Failure))
@@ -4788,4 +4810,16 @@ void AFablePlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
         }
     }
     Super::EndPlay(EndPlayReason);
+}
+
+/** 정상 인증 세션으로 새 ticket을 발급한다. 원본 profile 값은 클라이언트에서 설정하지 않는다. */
+void AFablePlayerController::ClientRequireProfileReclaim_Implementation(int64 SeedRevision, const FString& OriginalHash)
+{
+    if (auto* GI = GetGameInstance())
+    {
+        if (auto* Flow = GI->GetSubsystem<UFableOnlineFlowSubsystem>())
+        {
+            Flow->HandleProfileReclaim(SeedRevision, OriginalHash);
+        }
+    }
 }

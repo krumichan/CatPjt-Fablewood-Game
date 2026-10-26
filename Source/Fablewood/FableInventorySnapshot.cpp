@@ -118,7 +118,7 @@ TSharedRef<FJsonObject> FableInventorySnapshot::MakeItem(const FFableItem& Item,
 TSharedPtr<FJsonObject> FableInventorySnapshot::Make(const UFableSaveGame* P)
 {
     // 프로필과 저장 스냅숏 조건 검사
-    if (!P || P->Version != 9 || !P->IsValidProfile())
+    if (!P || !FableProfileSchema::CanProjectOriginalMirror(P->Version) || !P->IsValidProfile())
     {
         return nullptr;
     }

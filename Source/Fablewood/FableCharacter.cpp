@@ -571,7 +571,8 @@ void AFableCharacter::ServerRequestAction_Implementation(uint8 Action)
 {
     // 서버 권한과 실행 위치 조건 검사
     if (const AFablePlayerState* BackendState = GetPlayerState<AFablePlayerState>();
-        BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())
+        BackendState && (BackendState->IsTownPersistenceBlocked() ||
+                         (BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())))
     {
         return;
     }
@@ -638,7 +639,7 @@ void AFableCharacter::PerformActiveSkill(int32 Slot)
     {
         return;
     }
-    if (State->IsBackendEnabled() && !State->IsBackendReady())
+    if (State->IsTownPersistenceBlocked() || (State->IsBackendEnabled() && !State->IsBackendReady()))
     {
         return;
     }
@@ -827,7 +828,8 @@ void AFableCharacter::PerformAttack(bool bSkill)
 {
     // 서버 권한과 실행 위치 조건 검사
     if (const AFablePlayerState* BackendState = GetPlayerState<AFablePlayerState>();
-        BackendState && BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())
+        BackendState && (BackendState->IsTownPersistenceBlocked() ||
+                         (BackendState->IsBackendEnabled() && !BackendState->IsBackendReady())))
     {
         return;
     }

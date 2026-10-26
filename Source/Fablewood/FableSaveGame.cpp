@@ -23,7 +23,7 @@ void UFableSaveGame::NormalizeLoadedVersion()
 bool UFableSaveGame::IsValidProfile() const
 {
     // 아이템·장비 옵션·인벤토리와 창고 조건 검사
-    if (Version < 1 || Version > 9 || Level < 1 || Level > 20 || Experience < 0 ||
+    if (Version < 1 || Version > FableProfileSchema::CurrentVersion || Level < 1 || Level > 20 || Experience < 0 ||
         (Level < 20 ? Experience >= Level * 100 : Experience != 0) || Gold < 0 || Gold > 1000000 || Ore < 0 ||
         Ore > 100000 || Inventory.Num() < 4 || Inventory.Num() > 32 || uint8(HeroClass) > uint8(EFableClass::Archer) ||
         uint8(ForestQuest) > uint8(EFableQuestStage::Completed) ||
@@ -31,6 +31,11 @@ bool UFableSaveGame::IsValidProfile() const
     {
         return false;
     }
+    if (Version == FableProfileSchema::CurrentVersion && !FableProfileSchema::IsSafeAnchor(GetLastSafeTownAnchor()))
+    {
+        return false;
+    }
+
     if (Version >= 8 && !FableRPG::IsValidTalentProgress(ClassProgress))
     {
         return false;
@@ -236,7 +241,7 @@ bool UFableSaveGame::IsValidProfile() const
 }
 
 /** 지원하는 이전 저장 형식을 변환한 뒤 전체 프로필의 유효성을 검사한다. */
-bool UFableSaveGame::MigrateAndValidate()
+bool UFableSaveGame::MigrateAndValidate(EFableTownBootstrapPolicy Policy)
 {
     NormalizeLoadedVersion();
     // Never repair malformed arrays, invalid currency or unsupported versions into a writable profile.
@@ -404,5 +409,33 @@ bool UFableSaveGame::MigrateAndValidate()
         Version = 9;
     }
 
+    // V9의 모든 기존 값을 검증한 뒤 논리 참조와 버전만 추가한다.
+    if (Version == FableProfileSchema::ItemIdentityVersion)
+    {
+        if (!IsValidProfile())
+        {
+            return false;
+        }
+        const FFableTownAnchorRef Anchor = FableProfileSchema::BootstrapAnchor(Policy);
+        if (!FableProfileSchema::IsSafeAnchor(Anchor))
+        {
+            return false;
+        }
+        LastSafeTownId = Anchor.TownId;
+        LastSafeAnchorId = Anchor.AnchorId;
+        TownCatalogVersion = Anchor.CatalogVersion;
+        Version = FableProfileSchema::CurrentVersion;
+    }
+
     return IsValidProfile();
+}
+
+/** 저장된 세 필드만 논리 참조로 읽는다. 지형 준비나 좌표는 추론하지 않는다. */
+FFableTownAnchorRef UFableSaveGame::GetLastSafeTownAnchor() const
+{
+    FFableTownAnchorRef Anchor;
+    Anchor.TownId = LastSafeTownId;
+    Anchor.AnchorId = LastSafeAnchorId;
+    Anchor.CatalogVersion = TownCatalogVersion;
+    return Anchor;
 }

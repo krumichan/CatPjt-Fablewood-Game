@@ -412,6 +412,8 @@ bool UFableOnlineFlowSubsystem::Authenticate(const FString& Name, const FString&
     CancelRequests();
     AccountName = Clean;
     bRetryJoin = false;
+    bProfileReclaimUsed = false;
+    bProfileReclaimPending = false;
     auto Body = MakeShared<FJsonObject>();
     Body->SetStringField(TEXT("name"), Clean);
     Body->SetStringField(TEXT("password"), Password);
@@ -457,6 +459,8 @@ bool UFableOnlineFlowSubsystem::Register(const FString& Name, const FString& Pas
     AccountName = Clean;
     PendingRegistrationPassword = Password;
     bRetryJoin = false;
+    bProfileReclaimUsed = false;
+    bProfileReclaimPending = false;
     auto Body = MakeShared<FJsonObject>();
     Body->SetStringField(TEXT("name"), Clean);
     Body->SetStringField(TEXT("password"), Password);
@@ -1170,6 +1174,14 @@ bool UFableOnlineFlowSubsystem::TickFlow(float DeltaSeconds)
         return false;
     }
 
+    // lease 반환 후 새 frontend world에 도착했을 때만 새 ticket을 발급한다.
+    if (bProfileReclaimPending && !bAwaitingFrontEnd && GetWorld() && GetWorld()->GetNetMode() != NM_Client)
+    {
+        bProfileReclaimPending = false;
+        SetState(EFableOnlineState::Character, TEXT("기존 캐릭터의 안전한 이전을 계속합니다…"));
+        JoinSelectedServer();
+    }
+
     // 서버 시각과 재사용 대기시간 처리
     UpdateOverlay();
     const double Now = FPlatformTime::Seconds();
@@ -1179,7 +1191,13 @@ bool UFableOnlineFlowSubsystem::TickFlow(float DeltaSeconds)
     {
         auto* Controller = GetGameInstance()->GetFirstLocalPlayerController();
         const auto* Profile = Controller ? Controller->GetPlayerState<AFablePlayerState>() : nullptr;
-        if (GetWorld() && GetWorld()->GetNetMode() == NM_Client && Profile && Profile->IsBackendReady())
+        if (Profile && Profile->IsBackendReady() && Profile->GetProfileRestoreError() != EFableTownTravelError::None)
+        {
+            SetState(EFableOnlineState::Error,
+                     TEXT("저장된 안전 지점으로 입장할 수 없습니다. 기존 데이터는 보존되며 안전 퇴장할 수 있습니다."));
+        }
+        else if (GetWorld() && GetWorld()->GetNetMode() == NM_Client && Profile && Profile->IsBackendReady() &&
+                 !Profile->IsProfileRestorePending() && Controller->GetPawn())
         {
             if (Profile->GetBackendPlayerId() != Character.PlayerId)
             {
@@ -1211,4 +1229,30 @@ bool UFableOnlineFlowSubsystem::TickFlow(float DeltaSeconds)
     }
 
     return true;
+}
+
+/** 서버가 seed 저장·권한 반환을 확인한 이후에만 새 접속을 준비한다. */
+void UFableOnlineFlowSubsystem::HandleProfileReclaim(int64 SeedRevision, const FString& OriginalHash)
+{
+    if (!bEnabled || !bManagedConnection || !HasSession() || bProfileReclaimUsed || SeedRevision < 1 ||
+        SeedRevision > 9007199254740991LL || OriginalHash.Len() != 64)
+    {
+        bProfileReclaimPending = false;
+        SetState(EFableOnlineState::Error, TEXT("이전 프로필 확인을 완료하지 못했습니다. 원본을 보존합니다."));
+        return;
+    }
+
+    ProfileSeedRevision = SeedRevision;
+    ProfileSeedHash = OriginalHash;
+    bProfileReclaimUsed = true;
+    bProfileReclaimPending = true;
+    bAwaitingFrontEnd = true;
+    bRefreshAfterReturn = false;
+    bManagedConnection = false;
+    bGameMenuOpen = false;
+    SetState(EFableOnlineState::Refreshing, TEXT("기존 캐릭터를 확인했습니다. 새 접속권으로 다시 연결합니다…"));
+    if (auto* GI = Cast<UFableGameInstance>(GetGameInstance()))
+    {
+        GI->ReturnToFrontEnd();
+    }
 }

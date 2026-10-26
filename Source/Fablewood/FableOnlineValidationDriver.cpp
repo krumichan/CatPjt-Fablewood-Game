@@ -172,6 +172,13 @@ TSharedRef<FJsonObject> UFableOnlineValidationDriver::Profile(const AFablePlayer
 
     // JSON 계약과 검증 기록 처리
     J->SetStringField(TEXT("playerId"), P->GetBackendPlayerId());
+    J->SetNumberField(TEXT("profileVersion"), P->GetLoadedProfileVersion());
+    const auto& SafeAnchor = P->GetLastSafeTownAnchor();
+    auto Safe = MakeShared<FJsonObject>();
+    Safe->SetNumberField(TEXT("townId"), int32(SafeAnchor.TownId));
+    Safe->SetStringField(TEXT("anchorId"), SafeAnchor.AnchorId.ToString());
+    Safe->SetNumberField(TEXT("catalogVersion"), SafeAnchor.CatalogVersion);
+    J->SetObjectField(TEXT("lastSafeTown"), Safe);
     J->SetNumberField(TEXT("heroClass"), int32(P->HeroClass));
     J->SetNumberField(TEXT("level"), P->Level);
     J->SetNumberField(TEXT("experience"), P->Experience);
@@ -347,6 +354,7 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
                                                                                        : TEXT("standalone"));
     int32 Local = 0;
     TArray<TSharedPtr<FJsonValue>> Profiles;
+    TArray<TSharedPtr<FJsonValue>> DurableTowns;
 
     // 서버 권한과 실행 위치 처리
     if (World)
@@ -362,6 +370,18 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
                 if (auto* P = PC->GetPlayerState<AFablePlayerState>())
                 {
                     Profiles.Add(MakeShared<FJsonValueObject>(Profile(P)));
+                    auto D = MakeShared<FJsonObject>();
+                    const auto& Save = P->GetTownAnchorSaveStatus();
+                    D->SetStringField(TEXT("playerId"), P->GetBackendPlayerId());
+                    D->SetBoolField(TEXT("restorePending"), P->IsProfileRestorePending());
+                    D->SetNumberField(TEXT("state"), int32(Save.State));
+                    D->SetStringField(TEXT("transactionId"),
+                                      Save.TravelTransactionId.ToString(EGuidFormats::DigitsWithHyphensLower));
+                    D->SetNumberField(TEXT("anchorSequence"), double(Save.AnchorSequence));
+                    D->SetStringField(TEXT("acknowledgedHash"), Save.AcknowledgedProfileHash);
+                    D->SetNumberField(TEXT("acknowledgedRevision"), double(Save.AcknowledgedRevision));
+                    D->SetBoolField(TEXT("durable"), P->IsTownAnchorDurable(Save.TravelTransactionId));
+                    DurableTowns.Add(MakeShared<FJsonValueObject>(D));
                 }
             }
         }
@@ -370,6 +390,11 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
     // JSON 계약과 검증 기록 처리
     J->SetNumberField(TEXT("localControllerCount"), Local);
     J->SetArrayField(TEXT("profiles"), Profiles);
+    J->SetArrayField(TEXT("durableTownRestores"), DurableTowns);
+    if (TownDurabilityCheckpoint)
+    {
+        J->SetObjectField(TEXT("townPersistenceCheckpoint"), TownDurabilityCheckpoint);
+    }
 
     // JSON 계약과 검증 기록 처리
     if (Role == TEXT("server"))
@@ -734,7 +759,9 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     auto* P = PC ? PC->GetPlayerState<AFablePlayerState>() : nullptr;
     auto* Hero = PC ? Cast<AFableCharacter>(PC->GetPawn()) : nullptr;
     const bool Ready = P && P->IsBackendReady() && !P->IsBackendSavePending() && P->bLastSaveSucceeded &&
-                       P->GetBackendRevision() == P->GetBackendAcknowledgedRevision();
+                       P->GetBackendRevision() == P->GetBackendAcknowledgedRevision() &&
+                       P->GetLoadedProfileVersion() == 10 && P->GetProfileReadStatus().CurrentVersion == 10 &&
+                       P->GetProfileReadStatus().FirstAcknowledgedHash.Len() == 64;
 
     // HTTP 요청·응답과 연결 상태 처리
     switch (Step)
@@ -891,6 +918,23 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         {
             return true;
         }
+        {
+            // seed 중 pawn 없는 이전 연결은 두 명의 실제 입장으로 세지 않는다.
+            TSet<FString> SpawnedPlayers;
+            for (TActorIterator<AFableCharacter> It(World); It; ++It)
+            {
+                const auto* Other = It->GetPlayerState<AFablePlayerState>();
+                if (Other && Other->bProfileLoaded && !Other->PartyPlayerKey.IsEmpty() && It->IsAlive() &&
+                    World->GetGameState()->PlayerArray.Contains(Other))
+                {
+                    SpawnedPlayers.Add(Other->PartyPlayerKey);
+                }
+            }
+            if (SpawnedPlayers.Num() != 2)
+            {
+                return true;
+            }
+        }
         Checks.Add(TEXT("two_distinct_remote_players"), true);
         MovementStart = Hero->GetActorLocation();
         BeforeManaPotions = P->ManaPotions;
@@ -919,6 +963,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
             else
             {
                 Checkpoint = Profile(P);
+                TownDurabilityCheckpoint = ObserveTownPersistence(P);
                 Advance(30);
             }
             break;
@@ -940,6 +985,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
             {
                 Checks.Add(TEXT("normal_potion_saved_once"), true);
                 Checkpoint = Profile(P);
+                TownDurabilityCheckpoint = ObserveTownPersistence(P);
                 Capture(TEXT("playing"));
                 Advance(Scenario == TEXT("connectivity") ? 30 : 100);
             }
@@ -960,6 +1006,7 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         if (Scenario == TEXT("party") ? TickParty(PC, P, Now) : TickDungeon(PC, P, Hero, Now))
         {
             Checkpoint = Profile(P);
+            TownDurabilityCheckpoint = ObserveTownPersistence(P);
             Capture(Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
                     : Scenario == TEXT("party-entry")     ? TEXT("party-entry-finished")
                     : Scenario == TEXT("party-isolation") ? TEXT("party-isolation-finished")
@@ -1064,4 +1111,42 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     }
 
     return true;
+}
+
+/** 로비 PS와 섞지 않고 실제 소유 플레이 월드의 원본 읽기·ACK·도착 상태를 기록한다. */
+TSharedRef<FJsonObject> UFableOnlineValidationDriver::ObserveTownPersistence(const AFablePlayerState* P) const
+{
+    auto J = MakeShared<FJsonObject>();
+    if (!P || !P->GetWorld())
+    {
+        return J;
+    }
+    const auto& Save = P->GetTownAnchorSaveStatus();
+    const auto& Read = P->GetProfileReadStatus();
+    J->SetStringField(TEXT("networkMode"), P->GetWorld()->GetNetMode() == NM_Client ? TEXT("client") : TEXT("other"));
+    J->SetNumberField(TEXT("processId"), FPlatformProcess::GetCurrentProcessId());
+    J->SetStringField(TEXT("playerId"), P->GetBackendPlayerId());
+    J->SetBoolField(TEXT("restorePending"), P->IsProfileRestorePending());
+    J->SetNumberField(TEXT("state"), int32(Save.State));
+    J->SetStringField(TEXT("transactionId"), Save.TravelTransactionId.ToString(EGuidFormats::DigitsWithHyphensLower));
+    J->SetNumberField(TEXT("anchorSequence"), double(Save.AnchorSequence));
+    J->SetStringField(TEXT("acknowledgedHash"), Save.AcknowledgedProfileHash);
+    J->SetNumberField(TEXT("acknowledgedRevision"), double(Save.AcknowledgedRevision));
+    J->SetBoolField(TEXT("durable"), P->IsTownAnchorDurable(Save.TravelTransactionId));
+    J->SetNumberField(TEXT("originalVersion"), Read.OriginalVersion);
+    J->SetStringField(TEXT("originalHash"), Read.OriginalHash);
+    J->SetNumberField(TEXT("originalRevision"), double(Read.OriginalRevision));
+    J->SetBoolField(TEXT("originalMirrorsValidated"), Read.bOriginalMirrorsValidated);
+    J->SetBoolField(TEXT("historicalFieldsCompared"), Read.bHistoricalFieldsCompared);
+    J->SetBoolField(TEXT("historicalFieldsByteExact"), Read.bHistoricalFieldsByteExact);
+    J->SetNumberField(TEXT("currentVersion"), Read.CurrentVersion);
+    J->SetStringField(TEXT("firstAcknowledgedHash"), Read.FirstAcknowledgedHash);
+    J->SetNumberField(TEXT("firstAcknowledgedRevision"), double(Read.FirstAcknowledgedRevision));
+    if (auto* Flow = GetGameInstance()->GetSubsystem<UFableOnlineFlowSubsystem>())
+    {
+        J->SetBoolField(TEXT("summarySeedReclaimUsed"), Flow->WasProfileReclaimUsed());
+        J->SetStringField(TEXT("summarySeedHash"), Flow->GetProfileSeedHash());
+        J->SetNumberField(TEXT("summarySeedRevision"), double(Flow->GetProfileSeedRevision()));
+    }
+    return J;
 }

@@ -30,6 +30,9 @@ public:
     void BeginAnchorTravel(APlayerController* Requester, FGuid RequestId, const FFableTownAnchorRef& Target,
                            int64 ExpectedPresenceRevision);
 
+    /** 로그인 서버만 저장된 참조의 복원을 시작한다. RPC로 노출하지 않는다. */
+    bool BeginProfileRestore(APlayerController* Requester);
+
     /** 각 ACK를 정확 tuple과 현재 소유 연결로 검사한다. */
     void AcknowledgeGeometry(APlayerController* Requester, FGuid AttemptId, FGuid TransactionId, int64 Generation,
                              FGuid ConnectionNonce, FGuid ChallengeNonce, bool bLoaded);
@@ -84,6 +87,7 @@ private:
         FFableTownGeometryLease PreviousPresenceLease;
         FFableTownTravelCommitReceipt Commit;
         FFableTownPlacementEvidence Placement;
+        bool bProfileRestore = false;
         bool bClientLoaded = false;
         bool bOwnArrivalConfirmed = false;
         bool bRollbackRecoveryRequired = false;
@@ -106,6 +110,10 @@ private:
         FFableTownTravelResponse Response;
         bool bHasResponse = false;
     };
+
+    /** 서버 복원만 포털 출발 검사를 대신하는 명시적 내부 진입점을 사용한다. */
+    void BeginAnchorTravelInternal(APlayerController* Requester, FGuid RequestId, const FFableTownAnchorRef& Target,
+                                   int64 ExpectedPresenceRevision, bool bProfileRestore);
 
     /** 소유 actor를 기존 manager로 확인한다. */
     AFableTownManager* Manager() const;

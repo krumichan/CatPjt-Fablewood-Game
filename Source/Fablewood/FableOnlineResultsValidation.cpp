@@ -1367,6 +1367,7 @@ bool UFableOnlineValidationDriver::TickPartyResults(AFablePlayerController* PC, 
         if (!A)
         {
             Checkpoint = Profile(P);
+            TownDurabilityCheckpoint = ObserveTownPersistence(P);
             ResultsReport->SetStringField(TEXT("status"), TEXT("crash-ready"));
             Capture(TEXT("results-before-disconnect"));
             Step = 30;

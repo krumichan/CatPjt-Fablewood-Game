@@ -123,7 +123,11 @@ enum class EFableTownGeometryLeasePurpose : uint8
     Presence,
     TargetPending,
     SourceRetention,
-    ServerResident
+    ServerResident,
+    // 同じWorldのlocal playerもserver tokenとは別の寿命を持つ。既存値は維持する。
+    ClientPresence,
+    ClientTargetPending,
+    ClientSourceRetention
 };
 
 UENUM()

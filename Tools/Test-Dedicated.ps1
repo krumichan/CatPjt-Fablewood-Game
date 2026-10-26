@@ -126,7 +126,7 @@ function Start-DedicatedProcess([string]$Role,[string]$Phase,[string]$Ticket='')
     } else {
         Assert-Dedicated ($Ticket -match '^[A-Za-z0-9_-]{40,100}$') 'Unexpected one-time join ticket format.'
         $secretTickets.Add($Ticket)
-        $arguments.Add(('127.0.0.1:{0}?FableTicket={1}' -f $Port,$Ticket))
+        $arguments.Add(('127.0.0.1:{0}?FableTicket={1}?FableProfileSchema=10?FableTownCatalog=1?FableTownProtocol=1' -f $Port,$Ticket))
         foreach ($a in @('-game','-d3d11','-windowed','-nosplash','-nosound','-unattended','-ini:Engine:[ConsoleVariables]:r.WarnOfBadDrivers=0',('-ResX='+$Width),('-ResY='+$Height),'-ForceRes','-WinY=40')) { $arguments.Add($a) }
         $windowX=if($Role -eq 'client1'){20}else{940};$arguments.Add('-WinX='+$windowX)
         $arguments.Add('-FableDedicatedValidationRole='+$Role)

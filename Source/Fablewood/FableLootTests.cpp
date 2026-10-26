@@ -228,7 +228,7 @@ bool FFableLootMigrationTest::RunTest(const FString& Parameters)
 
         // 아이템·장비 옵션·인벤토리와 창고 처리
         TestTrue(TEXT("Supported legacy schema migrates"), P->MigrateAndValidate());
-        TestEqual(TEXT("Migration reaches v9"), P->Version, 9);
+        TestEqual(TEXT("Migration reaches current schema"), P->Version, FableProfileSchema::CurrentVersion);
         TestEqual(TEXT("Legacy gold is preserved"), P->Gold, 17);
         TestEqual(TEXT("Legacy ore is preserved"), P->Ore, 3);
         TestEqual(TEXT("Migration does not grant extra items"), P->Inventory.Num(), Before.Num());

@@ -1,6 +1,10 @@
 #include "FablePlayerState.h"
+#include "UObject/Package.h"
 #include "FableBackend.h"
 #include "FableSaveGame.h"
+#include "FableProfileSchema.h"
+#include "FableTownManager.h"
+#include "FablePlayerController.h"
 #include "FableInventorySnapshot.h"
 #include "FableCharacterSummary.h"
 #include "FableGameMode.h"
@@ -20,6 +24,38 @@ THIRD_PARTY_INCLUDES_END
 
 namespace
 {
+    /** 同じworldのseed完了後は、新しいclaimの実際のbytesとrevisionを再検査する。 */
+    struct FSummarySeedReceipt
+    {
+        FString Hash;
+        int64 Revision = 0;
+        double ExpiresAt = 0;
+    };
+
+    TMap<TWeakObjectPtr<UWorld>, TMap<FString, FSummarySeedReceipt>> SummarySeedReceipts;
+
+    /** 終了worldと期限切れreceiptだけを除外し、無制限に保持しない。 */
+    TMap<FString, FSummarySeedReceipt>& SeedReceipts(UWorld* World)
+    {
+        for (auto It = SummarySeedReceipts.CreateIterator(); It; ++It)
+        {
+            if (!It.Key().IsValid())
+            {
+                It.RemoveCurrent();
+            }
+        }
+        auto& Receipts = SummarySeedReceipts.FindOrAdd(World);
+        const double Now = FPlatformTime::Seconds();
+        for (auto It = Receipts.CreateIterator(); It; ++It)
+        {
+            if (Now >= It.Value().ExpiresAt)
+            {
+                It.RemoveCurrent();
+            }
+        }
+        return Receipts;
+    }
+
     /** 프로필의 재화와 물약을 전송용 JSON으로 만든다. */
     TSharedRef<FJsonObject> Wallet(const UFableSaveGame* D)
     {
@@ -60,6 +96,8 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     FString LatestPayload, LatestHash, SentHash, SentPayload, OperationId, AcknowledgedHash;
     TSharedPtr<FJsonObject> LatestWallet, SentWallet, LatestInventory, SentInventory, LatestSummary, SentSummary,
         SentBody;
+    FFableTownAnchorSaveWitness LatestAnchorWitness, SentAnchorWitness;
+    bool V9SummarySeed = false;
     bool InventoryAcknowledged = false, SummaryAcknowledged = false;
     bool Pending = false, Closing = false, Failed = false, LoginComplete = false;
     bool HeartbeatPending = false, ReleaseStarted = false, ReleasePending = false, Released = false;
@@ -67,6 +105,17 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     double LeaseDeadline = 0;
     FString FailureReason;
     TFunction<void(bool, const FString&)> LeaveCompletion;
+
+    /** 同じPSが再利用されても、置換前sessionのcallbackは新しい接続を変更できない。 */
+    AFablePlayerState* CurrentPlayer() const
+    {
+        auto* P = Player.Get();
+        auto* PC = P ? Cast<APlayerController>(P->GetOwner()) : nullptr;
+        return P && P->BackendSession.Get() == this && P->GetWorld() == World.Get() && P->BackendPlayerId == PlayerId &&
+                       PC && PC->GetPlayerState<AFablePlayerState>() == P
+                   ? P
+                   : nullptr;
+    }
 
     /** 식별자를 저장 계약의 정규 문자열 형식으로 변환한다. */
     TSharedRef<FJsonObject> Identity() const
@@ -80,7 +129,7 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     /** 백엔드가 확인한 저장 리비전과 준비 상태를 플레이어에 반영한다. */
     void Mirror()
     {
-        if (auto P = Player.Get())
+        if (auto P = CurrentPlayer())
         {
             P->BackendRevision = Revision + (Pending ? 1 : 0);
             P->BackendAcknowledgedRevision = Revision;
@@ -168,8 +217,13 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         }
 
         // 현재 월드와 플레이어 참조 처리
-        if (auto P = Player.Get())
+        if (auto P = CurrentPlayer())
         {
+            if (P->TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Queued ||
+                P->TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Sending)
+            {
+                P->TownAnchorSaveStatus.State = EFableTownAnchorSaveState::Failed;
+            }
             P->bStorageBlocked = true;
             P->bBackendReady = false;
             P->bLastSaveSucceeded = false;
@@ -263,6 +317,17 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                     Self->Released = true;
                     Self->Mirror();
                     Self->CompleteLeave(true, TEXT("서버 저장과 안전 퇴장이 완료되었습니다."));
+                    if (Self->V9SummarySeed)
+                    {
+                        if (auto P = Self->CurrentPlayer())
+                        {
+                            auto* PC = Cast<AFablePlayerController>(P->GetOwner());
+                            if (PC && PC->GetPlayerState<AFablePlayerState>() == P)
+                            {
+                                PC->ClientRequireProfileReclaim(Self->Revision, Self->AcknowledgedHash);
+                            }
+                        }
+                    }
                 }
                 else if (!Ok && (Code == 0 || Code >= 500 || Code == 408 || Code == 429))
                 {
@@ -286,7 +351,7 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
     /** 최신 프로필을 기존 저장 순서를 유지하는 대기열에 등록한다. */
     void Queue(const FString& Payload, const FString& Hash, const TSharedRef<FJsonObject>& W,
                const TSharedRef<FJsonObject>& Inventory, const TSharedRef<FJsonObject>& Summary, bool bFinalSnapshot,
-               const FString& PublicKey, int64 GrantSequence)
+               const FString& PublicKey, int64 GrantSequence, const FFableTownAnchorSaveWitness& AnchorWitness)
     {
         // 접속 권한·저장 리비전·멱등 키 조건 검사
         if (Failed || (Closing && !bFinalSnapshot) || ReleaseStarted || Released)
@@ -304,6 +369,7 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         }
 
         // 아이템·장비 옵션·인벤토리와 창고 처리
+        LatestAnchorWitness = AnchorWitness;
         LatestPayload = Payload;
         LatestHash = Hash;
         LatestWallet = W;
@@ -315,6 +381,13 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
         // 프로필 저장과 완료 응답 조건 검사
         if (InventoryAcknowledged && SummaryAcknowledged && !Pending && Hash == AcknowledgedHash)
         {
+            // 새 write를 꾸미지 않고 정확히 등록한 같은 bytes의 이전 ACK를 사용한다.
+            if (auto P = CurrentPlayer(); P && LatestAnchorWitness.IsFor(PlayerId, Hash))
+            {
+                LatestAnchorWitness.SentExpectedRevision = Revision;
+                P->AcceptTownAnchorAcknowledgement(LatestAnchorWitness, Revision, true);
+            }
+
             // 동일 bytes의 실제 이전 ACK는 새 영수증 경계에도 유효하다.
             if (AFableGameMode* Mode = AFableGameMode::Find(World.Get()))
             {
@@ -343,6 +416,13 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
 
         // 재화와 작업 비용 처리
         Pending = true;
+        SentAnchorWitness = LatestAnchorWitness;
+        SentAnchorWitness.SentExpectedRevision = Revision;
+        if (auto P = CurrentPlayer(); P && SentAnchorWitness.IsFor(PlayerId, LatestHash) &&
+                                      P->TownAnchorSaveStatus.AnchorSequence == SentAnchorWitness.AnchorSequence)
+        {
+            P->TownAnchorSaveStatus.State = EFableTownAnchorSaveState::Sending;
+        }
         SentPayload = LatestPayload;
         SentHash = LatestHash;
         SentWallet = LatestWallet;
@@ -401,6 +481,33 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                     Self->InventoryAcknowledged = true;
                     Self->SummaryAcknowledged = true;
 
+                    // V9原本のsummary確立は、通常のlogin/save完了から完全に分離する。
+                    if (Self->V9SummarySeed)
+                    {
+                        FSummarySeedReceipt Receipt;
+                        Receipt.Hash = Self->SentHash;
+                        Receipt.Revision = Self->Revision;
+                        Receipt.ExpiresAt = FPlatformTime::Seconds() + 600.0;
+                        SeedReceipts(Self->World.Get()).Add(Self->PlayerId, Receipt);
+                        Self->Closing = true;
+                        if (auto P = Self->CurrentPlayer())
+                        {
+                            P->bBackendClosing = true;
+                            P->bBackendReady = false;
+                            P->ForceNetUpdate();
+                        }
+                        Self->Mirror();
+                        Self->Release();
+                        return;
+                    }
+
+                    // 정확 Sent hash/revision과 양쪽 wire ACK를 통과한 증서만 반영한다.
+                    if (auto P = Self->CurrentPlayer();
+                        P && Self->SentAnchorWitness.IsFor(Self->PlayerId, Self->SentHash))
+                    {
+                        P->AcceptTownAnchorAcknowledgement(Self->SentAnchorWitness, Self->Revision, false);
+                    }
+
                     // PS가 파괴되어도 검증된 동일 배치의 경계를 서버 장부에 반영한다.
                     if (AFableGameMode* Mode = AFableGameMode::Find(Self->World.Get()))
                     {
@@ -409,7 +516,7 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                     }
 
                     // 프로필 저장과 완료 응답 처리
-                    if (auto P = Self->Player.Get())
+                    if (auto P = Self->CurrentPlayer())
                     {
                         P->BackendAcknowledgedProfileHash = Self->SentHash;
                     }
@@ -433,14 +540,23 @@ struct FFableBackendSession : TSharedFromThis<FFableBackendSession>
                         }
                     }
 
+                    if (auto P = Self->CurrentPlayer();
+                        P && Self->LatestAnchorWitness.IsFor(Self->PlayerId, Self->SentHash) &&
+                        Self->LatestAnchorWitness.AnchorSequence != Self->SentAnchorWitness.AnchorSequence)
+                    {
+                        Self->LatestAnchorWitness.SentExpectedRevision = Self->Revision;
+                        P->AcceptTownAnchorAcknowledgement(Self->LatestAnchorWitness, Self->Revision, true);
+                    }
                     Self->Mirror();
 
                     // 현재 월드와 플레이어 참조 처리
                     if (!Self->LoginComplete && !Self->Closing)
                     {
                         Self->LoginComplete = true;
-                        if (auto P = Self->Player.Get())
+                        if (auto P = Self->CurrentPlayer())
                         {
+                            P->ProfileReadStatus.FirstAcknowledgedHash = Self->AcknowledgedHash;
+                            P->ProfileReadStatus.FirstAcknowledgedRevision = Self->Revision;
                             P->bBackendReady = true;
                             P->ForceNetUpdate();
                             if (auto M = Self->World->GetAuthGameMode<AFableGameMode>())
@@ -493,9 +609,10 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
     Body->SetStringField(TEXT("serverId"), FFableBackend::ServerId());
     TWeakObjectPtr<AFablePlayerState> Weak(this);
     TWeakObjectPtr<UWorld> LoginWorld(GetWorld());
+    TWeakObjectPtr<APlayerController> LoginPlayer(Cast<APlayerController>(GetOwner()));
     FFableBackend::Post(
         GetWorld(), TEXT("/v1/server/claim"), Body,
-        [Weak, LoginWorld](bool Ok, int32 Code, TSharedPtr<FJsonObject> J)
+        [Weak, LoginWorld, LoginPlayer](bool Ok, int32 Code, TSharedPtr<FJsonObject> J)
         {
             // 접속 권한·저장 리비전·멱등 키에 필요한 값 준비
             auto ReleaseClaim = [LoginWorld, J]()
@@ -516,7 +633,8 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
             auto P = Weak.Get();
 
             // 접속 권한·저장 리비전·멱등 키 처리
-            if (!P || !P->GetWorld() || P->bBackendClosing || !IsValid(P->GetOwner()))
+            if (!P || P->GetWorld() != LoginWorld.Get() || !LoginPlayer.IsValid() || P->bBackendClosing ||
+                P->GetOwner() != LoginPlayer.Get() || LoginPlayer->GetPlayerState<AFablePlayerState>() != P)
             {
                 if (Ok)
                 {
@@ -617,39 +735,36 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
                 return;
             }
 
-            // The temporary decoded profile must agree with every typed item and wallet field
-            // before applying it. Missing typed rows are accepted only for an explicit legacy claim.
-
-            UFableSaveGame* D = nullptr;
-
-            // 프로필과 저장 스냅숏 처리
+            // 原本bytes/hash/versionを保持し、mirror検証より先に移行しない。
+            UFableSaveGame* Original = nullptr;
+            TArray<uint8> OriginalBytes;
             if (bHasStoredProfile)
             {
-                TArray<uint8> Bytes;
-
-                // 요청 인자와 현재 진행 상태의 선행 조건을 확인한다.
-                if (!FBase64::Decode(Payload, Bytes) || Bytes.Num() > 262144 ||
-                    !J->TryGetStringField(TEXT("profileHash"), ExpectedHash) ||
-                    HashBytes(Bytes) != ExpectedHash.ToLower())
+                if (!FBase64::Decode(Payload, OriginalBytes) || OriginalBytes.IsEmpty() ||
+                    OriginalBytes.Num() > 262144 || FBase64::Encode(OriginalBytes) != Payload ||
+                    !J->TryGetStringField(TEXT("profileHash"), ExpectedHash) || ExpectedHash.Len() != 64 ||
+                    HashBytes(OriginalBytes) != ExpectedHash.ToLower())
+                {
+                    Fail();
+                    return;
+                }
+                Original = Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(OriginalBytes));
+                if (!Original ||
+                    (InventoryVersion == 1 ? !FableProfileSchema::CanProjectOriginalMirror(Original->Version)
+                                           : Original->Version >= FableProfileSchema::ItemIdentityVersion))
                 {
                     Fail();
                     return;
                 }
 
-                D = Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
-
-                // 프로필과 저장 스냅숏 조건 검사
-                if (!D || (InventoryVersion == 1 ? D->Version != 9 : D->Version >= 9) || !D->MigrateAndValidate())
-                {
-                    Fail();
-                    return;
-                }
-                if (InventoryVersion == 1 && !FableInventorySnapshot::Matches(D, (*InventoryField)->AsObject()))
-                {
-                    Fail();
-                    return;
-                }
-                if (bHasSummary && !FableCharacterSummary::Matches(D, (*SummaryField)->AsObject()))
+                // version0の歴史的省略だけを別オブジェクトで正規化する。原本は不変。
+                UFableSaveGame* Validation = DuplicateObject<UFableSaveGame>(Original, GetTransientPackage());
+                Validation->NormalizeLoadedVersion();
+                if (!Validation->IsValidProfile() ||
+                    (InventoryVersion == 1 &&
+                     !FableInventorySnapshot::Matches(Original, (*InventoryField)->AsObject())) ||
+                    (bHasSummary && !FableCharacterSummary::Matches(Original, (*SummaryField)->AsObject())) ||
+                    (!bHasSummary && Original->Version == FableProfileSchema::CurrentVersion))
                 {
                     Fail();
                     return;
@@ -658,53 +773,73 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
             else
             {
                 const auto* HashField = J->Values.Find(TEXT("profileHash"));
-                if (!HashField || !HashField->IsValid() || (*HashField)->Type != EJson::Null)
+                if (!HashField || !HashField->IsValid() || (*HashField)->Type != EJson::Null || bHasSummary)
                 {
                     Fail();
                     return;
                 }
             }
 
-            // 프로필과 저장 스냅숏 처리
-            P->BackendPlayerId = Id;
-            P->InitializeProfile(true, TEXT(""), EFableClass(int32(InitialClass)));
-            P->ProfileSlot = TEXT("backend:") + Id;
-
-            // 프로필과 저장 스냅숏 처리
-            if (!D)
+            const bool bSeed = Original && Original->Version == FableProfileSchema::ItemIdentityVersion &&
+                               InventoryVersion == 1 && !bHasSummary;
+            auto& Receipts = SeedReceipts(P->GetWorld());
+            if (const FSummarySeedReceipt* Receipt = Receipts.Find(Id))
             {
-                D = P->MakeProfileSnapshot();
+                if (!Original || bSeed || !bHasSummary || Receipt->Hash != ExpectedHash.ToLower() ||
+                    Receipt->Revision != int64(Rev))
+                {
+                    Fail();
+                    return;
+                }
+            }
+            if (bSeed && Receipts.Num() >= 64 && !Receipts.Contains(Id))
+            {
+                Fail();
+                return;
             }
 
-            // 재화와 작업 비용에 필요한 값 준비
+            // 既存walletの全7項目も原本で照合する。新規時だけauthority starterを用意する。
+            P->BackendPlayerId = Id;
+            UFableSaveGame* Fresh = nullptr;
+            if (!Original)
+            {
+                P->InitializeProfile(true, TEXT(""), EFableClass(int32(InitialClass)));
+                Fresh = P->MakeProfileSnapshot();
+            }
+            const auto ExpectedWallet = Wallet(Original ? Original : Fresh);
             const TSharedPtr<FJsonObject>* W = nullptr;
-            bool WalletMatches = J->TryGetObjectField(TEXT("wallet"), W) && W && W->IsValid();
-            const auto Expected = Wallet(D);
-
-            // 재화와 작업 비용 처리
+            bool WalletMatches = J->TryGetObjectField(TEXT("wallet"), W) && W && W->IsValid() &&
+                                 (*W)->Values.Num() == ExpectedWallet->Values.Num();
             if (WalletMatches)
             {
-                WalletMatches = (*W)->Values.Num() == Expected->Values.Num();
-                for (const auto& E : Expected->Values)
+                for (const auto& E : ExpectedWallet->Values)
                 {
                     const auto* Actual = (*W)->Values.Find(E.Key);
                     WalletMatches &= Actual && Actual->IsValid() && (*Actual)->Type == EJson::Number &&
                                      (*Actual)->AsNumber() == E.Value->AsNumber();
                 }
             }
-
-            // 재화와 작업 비용 조건 검사
-            if (!WalletMatches || P->BackendPlayerId != Id)
+            if (Original && WalletMatches)
+            {
+                bool bValidatedSeed = false;
+                WalletMatches = FableProfileSchema::OriginalMirrorsMatch(
+                                    Original, int32(InventoryVersion), *W,
+                                    InventoryVersion == 1 ? (*InventoryField)->AsObject() : nullptr, *SummaryField,
+                                    bValidatedSeed) &&
+                                bValidatedSeed == bSeed;
+            }
+            if (!WalletMatches)
             {
                 Fail();
                 return;
             }
 
-            // 프로필과 저장 스냅숏 처리
-            P->ApplyProfileSnapshot(D);
-            P->bBackendLoading = false;
-            P->bProfileLoaded = true;
-            P->bLastSaveSucceeded = false;
+            P->ProfileReadStatus.OriginalVersion = Original ? Original->Version : -1;
+            P->ProfileReadStatus.OriginalHash = ExpectedHash.ToLower();
+            P->ProfileReadStatus.OriginalRevision = int64(Rev);
+            P->ProfileReadStatus.bOriginalMirrorsValidated = Original != nullptr;
+
+            // 全投影検証後だけlease sessionを作り、seedは通常のPS適用を通らない。
             P->BackendSession = MakeShared<FFableBackendSession>();
             auto Session = P->BackendSession;
             Session->Player = P;
@@ -713,6 +848,10 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
             Session->LeaseId = Lease;
             Session->Revision = int64(Rev);
             Session->LeaseDeadline = FPlatformTime::Seconds() + 50;
+            Session->AcknowledgedHash = ExpectedHash.ToLower();
+            Session->InventoryAcknowledged = InventoryVersion == 1;
+            Session->SummaryAcknowledged = bHasSummary;
+            P->BackendAcknowledgedProfileHash = Session->AcknowledgedHash;
             P->GetWorld()->GetTimerManager().SetTimer(
                 Session->HeartbeatTimer,
                 [Session]()
@@ -720,19 +859,61 @@ void AFablePlayerState::InitializeBackendProfile(const FString& Ticket)
                     Session->Renew();
                 },
                 15.0f, true);
-            Session->AcknowledgedHash = ExpectedHash.ToLower();
-            Session->InventoryAcknowledged = InventoryVersion == 1;
-            Session->SummaryAcknowledged = bHasSummary;
-            P->BackendAcknowledgedProfileHash = Session->AcknowledgedHash;
 
-            // 프로필 저장과 완료 응답 처리
-            if (!P->QueueBackendSnapshot(D))
+            if (bSeed)
+            {
+                // 再serializeせず、同じraw V9 payload・wallet・inventoryに初回summaryだけを添える。
+                const auto Summary = FableCharacterSummary::MakeSummary(Original);
+                if (!Summary.IsValid())
+                {
+                    Session->Failure(TEXT("이전 프로필 요약을 확인할 수 없습니다. 원본을 보존합니다."));
+                    return;
+                }
+                Session->V9SummarySeed = true;
+                Session->Queue(Payload, ExpectedHash.ToLower(), ExpectedWallet,
+                               (*InventoryField)->AsObject().ToSharedRef(), Summary.ToSharedRef(), false, TEXT(""), 0,
+                               FFableTownAnchorSaveWitness());
+                return;
+            }
+
+            // 同じ検証済candidateから全投影と最初のV10 commitを作る。UTCを作り直さない。
+            UFableSaveGame* Candidate = Original ? FableProfileSchema::MakeCandidate(Original) : Fresh;
+            if (!Candidate || !Candidate->IsValidProfile())
+            {
+                Session->Failure(TEXT("프로필 형식을 이전할 수 없습니다. 저장 원본을 보존합니다."));
+                return;
+            }
+            if (Original && Original->Version == FableProfileSchema::ItemIdentityVersion)
+            {
+                P->ProfileReadStatus.bHistoricalFieldsCompared = true;
+                P->ProfileReadStatus.bHistoricalFieldsByteExact =
+                    FableProfileSchema::PreservesOriginalNineBytes(Candidate, OriginalBytes);
+                if (!P->ProfileReadStatus.bHistoricalFieldsByteExact)
+                {
+                    Session->Failure(TEXT("이전 프로필의 전체 보존을 확인하지 못했습니다. 원본을 보존합니다."));
+                    return;
+                }
+            }
+            if (Original)
+            {
+                P->InitializeProfile(true, TEXT(""), EFableClass(int32(InitialClass)));
+            }
+            P->ProfileSlot = TEXT("backend:") + Id;
+            P->ApplyProfileSnapshot(Candidate);
+            P->ProfileReadStatus.CurrentVersion = Candidate->Version;
+            P->bBackendLoading = false;
+            P->bProfileLoaded = true;
+            P->bLastSaveSucceeded = false;
+            Receipts.Remove(Id);
+            if (!P->QueueBackendSnapshot(Candidate))
             {
                 Session->Failure(TEXT("중앙 프로필을 직렬화할 수 없습니다."));
             }
             else if (!Session->Pending)
             {
                 Session->LoginComplete = true;
+                P->ProfileReadStatus.FirstAcknowledgedHash = Session->AcknowledgedHash;
+                P->ProfileReadStatus.FirstAcknowledgedRevision = Session->Revision;
                 P->bBackendReady = true;
                 Session->Mirror();
                 if (auto M = P->GetWorld()->GetAuthGameMode<AFableGameMode>())
@@ -751,7 +932,8 @@ bool AFablePlayerState::QueueBackendSnapshot(UFableSaveGame* Data, bool bFinalSn
     {
         return true;
     }
-    if (!BackendSession.IsValid() || (BackendSession->Closing && !bFinalSnapshot) || !Data || !Data->IsValidProfile())
+    if (!BackendSession.IsValid() || (BackendSession->Closing && !bFinalSnapshot) || !Data ||
+        !FableProfileSchema::IsWritableCurrentVersion(Data->Version) || !Data->IsValidProfile())
     {
         return false;
     }
@@ -795,10 +977,62 @@ bool AFablePlayerState::QueueBackendSnapshot(UFableSaveGame* Data, bool bFinalSn
     {
         Mode->TrackExpeditionSaveSnapshot(PartyPlayerKey, GrantSequence, Hash);
     }
+    FFableTownAnchorSaveWitness Witness;
+    if (TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Queued ||
+        TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Sending)
+    {
+        const auto& Connection = GetTownConnectionSnapshot();
+        const auto Anchor = Data->GetLastSafeTownAnchor();
+        if (Anchor.TownId != TownAnchorSaveStatus.Anchor.TownId ||
+            Anchor.AnchorId != TownAnchorSaveStatus.Anchor.AnchorId ||
+            Anchor.CatalogVersion != TownAnchorSaveStatus.Anchor.CatalogVersion)
+        {
+            return false;
+        }
+        Witness.TravelTransactionId = TownAnchorSaveStatus.TravelTransactionId;
+        Witness.AnchorSequence = TownAnchorSaveStatus.AnchorSequence;
+        Witness.Anchor = Anchor;
+        Witness.SnapshotHash = Hash;
+        Witness.StablePlayerId = BackendPlayerId;
+        Witness.OwnerConnectionGeneration = Connection.OwnerConnectionGeneration;
+        Witness.ConnectionNonce = Connection.ConnectionNonce;
+        Witness.WorldEpoch = Connection.WorldEpoch;
+        RegisteredTownSnapshotHash = Hash;
+        if (!Witness.IsFor(BackendPlayerId, Hash))
+        {
+            return false;
+        }
+    }
     BackendSession->Queue(FBase64::Encode(Bytes), Hash, Wallet(Data), InventorySnapshot.ToSharedRef(),
-                          Summary.ToSharedRef(), bFinalSnapshot, PartyPlayerKey, GrantSequence);
+                          Summary.ToSharedRef(), bFinalSnapshot, PartyPlayerKey, GrantSequence, Witness);
 
     return !BackendSession->Failed;
+}
+
+/** 실제 ACK를 받은 초기 current bytes만 복원의 witness에 연결한다. */
+bool AFablePlayerState::QueueAcknowledgedTownRestoreSnapshot()
+{
+    if (!bAwaitingProfileRestore || !BackendSession.IsValid() || BackendSession->Pending || BackendSession->Failed ||
+        !BackendSession->InventoryAcknowledged || !BackendSession->SummaryAcknowledged ||
+        BackendSession->LatestHash != BackendSession->AcknowledgedHash)
+    {
+        return false;
+    }
+
+    TArray<uint8> Bytes, Serialized;
+    if (!FBase64::Decode(BackendSession->LatestPayload, Bytes) || HashBytes(Bytes) != BackendSession->AcknowledgedHash)
+    {
+        return false;
+    }
+    auto* Data = Cast<UFableSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
+    if (!Data || !FableProfileSchema::IsWritableCurrentVersion(Data->Version) || !Data->IsValidProfile() ||
+        !UGameplayStatics::SaveGameToMemory(Data, Serialized) || Serialized != Bytes ||
+        Data->LastSafeTownId != LastSafeTownAnchor.TownId || Data->LastSafeAnchorId != LastSafeTownAnchor.AnchorId ||
+        Data->TownCatalogVersion != LastSafeTownAnchor.CatalogVersion)
+    {
+        return false;
+    }
+    return QueueBackendSnapshot(Data);
 }
 
 /** 게임 서버가 보유한 프로필 접속 권한을 반환한다. */
@@ -826,6 +1060,16 @@ void AFablePlayerState::ReleaseBackendProfile()
     BackendSession->Closing = true;
 
     // 프로필 저장과 완료 응답 조건 검사
+    // seed接続はstarter/live PSを保存しない。同じin-flight bodyだけをdrainする。
+    if (BackendSession->V9SummarySeed || bAwaitingProfileRestore)
+    {
+        if (!BackendSession->Pending)
+        {
+            BackendSession->Release();
+        }
+        return;
+    }
+
     if (!QueueBackendSnapshot(MakeProfileSnapshot(), true))
     {
         BackendSession->Failure(TEXT("최종 저장 자료를 준비할 수 없습니다. 안전 퇴장이 완료되지 않았습니다."));
@@ -876,6 +1120,84 @@ bool FFableBackendSHA256Test::RunTest(const FString& Parameters)
     TestEqual(TEXT("Multi-block raw bytes"), HashBytes(Bytes),
               FString(TEXT("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")));
 
+    return true;
+}
+
+/** 独立memory worldの接続だけを設定しHTTPやユーザーデータを使わない。 */
+struct FFableBackendSessionTestAccess
+{
+    /** 테스트 소유 연결만 새로운 session에 결합한다. */
+    static TSharedPtr<FFableBackendSession> Bind(AFablePlayerState* P, APlayerController* PC, UWorld* World)
+    {
+        auto Session = MakeShared<FFableBackendSession>();
+        Session->Player = P;
+        Session->World = World;
+        Session->PlayerId = TEXT("native-session-owner");
+        P->BackendPlayerId = Session->PlayerId;
+        P->SetOwner(PC);
+        PC->SetPlayerState(P);
+        P->BackendSession = Session;
+        return Session;
+    }
+
+    /** 이전 callback이 새 소유자의 차단 상태를 변경했는지 읽는다. */
+    static bool StorageBlocked(const AFablePlayerState* P)
+    {
+        return P->bStorageBlocked;
+    }
+};
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableBackendReplacedSessionTest,
+                                 "Fablewood.Backend.ReplacedSessionCannotMirrorFailOrUnlockCurrentOwner",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 같은 PS 재사용까지 포함해 이전 session callback의 actor 적용을 거절한다. */
+bool FFableBackendReplacedSessionTest::RunTest(const FString& Parameters)
+{
+    const UWorld::InitializationValues Values = UWorld::InitializationValues()
+                                                    .RequiresHitProxies(false)
+                                                    .CreatePhysicsScene(false)
+                                                    .ShouldSimulatePhysics(false)
+                                                    .EnableTraceCollision(false)
+                                                    .CreateNavigation(false)
+                                                    .CreateAISystem(false)
+                                                    .AllowAudioPlayback(false);
+    UWorld* World =
+        UWorld::CreateWorld(EWorldType::Game, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Values);
+    if (!TestNotNull(TEXT("Independent memory world"), World))
+    {
+        return false;
+    }
+    auto* P = World->SpawnActor<AFablePlayerState>();
+    auto* PC = World->SpawnActor<APlayerController>();
+    if (!P || !PC)
+    {
+        AddError(TEXT("Memory owner spawn failed"));
+        World->DestroyWorld(false);
+        return false;
+    }
+    World->AddController(PC);
+    const auto Old = FFableBackendSessionTestAccess::Bind(P, PC, World);
+    TestTrue(TEXT("Original matching session may update owner"), Old->CurrentPlayer() == P);
+    Old->Revision = 7;
+    Old->Mirror();
+    TestEqual(TEXT("Positive mirror control"), P->GetBackendAcknowledgedRevision(), int64(7));
+
+    const auto Current = FFableBackendSessionTestAccess::Bind(P, PC, World);
+    Current->Revision = 9;
+    Current->Mirror();
+    TestTrue(TEXT("New matching session may update same PS"), Current->CurrentPlayer() == P);
+    TestTrue(TEXT("Replaced session has no current actor binding"), Old->CurrentPlayer() == nullptr);
+    Old->Revision = 100;
+    Old->Mirror();
+    Old->Failure(TEXT("native isolated old session failure"));
+    TestEqual(TEXT("Old callback cannot overwrite new revision"), P->GetBackendAcknowledgedRevision(), int64(9));
+    TestFalse(TEXT("Old failure cannot block or kick current owner"),
+              FFableBackendSessionTestAccess::StorageBlocked(P));
+    TestTrue(TEXT("Current session survives"), !Current->Failed && Current->CurrentPlayer() == P);
+
+    World->RemoveController(PC);
+    World->DestroyWorld(false);
     return true;
 }
 #endif

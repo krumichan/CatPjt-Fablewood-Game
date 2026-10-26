@@ -4,6 +4,7 @@
 #include "FableRPGTypes.h"
 #include "FableExpeditionResultTypes.h"
 #include "FableTownTravelTypes.h"
+#include "FableTownPersistenceTypes.h"
 #include "FablePlayerState.generated.h"
 
 class UFableSaveGame;
@@ -21,6 +22,7 @@ class FABLEWOOD_API AFablePlayerState : public APlayerState
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FFableTownTravelTestAccess;
     friend struct FFableTownStreamingTestAccess;
+    friend struct FFableBackendSessionTestAccess;
 #endif
 
 public:
@@ -34,6 +36,56 @@ public:
     {
         return bPendingTownTravel;
     }
+
+    /** 저장 ACK와 실제 소유자 도착까지 게임 입력을 보류한다. */
+    bool IsTownPersistenceBlocked() const
+    {
+        return bAwaitingProfileRestore || TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Queued ||
+               TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Sending ||
+               TownAnchorSaveStatus.State == EFableTownAnchorSaveState::Failed;
+    }
+
+    /** 저장된 마을을 사용할 수 없는 사유를 소유 화면에 전달한다. */
+    EFableTownTravelError GetProfileRestoreError() const
+    {
+        return ProfileRestoreError;
+    }
+
+    /** 로그인 화면은 실제 복원 완료까지 플레이 상태로 바꾸지 않는다. */
+    /** 인증 원본의 버전·해시와 첫 실제 ACK를 읽기 전용으로 관찰한다. */
+    const FFableProfileReadStatus& GetProfileReadStatus() const
+    {
+        return ProfileReadStatus;
+    }
+
+    /** 실제 적용한 프로필 형식을 관찰한다. */
+    int32 GetLoadedProfileVersion() const
+    {
+        return LoadedProfileVersion;
+    }
+
+    bool IsProfileRestorePending() const
+    {
+        return bAwaitingProfileRestore;
+    }
+
+    /** 현재 프로필에 보존할 논리 귀환지만 읽는다. */
+    const FFableTownAnchorRef& GetLastSafeTownAnchor() const
+    {
+        return LastSafeTownAnchor;
+    }
+
+    /** 같은 이동의 실제 저장 확인 상태를 소유자에게 보여 준다. */
+    const FFableTownAnchorSaveStatus& GetTownAnchorSaveStatus() const
+    {
+        return TownAnchorSaveStatus;
+    }
+
+    /** coordinator의 실제 성공 receipt만 영구 저장 후보로 등록한다. */
+    bool RecordCommittedTownAnchor(const FFableTownTravelCommitReceipt& Commit);
+
+    /** 현재 이동이 실제 저장 또는 검증된 같은 bytes로 확인됐는지 검사한다. */
+    bool IsTownAnchorDurable(FGuid TransactionId) const;
 
     /** 정상 진단에서 물약 재사용 절대 시각을 읽는다. */
     float GetPotionCooldownEndServerTime() const
@@ -458,6 +510,32 @@ private:
     FGuid PublicFieldScopeId;
 
     friend struct FFableBackendSession;
+
+    UPROPERTY(Replicated)
+    FFableTownAnchorRef LastSafeTownAnchor;
+
+    UPROPERTY(Replicated)
+    FFableTownAnchorSaveStatus TownAnchorSaveStatus;
+
+    /** callback은 같은 world·연결·순번의 증서만 갱신한다. */
+    void AcceptTownAnchorAcknowledgement(const FFableTownAnchorSaveWitness& Witness, int64 Revision, bool bExisting);
+
+    UPROPERTY(Replicated)
+    int32 LoadedProfileVersion = 0;
+
+    UPROPERTY(Replicated)
+    FFableProfileReadStatus ProfileReadStatus;
+
+    int64 AnchorSaveSequence = 0;
+    FString RegisteredTownSnapshotHash;
+
+    friend class UFableTownTravelCoordinator;
+
+    UPROPERTY(Replicated)
+    bool bAwaitingProfileRestore = false;
+
+    UPROPERTY(Replicated)
+    EFableTownTravelError ProfileRestoreError = EFableTownTravelError::None;
     friend class AFableGameMode;
     int64 ExpeditionSnapshotGrantSequence = 0;
 
@@ -491,6 +569,9 @@ private:
 
     /** 현재 프로필을 백엔드 저장 대기열에 넣는다. */
     bool QueueBackendSnapshot(UFableSaveGame* Data, bool bFinalSnapshot = false);
+
+    /** 초기 복원은 이미 확인된 같은 프로필 bytes를 재사용해 UTC를 다시 만들지 않는다. */
+    bool QueueAcknowledgedTownRestoreSnapshot();
 
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FFableWorkshopTestAccess;

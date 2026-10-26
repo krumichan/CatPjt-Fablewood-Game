@@ -158,7 +158,7 @@ bool UFableTownStreamingSubsystem::ValidateOwner(const FFableTownGeometryLeaseOw
         !Profile->bProfileLoaded || Owner.OwnerConnectionGeneration <= 0 ||
         Owner.OwnerConnectionGeneration > MaximumExactRevision ||
         Owner.Purpose < EFableTownGeometryLeasePurpose::Presence ||
-        Owner.Purpose > EFableTownGeometryLeasePurpose::ServerResident)
+        Owner.Purpose > EFableTownGeometryLeasePurpose::ClientSourceRetention)
     {
         return false;
     }
@@ -181,7 +181,9 @@ bool UFableTownStreamingSubsystem::ValidateOwner(const FFableTownGeometryLeaseOw
     }
 
     if ((Owner.Purpose == EFableTownGeometryLeasePurpose::TargetPending ||
-         Owner.Purpose == EFableTownGeometryLeasePurpose::SourceRetention) &&
+         Owner.Purpose == EFableTownGeometryLeasePurpose::SourceRetention ||
+         Owner.Purpose == EFableTownGeometryLeasePurpose::ClientTargetPending ||
+         Owner.Purpose == EFableTownGeometryLeasePurpose::ClientSourceRetention) &&
         !Owner.TransactionId.IsValid())
     {
         return false;

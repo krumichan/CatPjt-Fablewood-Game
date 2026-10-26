@@ -233,6 +233,11 @@ private:
     TArray<FString> Screenshots;
     TArray<FString> ServerObservedPlayerIds;
     TSharedPtr<FJsonObject> Checkpoint;
+    TSharedPtr<FJsonObject> TownDurabilityCheckpoint;
+
+    /** 실제 플레이 월드의 저장 상태를 퇴장 전 읽기 전용으로 고정한다. */
+    TSharedRef<FJsonObject> ObserveTownPersistence(const AFablePlayerState* P) const;
+
     TSharedPtr<FJsonObject> Expected;
     FTSTicker::FDelegateHandle Ticker;
 };

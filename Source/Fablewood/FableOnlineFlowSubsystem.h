@@ -89,6 +89,27 @@ public:
     /** 접속 실패 이벤트를 처리한다. */
     void HandleConnectionFailure(bool bTravelFailure);
 
+    /** 한 인증 세션에서 한 번만 이전 프로필의 새 claim을 자동 요청한다. */
+    void HandleProfileReclaim(int64 SeedRevision, const FString& OriginalHash);
+
+    /** 실제 seed ACK 알림은 UI/검증 관찰값이며 게임 상태의 입력이 아니다. */
+    bool WasProfileReclaimUsed() const
+    {
+        return bProfileReclaimUsed;
+    }
+
+    /** 서버가 실제 확인한 seed revision을 읽는다. */
+    int64 GetProfileSeedRevision() const
+    {
+        return ProfileSeedRevision;
+    }
+
+    /** seed 원본 hash는 관찰용이며 저장 입력으로 사용하지 않는다. */
+    const FString& GetProfileSeedHash() const
+    {
+        return ProfileSeedHash;
+    }
+
     /** 월드 로드가 끝나면 진행 중인 전환과 프로필 문맥을 갱신한다. */
     void OnWorldLoaded(UWorld* World);
 
@@ -192,6 +213,11 @@ public:
     }
 
 private:
+    bool bProfileReclaimUsed = false;
+    bool bProfileReclaimPending = false;
+    int64 ProfileSeedRevision = 0;
+    FString ProfileSeedHash;
+
     using FReply = TFunction<void(int32, const TSharedPtr<FJsonObject>&)>;
 
     /** 현재 온라인 접속·게임 진입·저장·이탈 검증 단계를 진행한다. */

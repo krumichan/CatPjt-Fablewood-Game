@@ -6,6 +6,7 @@
 #include "FablePlayerController.h"
 #include "FableCharacter.h"
 #include "FablePartyManager.h"
+#include "FableProfileSchema.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
@@ -330,7 +331,8 @@ FFableTownTravelResponse UFableTownTravelCoordinator::MakeResponse(const FTransa
         Response.Generation = Transaction->Prepared.Generation;
         Response.State = Transaction->State;
         Response.Commit = Transaction->Commit;
-        Response.bOwnArrivalConfirmed = Transaction->bOwnArrivalConfirmed;
+        Response.bOwnArrivalConfirmed = Transaction->bOwnArrivalConfirmed && Transaction->Profile.IsValid() &&
+                                        Transaction->Profile->IsTownAnchorDurable(Transaction->Prepared.TransactionId);
     }
     return Response;
 }
@@ -359,6 +361,14 @@ void UFableTownTravelCoordinator::Emit(FTransaction& Transaction, EFableTownTrav
 /** 新規要求だけを0.8秒で制限しACK/Cancelの順番を妨げない。 */
 void UFableTownTravelCoordinator::BeginAnchorTravel(APlayerController* Requester, FGuid RequestId,
                                                     const FFableTownAnchorRef& Target, int64 ExpectedPresenceRevision)
+{
+    BeginAnchorTravelInternal(Requester, RequestId, Target, ExpectedPresenceRevision, false);
+}
+
+/** 서버 복원과 일반 요청은 같은 물리·lease·owner 확인을 공유한다. */
+void UFableTownTravelCoordinator::BeginAnchorTravelInternal(APlayerController* Requester, FGuid RequestId,
+                                                            const FFableTownAnchorRef& Target,
+                                                            int64 ExpectedPresenceRevision, bool bProfileRestore)
 {
     if (bStopping)
     {
@@ -413,7 +423,9 @@ void UFableTownTravelCoordinator::BeginAnchorTravel(APlayerController* Requester
     {
         if (Pair.Value->Player.Get() == Requester &&
             (Pair.Value->bRollbackRecoveryRequired ||
-             (Pair.Value->State == EFableTownTravelState::Committed && !Pair.Value->bOwnArrivalConfirmed &&
+             (Pair.Value->State == EFableTownTravelState::Committed &&
+              (!Pair.Value->bOwnArrivalConfirmed || !Pair.Value->Profile.IsValid() ||
+               !Pair.Value->Profile->IsTownAnchorDurable(Pair.Value->Prepared.TransactionId)) &&
               Pair.Value->SourceLease.IsValid())))
         {
             bRetainedArrival = true;
@@ -457,9 +469,15 @@ void UFableTownTravelCoordinator::BeginAnchorTravel(APlayerController* Requester
         return;
     }
     FFableTownGeometryDescriptor Descriptor;
-    if (!ValidateDeparture(Requester, Snapshot, Error) || !DescribeGeometry(Target, Descriptor, Error))
+    if ((!bProfileRestore && !ValidateDeparture(Requester, Snapshot, Error)) ||
+        !DescribeGeometry(Target, Descriptor, Error))
     {
         Reject(Error);
+        return;
+    }
+    if (!FableProfileSchema::IsSafeAnchor(Target))
+    {
+        Reject(EFableTownTravelError::UnknownAnchor);
         return;
     }
     int64& Generation = NextGeneration.FindOrAdd(Requester);
@@ -475,6 +493,7 @@ void UFableTownTravelCoordinator::BeginAnchorTravel(APlayerController* Requester
         return;
     }
     FTransaction Transaction;
+    Transaction.bProfileRestore = bProfileRestore;
     Transaction.Player = Requester;
     Transaction.Profile = Profile;
     auto& Prepared = Transaction.Prepared;
@@ -760,7 +779,7 @@ void UFableTownTravelCoordinator::CommitTransaction(FGuid TransactionId)
         Finish(*Transaction, EFableTownTravelState::Cancelled, EFableTownTravelError::PrivateAdmissionReserved);
         return;
     }
-    if (Profile->IsBackendSavePending() || !ValidateDeparture(Player, Before, Error))
+    if (Profile->IsBackendSavePending() || (!Transaction->bProfileRestore && !ValidateDeparture(Player, Before, Error)))
     {
         Finish(*Transaction, EFableTownTravelState::Cancelled,
                Profile->IsBackendSavePending() ? EFableTownTravelError::BackendSavePending : Error);
@@ -836,7 +855,7 @@ void UFableTownTravelCoordinator::CommitTransaction(FGuid TransactionId)
         Finish(*Transaction, EFableTownTravelState::Cancelled, EFableTownTravelError::PrivateAdmissionReserved);
         return;
     }
-    if (Profile->IsBackendSavePending() || !ValidateDeparture(Player, Before, Error))
+    if (Profile->IsBackendSavePending() || (!Transaction->bProfileRestore && !ValidateDeparture(Player, Before, Error)))
     {
         Finish(*Transaction, EFableTownTravelState::Cancelled,
                Profile->IsBackendSavePending() ? EFableTownTravelError::BackendSavePending : Error);
@@ -980,7 +999,9 @@ void UFableTownTravelCoordinator::ReleaseTargetAndSource(FTransaction& Transacti
     }
     Transaction.TargetLease = FFableTownGeometryLease();
     if (!Transaction.bRollbackRecoveryRequired &&
-        (Transaction.State != EFableTownTravelState::Committed || Transaction.bOwnArrivalConfirmed))
+        (Transaction.State != EFableTownTravelState::Committed ||
+         (Transaction.bOwnArrivalConfirmed && Transaction.Profile.IsValid() &&
+          Transaction.Profile->IsTownAnchorDurable(Transaction.Prepared.TransactionId))))
     {
         ReleaseSourceRetention(Transaction);
     }
@@ -1007,6 +1028,10 @@ void UFableTownTravelCoordinator::Finish(FTransaction& Transaction, EFableTownTr
         Manager()->IsCurrentConnection(Transaction.Player.Get(), Transaction.Prepared.OwnerConnectionGeneration,
                                        Transaction.Prepared.ConnectionNonce))
     {
+        if (State == EFableTownTravelState::Committed)
+        {
+            Profile->RecordCommittedTownAnchor(Transaction.Commit);
+        }
         Profile->bPendingTownTravel = false;
         Profile->ForceNetUpdate();
     }
@@ -1240,7 +1265,9 @@ bool UFableTownTravelCoordinator::TryReservePrivateAdmission(const TArray<APlaye
         {
             if (Pair.Value->Player.Get() == Player &&
                 (Pair.Value->bRollbackRecoveryRequired ||
-                 (Pair.Value->State == EFableTownTravelState::Committed && !Pair.Value->bOwnArrivalConfirmed &&
+                 (Pair.Value->State == EFableTownTravelState::Committed &&
+                  (!Pair.Value->bOwnArrivalConfirmed || !Pair.Value->Profile.IsValid() ||
+                   !Pair.Value->Profile->IsTownAnchorDurable(Pair.Value->Prepared.TransactionId)) &&
                   Pair.Value->SourceLease.IsValid())))
             {
                 return false;
@@ -1383,7 +1410,23 @@ void UFableTownTravelCoordinator::ConfirmOwnArrival(APlayerController* Requester
         else
         {
             Transaction->bOwnArrivalConfirmed = true;
+        }
+    }
+    if (Error == EFableTownTravelError::None && Transaction && Transaction->bOwnArrivalConfirmed)
+    {
+        AFablePlayerState* Profile = Transaction->Profile.Get();
+        if (!Profile || !Profile->IsTownAnchorDurable(TransactionId))
+        {
+            Error = EFableTownTravelError::BackendSavePending;
+        }
+        else
+        {
             ReleaseSourceRetention(*Transaction);
+            if (Transaction->bProfileRestore)
+            {
+                Profile->bAwaitingProfileRestore = false;
+                Profile->ForceNetUpdate();
+            }
         }
     }
     auto Response = MakeResponse(Transaction, FGuid(), AttemptId, EFableTownTravelOperation::ConfirmArrival, Error);
@@ -1448,4 +1491,55 @@ void UFableTownTravelCoordinator::CancelForConnection(const APlayerController* E
             }
         }
     }
+}
+
+/** 저장 참조의 실제 유한 slot·바닥·capsule을 확인한 뒤 소유자 지형 준비를 시작한다. */
+bool UFableTownTravelCoordinator::BeginProfileRestore(APlayerController* Requester)
+{
+    AFablePlayerState* Profile = Requester ? Requester->GetPlayerState<AFablePlayerState>() : nullptr;
+    AFableCharacter* Hero = Requester ? Requester->GetPawn<AFableCharacter>() : nullptr;
+    auto* Towns = Manager();
+    if (!Towns || !Towns->HasAuthority() || !Profile || !Hero || !Profile->bAwaitingProfileRestore ||
+        !Profile->bLastSaveSucceeded || Profile->IsBackendSavePending() ||
+        (Profile->IsBackendEnabled() && !Profile->IsBackendReady()) || Profile->ActiveExpeditionId.IsValid() ||
+        IsPrivateAdmissionReserved(Requester) || !FableProfileSchema::IsSafeAnchor(Profile->GetLastSafeTownAnchor()))
+    {
+        return false;
+    }
+
+    const auto Anchor = Profile->GetLastSafeTownAnchor();
+    FFableTownGeometryDescriptor Descriptor;
+    EFableTownTravelError Error;
+    if (!DescribeGeometry(Anchor, Descriptor, Error))
+    {
+        Profile->SetNotice(TEXT("저장된 마을의 지형이 준비되지 않았습니다. 기존 귀환지를 보존합니다."));
+        return false;
+    }
+
+    bool bHolding = false;
+    for (int32 Slot = 0; Slot < 2; ++Slot)
+    {
+        FTransform Candidate;
+        FFableTownPlacementEvidence Evidence;
+        if (Towns->GetCatalog()->ResolveAnchor(Anchor, Slot, Candidate, true) &&
+            Hero->TryPlaceAtGroundedTownAnchor(Anchor, Candidate, Evidence))
+        {
+            bHolding = true;
+            break;
+        }
+    }
+    // 初回loginの接続はpawn生成前に発行済み。実holding位置を公開してから同じpresence revisionを読む。
+    if (!bHolding || !Towns->RefreshPhysicalPresence(Requester))
+    {
+        return false;
+    }
+    Hero->GetCharacterMovement()->DisableMovement();
+    FFableTownConnectionSnapshot Snapshot;
+    if (!Towns->GetConnectionSnapshot(Profile, Snapshot))
+    {
+        return false;
+    }
+    BeginAnchorTravelInternal(Requester, FGuid::NewGuid(), Anchor, Snapshot.PresenceRevision, true);
+    FFableTownTravelPrepared Prepared;
+    return GetPendingFor(Requester, Prepared);
 }

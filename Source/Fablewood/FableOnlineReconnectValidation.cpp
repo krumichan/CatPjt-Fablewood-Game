@@ -500,6 +500,7 @@ bool UFableOnlineValidationDriver::TickReconnect(AFablePlayerController* PC, AFa
     if (Role == TEXT("client2") && !bResumeExpedition)
     {
         Checkpoint = Profile(P);
+        TownDurabilityCheckpoint = ObserveTownPersistence(P);
         Capture(TEXT("midrun-before-disconnect"));
         Step = 30;
         StepAt = Now;

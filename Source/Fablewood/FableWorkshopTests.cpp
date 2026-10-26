@@ -214,7 +214,7 @@ bool FFableWorkshopMigrationTest::RunTest(const FString& Parameters)
         }
 
         // 아이템·장비 옵션·인벤토리와 창고 처리
-        TestEqual(TEXT("Migration reaches v9"), Profile->Version, 9);
+        TestEqual(TEXT("Migration reaches current schema"), Profile->Version, FableProfileSchema::CurrentVersion);
         TestEqual(TEXT("Migration retains original gold"), Profile->Gold, 137);
         TestEqual(TEXT("Migration retains original ore"), Profile->Ore, 9);
         TestEqual(TEXT("Migration adds no equipment"), Profile->Inventory.Num(), Before.Num());
@@ -272,7 +272,7 @@ bool FFableWorkshopMigrationTest::RunTest(const FString& Parameters)
     Reject(TEXT("Unsupported schema 10 is not normalized"),
            [](UFableSaveGame* P)
            {
-               P->Version = 10;
+               P->Version = FableProfileSchema::CurrentVersion + 1;
            });
     Reject(TEXT("Inventory IDs must be unique"),
            [](UFableSaveGame* P)
@@ -504,7 +504,8 @@ bool FFableWorkshopLegendSaveTest::RunTest(const FString& Parameters)
 
     // 기대값과 상태 보존 검증 처리
     TestTrue(TEXT("Restored v6 profile validates without changing its data"), Restored->MigrateAndValidate());
-    TestEqual(TEXT("Supported v6 memory serialization migrates to v9"), Restored->Version, 9);
+    TestEqual(TEXT("Supported v6 memory serialization migrates to current schema"), Restored->Version,
+              FableProfileSchema::CurrentVersion);
 
     // 아이템·장비 옵션·인벤토리와 창고 조건 검사
     if (!TestEqual(TEXT("Inventory length survives"), Restored->Inventory.Num(), Profile->Inventory.Num()) ||

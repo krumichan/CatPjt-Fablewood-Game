@@ -25,7 +25,7 @@ namespace
 TSharedPtr<FJsonObject> FableCharacterSummary::MakeSummary(const UFableSaveGame* Profile)
 {
     // 직업·스킬·특성 빌드 조건 검사
-    if (!Profile || Profile->Version != 9 || !Profile->IsValidProfile() ||
+    if (!Profile || !FableProfileSchema::CanProjectOriginalMirror(Profile->Version) || !Profile->IsValidProfile() ||
         !Profile->ClassProgress.IsValidIndex(int32(Profile->HeroClass)))
     {
         return nullptr;

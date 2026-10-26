@@ -706,6 +706,10 @@ public:
     /** 마을 서비스 인접 여부를 확인한다. */
     bool IsNearTownService() const;
 
+#if WITH_DEV_AUTOMATION_TESTS
+    friend struct FFableTownTravelTestAccess;
+#endif
+
 protected:
     /** 월드 진입 후 필요한 초기 상태와 이벤트를 준비한다. */
     virtual void BeginPlay() override;
@@ -749,6 +753,7 @@ protected:
     bool bTownArrivalConfirmationSent = false;
     bool bTownMoveInputHeld = false;
     bool bTownArrivalFailed = false;
+    bool bTownPhysicalArrivalObserved = false;
     double TownArrivalDeadline = 0;
     int32 TownArrivalSamples = 0;
     double TownArrivalFirstSampleTime = 0;
@@ -774,6 +779,13 @@ private:
     /** 서버가 전달한 온라인 안전 이탈 결과 결과를 소유 클라이언트에 반영한다. */
     UFUNCTION(Client, Reliable)
     void ClientOnlineLeaveResult(FGuid RequestId, bool bSuccess, const FString& Reason);
+
+public:
+    /** V9 원본 요약의 실제 저장·lease 반환 후 새 ticket 접속을 요청한다. */
+    UFUNCTION(Client, Reliable)
+    void ClientRequireProfileReclaim(int64 SeedRevision, const FString& OriginalHash);
+
+private:
     bool bFrontEndOpen = false;
     bool bInventoryOpen = false;
     bool bWorkshopOpen = false;

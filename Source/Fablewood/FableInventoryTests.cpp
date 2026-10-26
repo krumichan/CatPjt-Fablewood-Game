@@ -176,7 +176,7 @@ bool FFableInventoryMigrationTest::RunTest(const FString& Parameters)
         }
 
         // 아이템·장비 옵션·인벤토리와 창고 처리
-        TestEqual(TEXT("Migration reaches current schema"), P->Version, 9);
+        TestEqual(TEXT("Migration reaches current schema"), P->Version, FableProfileSchema::CurrentVersion);
         TestTrue(TEXT("Existing identity is never reassigned"), P->Inventory[0].InstanceId == Existing);
         TestEqual(TEXT("No equipment is added"), P->Inventory.Num(), Before.Num());
 
@@ -233,9 +233,9 @@ bool FFableInventoryMigrationTest::RunTest(const FString& Parameters)
     Legacy->Inventory[0].Id = 0;
     TestFalse(TEXT("Legacy integer IDs are not repaired or renumbered"), Legacy->MigrateAndValidate());
 
-    auto Future = InventoryFixture(10);
-    TestFalse(TEXT("Unsupported schema ten is rejected"), Future->MigrateAndValidate());
-    TestEqual(TEXT("Unsupported schema is unchanged"), Future->Version, 10);
+    auto Future = InventoryFixture(FableProfileSchema::CurrentVersion + 1);
+    TestFalse(TEXT("Unsupported future schema eleven is rejected"), Future->MigrateAndValidate());
+    TestEqual(TEXT("Unsupported schema is unchanged"), Future->Version, FableProfileSchema::CurrentVersion + 1);
 
     return true;
 }
@@ -282,7 +282,8 @@ bool FFableInventorySaveTest::RunTest(const FString& Parameters)
 
     // 아이템·장비 옵션·인벤토리와 창고 처리
     TestTrue(TEXT("Stored schema validates and UUIDs are byte-for-byte stable"),
-             Restored->Version == 9 && Restored->MigrateAndValidate() && Identities(Restored) == Ids);
+             Restored->Version == FableProfileSchema::CurrentVersion && Restored->MigrateAndValidate() &&
+                 Identities(Restored) == Ids);
     TestTrue(TEXT("Typed all-field snapshot, array order and equipment references survive"),
              FableInventorySnapshot::Matches(Restored, Before));
     TestTrue(TEXT("Wallet and materials survive"), Restored->Gold == 137 && Restored->Ore == 9 &&

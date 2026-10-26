@@ -3,6 +3,8 @@
 #include "FableGameState.h"
 #include "FablePartyManager.h"
 #include "FablePlayerState.h"
+#include "FablePlayerController.h"
+#include "FableTownStreamingSubsystem.h"
 #include "FableProjectile.h"
 #include "FableTownManager.h"
 #include "FableTownTravelCoordinator.h"
@@ -12,6 +14,7 @@
 #include "Components/CapsuleComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/EngineBaseTypes.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/AutomationTest.h"
@@ -20,6 +23,91 @@
 /** 저장·네트워크 없는 메모리 fixture에서만 내부 경계를 관찰한다. */
 struct FFableTownTravelTestAccess
 {
+    /** 실제 클라이언트 지형 획득과 서버 ACK 경로를 메모리 월드에서 시작한다. */
+    static void StartLocalGeometry(AFablePlayerController* PC)
+    {
+        PC->bTownAutoAckEligible = true;
+        PC->TryAutoAcknowledgeTownGeometry();
+    }
+
+    /** 실제 controller poll을 호출한다. 저장소나 네트워크 시간을 대체하지 않는다. */
+    static void PollArrival(AFablePlayerController* PC)
+    {
+        PC->TickTownTravel();
+    }
+
+    /** 로컬 lease와 잠금의 실제 상태만 관찰한다. */
+    static bool IsWaitingWithSource(const AFablePlayerController* PC)
+    {
+        const auto* Streaming = PC->GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>();
+        return Streaming && Streaming->IsGeometryReadyVisible(PC->TownSourceLease) &&
+               Streaming->IsGeometryReadyVisible(PC->TownTargetLease) && PC->bTownTravelUiLocked &&
+               PC->bTownMoveInputHeld && PC->IsMoveInputIgnored();
+    }
+
+    /** 실제 확인 응답 뒤 모든 임시 lease와 입력 잠금이 반환됐는지 관찰한다. */
+    static bool IsFullyReleased(const AFablePlayerController* PC)
+    {
+        const auto* Streaming = PC->GetWorld()->GetSubsystem<UFableTownStreamingSubsystem>();
+        return Streaming && !PC->TownSourceLease.IsValid() && !PC->TownTargetLease.IsValid() &&
+               Streaming->IsGeometryReadyVisible(PC->TownPresenceLease) &&
+               !PC->TownAwaitingArrival.TransactionId.IsValid() && !PC->bTownTravelUiLocked &&
+               !PC->bTownMoveInputHeld && !PC->IsMoveInputIgnored();
+    }
+
+    /** 실제 도착 실패 플래그를 관찰한다. */
+    static bool ArrivalFailed(const AFablePlayerController* PC)
+    {
+        return PC->bTownArrivalFailed;
+    }
+
+    /** 원래 물리 deadline 안에 실제 세 표본을 확인했는지 관찰한다. */
+    static bool PhysicalArrivalObserved(const AFablePlayerController* PC)
+    {
+        return PC->bTownPhysicalArrivalObserved;
+    }
+
+    /** 실제 commit에 대응하는 ACK callback 입력만 합성한다. DB 성공 증거는 아니다. */
+    static FFableTownAnchorSaveWitness DelayCommittedSave(AFablePlayerState* P)
+    {
+        FFableTownAnchorSaveWitness W;
+        W.TravelTransactionId = P->TownAnchorSaveStatus.TravelTransactionId;
+        W.AnchorSequence = P->TownAnchorSaveStatus.AnchorSequence;
+        W.Anchor = P->TownAnchorSaveStatus.Anchor;
+        W.StablePlayerId = TEXT("native-delayed-save");
+        W.SnapshotHash = FString::ChrN(64, 'b');
+        W.SentExpectedRevision = 7;
+        const auto& C = P->GetTownConnectionSnapshot();
+        W.OwnerConnectionGeneration = C.OwnerConnectionGeneration;
+        W.ConnectionNonce = C.ConnectionNonce;
+        W.WorldEpoch = C.WorldEpoch;
+        P->BackendPlayerId = W.StablePlayerId;
+        P->RegisteredTownSnapshotHash = W.SnapshotHash;
+        P->TownAnchorSaveStatus.State = EFableTownAnchorSaveState::Sending;
+        return W;
+    }
+
+    /** 새 login 순서만 재현하며 backend ACK나 파일 저장을 주장하지 않는 memory profile이다. */
+    static void ReadyMemoryRestore(AFablePlayerState* P)
+    {
+        P->LastSafeTownAnchor.TownId = EFableTownId::LegacyVillage;
+        P->LastSafeTownAnchor.AnchorId = TEXT("Entry");
+        P->LastSafeTownAnchor.CatalogVersion = 1;
+        P->LoadedProfileVersion = 10;
+        P->bLastSaveSucceeded = true;
+        P->bAwaitingProfileRestore = true;
+        P->ProfileRestoreError = EFableTownTravelError::None;
+    }
+
+    /** 실제 파일 변경 없이 알려진 미준비 V10 참조를 메모리 profile에 설정한다. */
+    static void SetKnownUnreadyAnchor(AFablePlayerState* P)
+    {
+        P->LastSafeTownAnchor.TownId = EFableTownId::Sunbrook;
+        P->LastSafeTownAnchor.AnchorId = TEXT("Entry");
+        P->LastSafeTownAnchor.CatalogVersion = 1;
+        P->LoadedProfileVersion = 10;
+    }
+
     /** 실제 사용자 파일이나 HTTP 요청을 만들지 않는다. */
     static void MemoryProfile(AFablePlayerState* Profile)
     {
@@ -27,6 +115,41 @@ struct FFableTownTravelTestAccess
         Profile->ProfileSlot.Empty();
         Profile->bStorageBlocked = false;
         Profile->bProfileLoaded = true;
+    }
+
+    /** HTTP 없이 현재 연결의 등록된 정확 snapshot witness를 설정한다. */
+    static FFableTownAnchorSaveWitness BindWitness(AFablePlayerState* P)
+    {
+        FFableTownAnchorSaveWitness W;
+        W.TravelTransactionId = FGuid::NewGuid();
+        W.AnchorSequence = 3;
+        W.Anchor = P->GetTownConnectionSnapshot().SafeAnchor;
+        if (!W.Anchor.IsValid())
+        {
+            W.Anchor.TownId = EFableTownId::LegacyVillage;
+            W.Anchor.AnchorId = TEXT("Entry");
+            W.Anchor.CatalogVersion = 1;
+        }
+        W.StablePlayerId = TEXT("native-authority-player");
+        W.SnapshotHash = FString::ChrN(64, 'a');
+        W.SentExpectedRevision = 7;
+        const auto& C = P->GetTownConnectionSnapshot();
+        W.OwnerConnectionGeneration = C.OwnerConnectionGeneration;
+        W.ConnectionNonce = C.ConnectionNonce;
+        W.WorldEpoch = C.WorldEpoch;
+        P->BackendPlayerId = W.StablePlayerId;
+        P->RegisteredTownSnapshotHash = W.SnapshotHash;
+        P->TownAnchorSaveStatus.TravelTransactionId = W.TravelTransactionId;
+        P->TownAnchorSaveStatus.AnchorSequence = W.AnchorSequence;
+        P->TownAnchorSaveStatus.Anchor = W.Anchor;
+        P->TownAnchorSaveStatus.State = EFableTownAnchorSaveState::Sending;
+        return W;
+    }
+
+    /** 실제 callback guard를 호출하며 DB ACK 자체를 주장하지 않는다. */
+    static void Ack(AFablePlayerState* P, const FFableTownAnchorSaveWitness& W, int64 Revision, bool bExisting = false)
+    {
+        P->AcceptTownAnchorAcknowledgement(W, Revision, bExisting);
     }
 
     /** 독립 월드에서도 기존 루트 상태 하나만 연결한다. */
@@ -97,7 +220,7 @@ namespace
         TArray<TWeakObjectPtr<APlayerController>> Controllers;
 
         /** 설치 엔진의 실제 physics scene과 기존 서버 정본만 구성한다. */
-        FTravelWorld()
+        explicit FTravelWorld(bool bInitializeForRpc = false)
         {
             if (!GEngine)
             {
@@ -131,6 +254,21 @@ namespace
                 Towns = AFableTownManager::Ensure(World);
                 Travel = Towns ? Towns->GetTravelCoordinator() : nullptr;
                 Ground = AddBox(FVector(0, 0, -10), FVector(10000, 10000, 10), true);
+                if (bInitializeForRpc)
+                {
+                    // 실제 RPC의 ProcessEvent는 초기화된 actor 월드에서만 실행된다. BeginPlay나 저장은 호출하지 않는다.
+                    World->InitializeActorsForPlay(FURL());
+                    // GameMode의 정상 PreInitializeComponents가 생성한 실제 root state를 사용한다.
+                    if (auto* InitializedState = World->GetGameState<AFableGameState>())
+                    {
+                        AFableGameState* UninitializedState = State;
+                        State = InitializedState;
+                        if (UninitializedState != State)
+                        {
+                            UninitializedState->Destroy();
+                        }
+                    }
+                }
             }
         }
 
@@ -178,7 +316,8 @@ namespace
         }
 
         /** 파티 명부·실제 소유 관계를 거쳐 서버 연결 세대를 발급한다. */
-        FTravelPlayer AddPlayer(int32 Id, FVector Position = FableRPG::PortalLocation())
+        FTravelPlayer AddPlayer(int32 Id, FVector Position = FableRPG::PortalLocation(),
+                                bool bLocalFableController = false)
         {
             FTravelPlayer Player;
             if (!World || !Towns || !Travel || !Parties)
@@ -186,7 +325,23 @@ namespace
                 return Player;
             }
 
-            Player.Controller = World->SpawnActor<APlayerController>();
+            Player.Controller = bLocalFableController ? World->SpawnActor<AFablePlayerController>()
+                                                      : World->SpawnActor<APlayerController>();
+            if (bLocalFableController && Player.Controller)
+            {
+                // standalone 메모리 fixture의 로컬 PC를 엔진의 공개 API로 지정한다.
+                Player.Controller->SetAsLocalPlayerController();
+            }
+            if (bLocalFableController && Player.Controller)
+            {
+                // 정상 controller 초기화가 만든 임시 PS는 제거하고 아래 메모리 profile 하나만 소유한다.
+                if (auto* AutomaticProfile = Player.Controller->GetPlayerState<APlayerState>())
+                {
+                    Player.Controller->SetPlayerState(nullptr);
+                    AutomaticProfile->Destroy();
+                }
+            }
+
             Player.Profile = World->SpawnActor<AFablePlayerState>();
             FActorSpawnParameters Parameters;
             Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -904,4 +1059,302 @@ bool FFableTownTravelIntendedSupportTest::RunTest(const FString& Parameters)
     }
     return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableTownAnchorWitnessTest,
+                                 "Fablewood.Native.TownTravel.SentAnchorAckCannotCompleteLatestOrReplacement",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 실제 PS callback이 다른 hash/revision/seq/연결의 ACK를 거절하는 메모리 검증. */
+bool FFableTownAnchorWitnessTest::RunTest(const FString& Parameters)
+{
+    FTravelWorld Fixture;
+    if (!TestNotNull(TEXT("Actual memory world"), Fixture.World))
+    {
+        return false;
+    }
+    const auto Owner = Fixture.AddPlayer(1301, FVector(0, -1080, 110));
+    if (!TestNotNull(TEXT("Owned profile"), Owner.Profile))
+    {
+        return false;
+    }
+    Fixture.Towns->RegisterOrRefreshConnection(Owner.Controller);
+    const auto Good = FFableTownTravelTestAccess::BindWitness(Owner.Profile);
+    TestTrue(TEXT("Registered complete witness"), Good.IsFor(Good.StablePlayerId, Good.SnapshotHash));
+    const TArray<TFunction<void(FFableTownAnchorSaveWitness&)>> Mutations = {
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            ++W.AnchorSequence;
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.TravelTransactionId = FGuid::NewGuid();
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.SnapshotHash = FString::ChrN(64, 'b');
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            ++W.OwnerConnectionGeneration;
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.ConnectionNonce = FGuid::NewGuid();
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.WorldEpoch = FGuid::NewGuid();
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.StablePlayerId = TEXT("foreign");
+        },
+        [](FFableTownAnchorSaveWitness& W)
+        {
+            W.Anchor.AnchorId = TEXT("Portal.Expedition");
+        }};
+    for (const auto& Mutate : Mutations)
+    {
+        auto Wrong = Good;
+        Mutate(Wrong);
+        FFableTownTravelTestAccess::Ack(Owner.Profile, Wrong, 8);
+        TestFalse(TEXT("Wrong sent witness cannot unlock current"),
+                  Owner.Profile->IsTownAnchorDurable(Good.TravelTransactionId));
+    }
+    FFableTownTravelTestAccess::Ack(Owner.Profile, Good, 9);
+    TestFalse(TEXT("Wrong revision cannot unlock"), Owner.Profile->IsTownAnchorDurable(Good.TravelTransactionId));
+    FFableTownTravelTestAccess::Ack(Owner.Profile, Good, 8);
+    TestTrue(TEXT("Exact sent witness completes its own sequence"),
+             Owner.Profile->IsTownAnchorDurable(Good.TravelTransactionId));
+    TestEqual(TEXT("Actual callback revision recorded"), Owner.Profile->GetTownAnchorSaveStatus().AcknowledgedRevision,
+              int64(8));
+
+    FFableTownTravelTestAccess::BindWitness(Owner.Profile);
+    FFableTownTravelTestAccess::Ack(Owner.Profile, Good, 8, true);
+    TestFalse(TEXT("An older same hash cannot complete a different current transaction"),
+              Owner.Profile->IsTownAnchorDurable(Owner.Profile->GetTownAnchorSaveStatus().TravelTransactionId));
+    auto Existing = FFableTownTravelTestAccess::BindWitness(Owner.Profile);
+    Existing.SentExpectedRevision = 8;
+    FFableTownTravelTestAccess::Ack(Owner.Profile, Existing, 8, true);
+    TestTrue(TEXT("Registered identical snapshot is honestly existing, not a new write"),
+             Owner.Profile->GetTownAnchorSaveStatus().State == EFableTownAnchorSaveState::VerifiedExistingSnapshot &&
+                 Owner.Profile->GetTownAnchorSaveStatus().AcknowledgedRevision == 8);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableTownUnavailableRestoreTest,
+                                 "Fablewood.Native.TownTravel.KnownUnreadyRestoreCannotSpawnOrRewriteAnchor",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 알려진 미준비 저장 마을은 새 pawn 생성이나 Legacy 대체 이전에 명시적으로 거절한다. */
+bool FFableTownUnavailableRestoreTest::RunTest(const FString& Parameters)
+{
+    FTravelWorld Fixture;
+    const auto Owner = Fixture.AddPlayer(1302);
+    if (!TestTrue(TEXT("Valid owned connection positive control"), Fixture.Valid(Owner)))
+    {
+        return false;
+    }
+    FFableTownTravelTestAccess::SetKnownUnreadyAnchor(Owner.Profile);
+    Owner.Controller->UnPossess();
+    Owner.Hero->Destroy();
+    Fixture.Mode->RestartPlayer(Owner.Controller);
+    TestTrue(TEXT("Unavailable geometry never creates a replacement pawn"), Owner.Controller->GetPawn() == nullptr);
+    TestTrue(TEXT("Explicit not-ready error and gameplay block"),
+             Owner.Profile->IsProfileRestorePending() && Owner.Profile->IsTownPersistenceBlocked() &&
+                 Owner.Profile->GetProfileRestoreError() == EFableTownTravelError::DestinationNotReady);
+    TestTrue(TEXT("Stored known town remains unchanged"),
+             Owner.Profile->GetLastSafeTownAnchor().TownId == EFableTownId::Sunbrook &&
+                 Owner.Profile->GetLastSafeTownAnchor().AnchorId == FName(TEXT("Entry")) &&
+                 Owner.Profile->GetLastSafeTownAnchor().CatalogVersion == 1);
+    TestTrue(TEXT("No travel save was fabricated"),
+             Owner.Profile->GetTownAnchorSaveStatus().State == EFableTownAnchorSaveState::None);
+    // 実loginと同じく、pawnなしの接続を先に登録する。従来の完成済みpresence fixtureとは区別する。
+    FTravelPlayer Ready;
+    Ready.Controller = Fixture.World->SpawnActor<APlayerController>();
+    Ready.Profile = Fixture.World->SpawnActor<AFablePlayerState>();
+    if (!TestTrue(TEXT("Fresh pawnless owning connection can be constructed"), Ready.Controller && Ready.Profile))
+    {
+        return false;
+    }
+    FFableTownTravelTestAccess::MemoryProfile(Ready.Profile);
+    FFableTownTravelTestAccess::ReadyMemoryRestore(Ready.Profile);
+    Ready.Profile->SetPlayerId(1303);
+    Ready.Profile->SetPlayerName(TEXT("NativeFreshRestore"));
+    Ready.Profile->SetOwner(Ready.Controller);
+    Ready.Controller->SetPlayerState(Ready.Profile);
+    Fixture.State->AddPlayerState(Ready.Profile);
+    Fixture.World->AddController(Ready.Controller);
+    Fixture.Controllers.Add(Ready.Controller);
+    Fixture.Parties->RegisterPlayer(Ready.Controller);
+    FFableTownConnectionSnapshot BeforePawn;
+    if (!TestTrue(TEXT("Actual pre-pawn registration has a revision but no physical town"),
+                  Fixture.Towns->GetConnectionSnapshot(Ready.Profile, BeforePawn) && BeforePawn.PresenceRevision > 0 &&
+                      BeforePawn.PhysicalContext.TownId == EFableTownId::Invalid &&
+                      Ready.Controller->GetPawn() == nullptr))
+    {
+        return false;
+    }
+
+    FActorSpawnParameters Spawn;
+    Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    Ready.Hero = Fixture.World->SpawnActor<AFableCharacter>(FableRPG::PortalLocation() + FVector(0, 0, 110),
+                                                            FRotator::ZeroRotator, Spawn);
+    if (!TestNotNull(TEXT("Actual owned pawn is spawned after the connection"), Ready.Hero))
+    {
+        return false;
+    }
+    Ready.Controller->Possess(Ready.Hero);
+    Ready.Hero->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+
+    // RegisterOrRefresh만 다시 호출하면 Invalid의 옛revision을 전달해 내부Begin에서StalePresence가 된다.
+    if (!TestTrue(TEXT("Ready login restore publishes actual holding presence before internal Begin"),
+                  Fixture.Travel->BeginProfileRestore(Ready.Controller)))
+    {
+        return false;
+    }
+    FFableTownTravelPrepared Prepared;
+    FFableTownConnectionSnapshot Holding;
+    if (!TestTrue(TEXT("Ready restore owns a real pending geometry transaction"),
+                  Fixture.Travel->GetPendingFor(Ready.Controller, Prepared) &&
+                      Fixture.Towns->GetConnectionSnapshot(Ready.Profile, Holding)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("Preparation uses the new physical revision rather than the pawnless one"),
+             Holding.PresenceRevision > BeforePawn.PresenceRevision &&
+                 Prepared.SourcePresenceRevision == Holding.PresenceRevision &&
+                 Holding.PhysicalContext.TownId == EFableTownId::LegacyVillage &&
+                 Holding.PhysicalContext.FloorId == FName(TEXT("Ground")));
+    TestTrue(TEXT("Holding never fabricates a committed anchor or unlocks gameplay"),
+             Ready.Profile->GetTownAnchorSaveStatus().State == EFableTownAnchorSaveState::None &&
+                 Ready.Profile->IsProfileRestorePending() && Ready.Profile->IsTownPersistenceBlocked());
+
+    Fixture.Ack(Ready, Prepared);
+    FFableTownTravelCommitReceipt Commit;
+    if (!TestTrue(TEXT("Exact ACK performs real grounded restore placement and one memory-only save"),
+                  Fixture.Travel->GetCommittedFor(Ready.Controller, Prepared.TransactionId, Commit) &&
+                      Ready.Profile->GetTownAnchorSaveStatus().State == EFableTownAnchorSaveState::MemoryOnly))
+    {
+        return false;
+    }
+    Fixture.Travel->ConfirmOwnArrival(Ready.Controller, FGuid::NewGuid(), Prepared.TransactionId, Prepared.Generation,
+                                      Prepared.ConnectionNonce, Commit.CommitSequence);
+    FFableTownTravelResponse Confirmation;
+    Fixture.Travel->GetLastResponseFor(Ready.Controller, Confirmation);
+    TestTrue(TEXT("Actual server confirmation completes only the ready owner's restore"),
+             Confirmation.Error == EFableTownTravelError::None && Confirmation.bOwnArrivalConfirmed &&
+                 !Ready.Profile->IsProfileRestorePending() && !Ready.Profile->IsTownPersistenceBlocked());
+    TestTrue(TEXT("Ready positive control cannot rewrite the unavailable owner's reference"),
+             Owner.Profile->GetLastSafeTownAnchor().TownId == EFableTownId::Sunbrook &&
+                 Owner.Profile->GetProfileRestoreError() == EFableTownTravelError::DestinationNotReady);
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFableTownDelayedSaveArrivalTest,
+                                 "Fablewood.Native.TownTravel.DelayedSaveAckKeepsBoundedPhysicalArrival",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** 실제 물리 도착과 저장 callback 대기를 구분하고 정확 ACK 뒤에만 source를 반환한다. */
+bool FFableTownDelayedSaveArrivalTest::RunTest(const FString& Parameters)
+{
+    FTravelWorld Fixture(true);
+    if (!TestTrue(TEXT("RPC fixture uses a normally initialized actor world"),
+                  Fixture.World && Fixture.World->AreActorsInitialized()))
+    {
+        return false;
+    }
+    const FTravelPlayer Player = Fixture.AddPlayer(1113, FableRPG::PortalLocation(), true);
+    auto* PC = Cast<AFablePlayerController>(Player.Controller);
+    if (!TestTrue(TEXT("Actual local Fable controller and physical memory connection exist"),
+                  Fixture.Valid(Player) && PC && PC->IsLocalController()))
+    {
+        return false;
+    }
+
+    Fixture.Towns->RegisterSharedForestParticipant(PC);
+    const auto Prepared = Fixture.Begin(Player);
+    if (!TestTrue(TEXT("Actual pending server preparation exists"), Prepared.TransactionId.IsValid()) ||
+        !TestTrue(TEXT("The real ClientPrepare RPC delivered the exact owning preparation"),
+                  PC->GetTownTravelPrepared().TransactionId == Prepared.TransactionId &&
+                      PC->GetTownTravelPrepared().Generation == Prepared.Generation &&
+                      PC->GetTownTravelPrepared().ConnectionNonce == Prepared.ConnectionNonce))
+    {
+        return false;
+    }
+    FFableTownTravelTestAccess::StartLocalGeometry(PC);
+    FFableTownTravelCommitReceipt Commit;
+    if (!TestTrue(TEXT("Actual client geometry ACK commits a supported server placement"),
+                  Prepared.TransactionId.IsValid() &&
+                      Fixture.Travel->GetCommittedFor(PC, Prepared.TransactionId, Commit)))
+    {
+        return false;
+    }
+    const auto Witness = FFableTownTravelTestAccess::DelayCommittedSave(Player.Profile);
+
+    // 同じ実controllerを複数時刻でpollする。三つの物理標本を5秒内で得る。
+    FFableTownTravelTestAccess::PollArrival(PC);
+    Fixture.World->TimeSeconds += 0.11f;
+    FFableTownTravelTestAccess::PollArrival(PC);
+    Fixture.World->TimeSeconds += 0.22f;
+    FFableTownTravelTestAccess::PollArrival(PC);
+    TestTrue(TEXT("Actual grounded pawn was observed before the original deadline"),
+             FFableTownTravelTestAccess::PhysicalArrivalObserved(PC));
+    Fixture.World->TimeSeconds += 6.0f;
+    FFableTownTravelTestAccess::PollArrival(PC);
+    TestFalse(TEXT("Delayed save alone cannot permanently fail a timely physical arrival"),
+              FFableTownTravelTestAccess::ArrivalFailed(PC));
+    TestTrue(TEXT("Input and both actual geometry tokens remain held while save is pending"),
+             FFableTownTravelTestAccess::IsWaitingWithSource(PC));
+
+    auto Wrong = Witness;
+    Wrong.TravelTransactionId = FGuid::NewGuid();
+    FFableTownTravelTestAccess::Ack(Player.Profile, Wrong, 8);
+    FFableTownTravelTestAccess::PollArrival(PC);
+    TestTrue(TEXT("Another transaction ACK cannot release this source or input"),
+             FFableTownTravelTestAccess::IsWaitingWithSource(PC));
+
+    // 正確なproduction callback guardと、実server到着再検査/RPC応答を通す。
+    FFableTownTravelTestAccess::Ack(Player.Profile, Witness, 8);
+    FFableTownTravelTestAccess::PollArrival(PC);
+    FFableTownTravelResponse Confirmed;
+    Fixture.Travel->GetLastResponseFor(PC, Confirmed);
+    TestTrue(TEXT("Late exact ACK permits the actual current server confirmation"),
+             Confirmed.Operation == EFableTownTravelOperation::ConfirmArrival &&
+                 Confirmed.Error == EFableTownTravelError::None && Confirmed.bOwnArrivalConfirmed);
+    TestTrue(TEXT("The actual confirmation releases input and both temporary tokens, retaining presence"),
+             FFableTownTravelTestAccess::IsFullyReleased(PC));
+
+    // 別の実移動で物理到着を失えば、保存待ちを理由に元の5秒を延長しない。
+    const FTravelPlayer Lost = Fixture.AddPlayer(1114, FableRPG::PortalLocation(), true);
+    auto* LostPC = Cast<AFablePlayerController>(Lost.Controller);
+    if (!TestTrue(TEXT("Second independent local physical connection exists"), Fixture.Valid(Lost) && LostPC))
+    {
+        return false;
+    }
+    Fixture.Towns->RegisterSharedForestParticipant(LostPC);
+    const auto LostPrepared = Fixture.Begin(Lost);
+    FFableTownTravelTestAccess::StartLocalGeometry(LostPC);
+    if (!TestTrue(TEXT("Second physical placement really committed"),
+                  Fixture.Travel->GetCommittedFor(LostPC, LostPrepared.TransactionId, Commit)))
+    {
+        return false;
+    }
+    const auto LostWitness = FFableTownTravelTestAccess::DelayCommittedSave(Lost.Profile);
+    FFableTownTravelTestAccess::PollArrival(LostPC);
+    Fixture.World->TimeSeconds += 0.11f;
+    FFableTownTravelTestAccess::PollArrival(LostPC);
+    Fixture.World->TimeSeconds += 0.22f;
+    FFableTownTravelTestAccess::PollArrival(LostPC);
+    Lost.Hero->AddActorWorldOffset(FVector(100, 0, 0));
+    Fixture.World->TimeSeconds += 6.0f;
+    FFableTownTravelTestAccess::PollArrival(LostPC);
+    TestTrue(TEXT("Loss of exact physical arrival retains the original bounded deadline"),
+             FFableTownTravelTestAccess::ArrivalFailed(LostPC));
+    FFableTownTravelTestAccess::Ack(Lost.Profile, LostWitness, 8);
+    FFableTownTravelTestAccess::PollArrival(LostPC);
+    TestTrue(TEXT("An ACK alone cannot unlock a physically unconfirmed arrival"),
+             FFableTownTravelTestAccess::IsWaitingWithSource(LostPC));
+    return true;
+}
+
 #endif
