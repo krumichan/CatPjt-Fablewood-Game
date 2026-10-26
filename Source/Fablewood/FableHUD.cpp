@@ -188,10 +188,18 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableA
     const AFablePlayerController* PC = Cast<AFablePlayerController>(PlayerOwner);
     FVector PrimaryTarget;
     FString PrimaryLabel;
+    FFableTownNavigationGuide PrimaryGuide;
 
     // 화면 표시와 사용자 안내 처리
-    if (PC && PC->GetNavigationTarget(PrimaryTarget, PrimaryLabel))
+    if (PC && PC->GetNavigationTarget(PrimaryTarget, PrimaryLabel, &PrimaryGuide))
     {
+        // 같은 조회의 경유점만 통로로 표시하고 실제 NPC의 대화 가능 거리로 해석하지 않는다.
+        // 同じ照会の経由点だけを通路として扱い、NPCの会話可能距離とは解釈しない。
+        const bool bViaConnector = PrimaryGuide.bValid && PrimaryGuide.Status == EFableTownRouteStatus::Ready &&
+                                   PrimaryGuide.bViaConnector && PrimaryGuide.RemainingSteps > 0 &&
+                                   PrimaryGuide.WaypointWorld.Equals(PrimaryTarget, KINDA_SMALL_NUMBER);
+        const FString DisplayLabel = bViaConnector ? TEXT("층간 통로 입구") : PrimaryLabel;
+
         // 위치·방향·거리 계산에 필요한 값 준비
         FVector Delta = PrimaryTarget - Here;
         Delta.Z = 0;
@@ -199,7 +207,7 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableA
         // 화면 표시와 사용자 안내 조건 검사
         if (Delta.Size() <= 330.f)
         {
-            return PrimaryLabel + TEXT(" · 가까이 있음");
+            return bViaConnector ? TEXT("층간 통로 입구 근처") : PrimaryLabel + TEXT(" · 가까이 있음");
         }
 
         // 위치·방향·거리 계산에 필요한 값 준비
@@ -209,7 +217,7 @@ FString AFableHUD::DestinationText(const AFablePlayerState* State, const FFableA
                                  : Angle > 0               ? TEXT("오른쪽")
                                                            : TEXT("왼쪽");
 
-        return FString::Printf(TEXT("%s · %s %.0fm"), *PrimaryLabel, Direction, Delta.Size() / 100.f);
+        return FString::Printf(TEXT("%s · %s %.0fm"), *DisplayLabel, Direction, Delta.Size() / 100.f);
     }
 
     // 화면 표시와 사용자 안내 조건 검사
@@ -257,14 +265,31 @@ void AFableHUD::DrawWorldLabels(float S)
     const EFableTownServiceId Services[] = {EFableTownServiceId::QuestGuide, EFableTownServiceId::Workshop,
                                             EFableTownServiceId::Merchant, EFableTownServiceId::ExpeditionPortal};
     const AFablePlayerState* LabelState = PlayerOwner->GetPlayerState<AFablePlayerState>();
-    // Test the entire label rectangle against the two fixed side cards.
-    const auto OverlapsSideCard = [this, S](const FVector2D& Screen, float HalfWidth)
+
+    // 이번 프레임의 층간 안내 카드 높이를 사용해 월드 라벨과 겹치지 않게 한다.
+    // 現フレームの階間案内カードの高さを使い、ワールドラベルとの重なりを防ぐ。
+    const AFablePlayerController* LabelController = Cast<AFablePlayerController>(PlayerOwner);
+    FVector GuideWaypoint;
+    FString GuideLabel;
+    FFableTownNavigationGuide Guide;
+    const bool bViaConnector =
+        LabelController && !LabelController->IsAnyPanelOpen() && !GS.IsInRegion(EFableRegion::Moonwell, Here) &&
+        !GS.IsInRegion(EFableRegion::RootRuins, Here) &&
+        LabelController->GetNavigationTarget(GuideWaypoint, GuideLabel, &Guide) &&
+        FableTownNavigation::IsSameFloor(Catalog, Here, GuideWaypoint) && Guide.bValid &&
+        Guide.Status == EFableTownRouteStatus::Ready && Guide.bViaConnector && Guide.RemainingSteps > 0 &&
+        Guide.WaypointWorld.Equals(GuideWaypoint, KINDA_SMALL_NUMBER);
+    const float MiniMapBottom = (bViaConnector ? 375.f : 337.f) * S;
+
+    // 같은 층 카드는 기존 높이를 유지하고 확장된 통로 카드까지 라벨 사각형 전체를 검사한다.
+    // 同階カードの従来の高さを保ち、拡張通路カードまでラベル矩形全体を検査する。
+    const auto OverlapsSideCard = [this, S, MiniMapBottom](const FVector2D& Screen, float HalfWidth)
     {
         const float LabelLeft = Screen.X - HalfWidth * S, LabelRight = Screen.X + HalfWidth * S;
         const float LabelTop = Screen.Y - 8 * S, LabelBottom = Screen.Y + 41 * S;
         return (LabelLeft < 184 * S && LabelRight > 14 * S && LabelTop < 364 * S && LabelBottom > 208 * S) ||
-               (LabelLeft < Canvas->ClipX - 14 * S && LabelRight > Canvas->ClipX - 184 * S && LabelTop < 337 * S &&
-                LabelBottom > 153 * S);
+               (LabelLeft < Canvas->ClipX - 14 * S && LabelRight > Canvas->ClipX - 184 * S &&
+                LabelTop < MiniMapBottom && LabelBottom > 153 * S);
     };
 
     // 퀘스트와 이야기 진행 순회
@@ -472,6 +497,19 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
         }
     }
 
+    // 목표와 부가 정보는 한 번에 선택해 구조·전투 목표에 다른 의뢰의 경로를 섞지 않는다.
+    // 目標と付加情報を一度に選び、救助・戦闘目標へ別依頼の経路を混ぜない。
+    FVector ObjectiveWorld;
+    FString ObjectiveLabel;
+    FFableTownNavigationGuide Guide;
+    const bool bHasObjective =
+        PC->GetNavigationTarget(ObjectiveWorld, ObjectiveLabel, &Guide) &&
+        (Region != EFableRegion::Village || FableTownNavigation::IsSameFloor(Catalog, HereWorld, ObjectiveWorld));
+    const bool bViaConnector = bHasObjective && Region == EFableRegion::Village && Guide.bValid &&
+                               Guide.Status == EFableTownRouteStatus::Ready && Guide.bViaConnector &&
+                               Guide.RemainingSteps > 0 &&
+                               Guide.WaypointWorld.Equals(ObjectiveWorld, KINDA_SMALL_NUMBER);
+
     const auto MapPosition = [Definition, &GS, Region](const FVector& WorldPosition)
     {
         return Definition ? Definition->LocalToWorld.InverseTransformPosition(WorldPosition)
@@ -504,7 +542,8 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     }
     const float X = Canvas->ClipX - 184 * S, Y = 153 * S, Width = 170 * S;
     const float MapX = X + 8 * S, MapY = Y + 28 * S, MapW = 154 * S, MapH = 128 * S;
-    DrawRect(Ink, X, Y, Width, 184 * S);
+    // 같은 층의 기존 배치는 그대로 두고 층간 안내에만 두 줄 공간을 더한다. / 階間案内だけ二行分を追加する。
+    DrawRect(Ink, X, Y, Width, (bViaConnector ? 222.f : 184.f) * S);
     DrawFitted(MapTitle + TEXT(" · 현재 층"), Cream, X + 8 * S, Y + 5 * S, 154 * S, .51f * S);
     DrawRect(FLinearColor(.07f, .16f, .12f), MapX, MapY, MapW, MapH);
 
@@ -525,16 +564,8 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
                          MapY + MapH * .5f -
                              FMath::Clamp(float((Location.Y - Center.Y) / Extent), -.92f, .92f) * (MapH * .5f - 4 * S));
     };
-    FVector Objective;
-    FString ObjectiveLabel;
-    // 화살표·거리 문구와 같은 목적지를 쓰고 다른 층의 표식은 그리지 않는다.
-    const bool bHasObjective =
-        PC->GetNavigationTarget(Objective, ObjectiveLabel) &&
-        (Region != EFableRegion::Village || FableTownNavigation::IsSameFloor(Catalog, HereWorld, Objective));
-    if (bHasObjective)
-    {
-        Objective = MapPosition(Objective);
-    }
+    // 실제 다른 층 목적지가 아니라 검증된 현재 층의 다음 진입점만 투영한다. / 現在階の次の入口だけを投影する。
+    const FVector Objective = bHasObjective ? MapPosition(ObjectiveWorld) : FVector::ZeroVector;
     const FVector2D Self = Point(Here);
     const FVector2D ObjectivePoint = bHasObjective ? Point(Objective) : FVector2D::ZeroVector;
     const auto Marker = [this, S, &Point, &Self, &ObjectivePoint, bHasObjective](const FVector& Location,
@@ -605,10 +636,29 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     if (bHasObjective)
     {
         const FVector2D P = Point(Objective);
-        DrawLine(P.X - 6 * S, P.Y, P.X, P.Y - 6 * S, Gold, 2 * S);
-        DrawLine(P.X, P.Y - 6 * S, P.X + 6 * S, P.Y, Gold, 2 * S);
-        DrawLine(P.X + 6 * S, P.Y, P.X, P.Y + 6 * S, Gold, 2 * S);
-        DrawLine(P.X, P.Y + 6 * S, P.X - 6 * S, P.Y, Gold, 2 * S);
+        if (bViaConnector)
+        {
+            // 이동로 입구는 기존 최종 목표와 모양·색을 달리하고 지도 밖으로 글자를 내보내지 않는다.
+            // 通路入口を従来目標と区別し、ラベルを地図の内側へ収める。
+            DrawRect(Mint, P.X - 6 * S, P.Y - 6 * S, 12 * S, 12 * S);
+            DrawLine(P.X - 4 * S, P.Y + 3 * S, P.X, P.Y + 3 * S, Ink, S);
+            DrawLine(P.X, P.Y + 3 * S, P.X, P.Y, Ink, S);
+            DrawLine(P.X, P.Y, P.X + 4 * S, P.Y, Ink, S);
+            DrawLine(P.X + 4 * S, P.Y, P.X + 4 * S, P.Y - 3 * S, Ink, S);
+
+            const float LabelX =
+                FMath::Clamp(P.X + (P.X > MapX + MapW * .5f ? -36.f : 9.f) * S, MapX + 2 * S, MapX + MapW - 30 * S);
+            const float LabelY = FMath::Clamp(P.Y - 21 * S, MapY + 2 * S, MapY + MapH - 16 * S);
+            DrawRect(Ink, LabelX - S, LabelY, 30 * S, 15 * S);
+            DrawFitted(TEXT("통로"), Mint, LabelX, LabelY, 28 * S, .44f * S);
+        }
+        else
+        {
+            DrawLine(P.X - 6 * S, P.Y, P.X, P.Y - 6 * S, Gold, 2 * S);
+            DrawLine(P.X, P.Y - 6 * S, P.X + 6 * S, P.Y, Gold, 2 * S);
+            DrawLine(P.X + 6 * S, P.Y, P.X, P.Y + 6 * S, Gold, 2 * S);
+            DrawLine(P.X, P.Y + 6 * S, P.X - 6 * S, P.Y, Gold, 2 * S);
+        }
     }
 
     // 미니맵에는 실제 같은 파티의 동료만 표시하고 자기 표식은 별도로 그린다.
@@ -646,7 +696,14 @@ void AFableHUD::DrawMiniMap(AFablePlayerController* PC, const AFablePlayerState*
     DrawLine(Tip.X, Tip.Y, Left.X, Left.Y, Cream, 2 * S);
     DrawLine(Tip.X, Tip.Y, Right.X, Right.Y, Cream, 2 * S);
     DrawLine(Left.X, Left.Y, Right.X, Right.Y, Cream, 2 * S);
-    DrawFitted(TEXT("나 / 동료 / 금색 목표"), Muted, X + 8 * S, Y + 162 * S, 154 * S, .45f * S);
+    DrawFitted(bViaConnector ? TEXT("나 / 동료 / 초록 통로") : TEXT("나 / 동료 / 금색 목표"), Muted, X + 8 * S,
+               Y + 162 * S, 154 * S, .45f * S);
+    if (bViaConnector)
+    {
+        // 층·남은 경유 통로만 짧게 보여 주며 내부 ID나 다른 층 NPC 표식을 노출하지 않는다.
+        // 階と残り通路だけを短く示し、内部IDや別階NPCの印を出さない。
+        DrawWrapped(FableTownNavigation::RouteProgressText(Guide), Mint, X + 8 * S, Y + 180 * S, 154 * S, .46f * S, 2);
+    }
 }
 
 /** 파티 상태 UI를 현재 상태에 맞게 그린다. */
