@@ -280,7 +280,7 @@ void UFableOnlineValidationDriver::SetObservedService(int32 Index, EFableTownSer
     auto* PC = O.Player.Get();
     const auto* H = PC ? Cast<AFableCharacter>(PC->GetPawn()) : nullptr;
     const auto* Towns = PC ? AFableTownManager::Find(PC->GetWorld()) : nullptr;
-    const auto* Mode = PC ? PC->GetWorld()->GetAuthGameMode<AFableGameMode>() : nullptr;
+    const auto* ServiceGameMode = PC ? PC->GetWorld()->GetAuthGameMode<AFableGameMode>() : nullptr;
     FFableTownLocationContext Physical;
     FFableTownServiceRef Ref;
     FFableTownServiceDescriptor Descriptor;
@@ -317,7 +317,8 @@ void UFableOnlineValidationDriver::SetObservedService(int32 Index, EFableTownSer
     O.Row->SetArrayField(TEXT("nearbyServiceIds"), Nearby);
     O.Row->SetBoolField(TEXT("grounded"), Resolved && H && H->IsGroundedAtCurrentTownAnchor(Descriptor.Anchor));
     O.Row->SetBoolField(TEXT("inRange"), Resolved && H && Descriptor.IsInRange(Physical, H->GetActorLocation()));
-    O.Row->SetBoolField(TEXT("authorityAllowedBefore"), Mode && Mode->CanUseTownService(PC, Service));
+    O.Row->SetBoolField(TEXT("authorityAllowedBefore"),
+                        ServiceGameMode && ServiceGameMode->CanUseTownService(PC, Service));
 }
 
 /** 실제 거절 문구와 동기 변경을 저장 ACK 대기 전에 읽는다. */
