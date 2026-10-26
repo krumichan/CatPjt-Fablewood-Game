@@ -37,6 +37,10 @@ namespace
         Guide.AnchorId = TEXT("Service.Board");
         Guide.FloorId = TEXT("F2");
         Guide.LocalSlots.Add(FTransform(FVector(900, 100, 1000)));
+
+        // 합성 서비스의 지지면 식별자이며 실제 지형 채택을 뜻하지 않는다. / 合成サービスの支持面識別で実地形の採用ではない。
+        Guide.ExpectedSupportTag = TEXT("Fixture.Support.F2");
+        Guide.ExpectedSupportLocalZ = 1000.0;
         Definition.Anchors.Add(Guide);
 
         FFableTownConnectorDefinition First;
@@ -116,12 +120,42 @@ bool FFableTownRouteTransformed::RunTest(const FString& Parameters)
     Guide.TownId = Definition.TownId;
     Guide.CatalogVersion = Definition.CatalogVersion;
     Guide.ServiceId = EFableTownServiceId::QuestGuide;
+    // 경로를 비교하기 전에 서비스의 기존 정본 조건부터 확인한다. / 経路比較の前に既存の正本条件を確認する。
+    FFableTownServiceDescriptor CanonicalService;
+    TestTrue(TEXT("Fixture board satisfies canonical service support metadata before routing"),
+             UFableTownCatalog::ResolveDefinitionService(Definition, Guide, CanonicalService, true) &&
+                 CanonicalService.Anchor.AnchorId == FName(TEXT("Service.Board")) &&
+                 CanonicalService.FloorId == FName(TEXT("F2")) && CanonicalService.WorldLocation.Equals(Goal));
+
     FFableTownRoute ServiceRoute;
     TestTrue(TEXT("Service wrapper uses the canonical board anchor and the same route"),
              FableTownRoutes::ResolveDefinitionService(Definition, Start, Guide, ServiceRoute) ==
                      EFableTownRouteStatus::Ready &&
                  ServiceRoute.Target.AnchorId == FName(TEXT("Service.Board")) && ServiceRoute.Steps.Num() == 2 &&
                  ServiceRoute.NextEntryWorldPosition.Equals(Route.NextEntryWorldPosition));
+
+    // 지지면 태그가 빠진 서비스는 거절하되 순수 기하 경로와 구분한다. / 支持タグなしのサービスを拒否し、純粋な幾何経路と区別する。
+    FFableTownDefinition TaglessDefinition = Definition;
+    FFableTownAnchorDefinition* TaglessBoard = TaglessDefinition.Anchors.FindByPredicate(
+        [](const FFableTownAnchorDefinition& Anchor)
+        {
+            return Anchor.AnchorId == FName(TEXT("Service.Board"));
+        });
+    TestNotNull(TEXT("Fixture contains the board anchor for the missing-support negative control"), TaglessBoard);
+    if (TaglessBoard)
+    {
+        TaglessBoard->ExpectedSupportTag = NAME_None;
+        FFableTownRoute TaglessRoute = ServiceRoute;
+        TestTrue(TEXT("A tagless canonical service is rejected and clears a previously valid route"),
+                 FableTownRoutes::ResolveDefinitionService(TaglessDefinition, Start, Guide, TaglessRoute) ==
+                         EFableTownRouteStatus::TargetUnavailable &&
+                     EmptyRoute(TaglessRoute));
+        TestTrue(TEXT("Anchor-only geometry can still resolve without granting service authorization"),
+                 FableTownRoutes::ResolveDefinitionAnchor(TaglessDefinition, Start,
+                                                          RouteAnchor(TaglessDefinition, TEXT("Service.Board")),
+                                                          TaglessRoute) == EFableTownRouteStatus::Ready &&
+                     TaglessRoute.Steps.Num() == 2);
+    }
 
     Guide.CatalogVersion -= 1;
     TestTrue(TEXT("Service wrapper rejects a stale reference and clears its previous route"),

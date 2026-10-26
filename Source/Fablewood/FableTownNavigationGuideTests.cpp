@@ -31,12 +31,20 @@ namespace
         Guide.AnchorId = TEXT("Service.Board");
         Guide.FloorId = TEXT("F2");
         Guide.LocalSlots.Add(FTransform(FVector(900, 100, 1000)));
+
+        // 합성 서비스의 지지면 식별자이며 실제 지형 채택을 뜻하지 않는다. / 合成サービスの支持面識別で実地形の採用ではない。
+        Guide.ExpectedSupportTag = TEXT("Fixture.Support.F2");
+        Guide.ExpectedSupportLocalZ = 1000.0;
         Definition.Anchors.Add(Guide);
 
         FFableTownAnchorDefinition Merchant;
         Merchant.AnchorId = TEXT("Service.Merchant");
         Merchant.FloorId = TEXT("F0");
         Merchant.LocalSlots.Add(FTransform(FVector(50, 50, 0)));
+
+        // 다른 층의 음성 대조도 유효한 정본 서비스에서 시작한다. / 別階の陰性対照も有効な正本サービスから始める。
+        Merchant.ExpectedSupportTag = TEXT("Fixture.Support.F0");
+        Merchant.ExpectedSupportLocalZ = 0.0;
         Definition.Anchors.Add(Merchant);
 
         for (int32 Index = 0; Index < 2; ++Index)
@@ -116,6 +124,16 @@ bool FFableTownGuideDestinations::RunTest(const FString& Parameters)
     const FVector Start = Definition.LocalToWorld.TransformPosition(FVector::ZeroVector);
     const FVector Entry = Definition.LocalToWorld.TransformPosition(FVector(100, 0, 0));
     const FVector Target = Definition.LocalToWorld.TransformPosition(FVector(900, 100, 1000));
+    // 표시 안내도 기존 정본 서비스 조건을 먼저 만족해야 한다. / 表示案内も既存の正本サービス条件を先に満たす。
+    FFableTownServiceRef CanonicalReference;
+    CanonicalReference.TownId = Definition.TownId;
+    CanonicalReference.ServiceId = EFableTownServiceId::QuestGuide;
+    CanonicalReference.CatalogVersion = Definition.CatalogVersion;
+    FFableTownServiceDescriptor CanonicalService;
+    TestTrue(TEXT("Guide fixture satisfies canonical service support metadata before routing"),
+             UFableTownCatalog::ResolveDefinitionService(Definition, CanonicalReference, CanonicalService, true) &&
+                 CanonicalService.FloorId == FName(TEXT("F2")) && CanonicalService.WorldLocation.Equals(Target));
+
     TestTrue(TEXT("Rotated current floor receives the first entrance instead of the remote target"),
              FableTownNavigation::ResolveDefinitionServiceGuide(Definition, Start, EFableTownServiceId::QuestGuide,
                                                                 Guide) == EFableTownRouteStatus::Ready &&
@@ -169,6 +187,35 @@ bool FFableTownGuideUnavailable::RunTest(const FString& Parameters)
     TestTrue(TEXT("Fixture initially creates a valid routed guide"),
              FableTownNavigation::ResolveDefinitionServiceGuide(Definition, Start, EFableTownServiceId::QuestGuide,
                                                                 Guide) == EFableTownRouteStatus::Ready);
+    // 기존 유효 출력을 복사해 태그 누락 시 서비스 안내가 비워지는지 별도로 확인한다. / 有効出力の複製でタグ欠落時の初期化を別に確認する。
+    FFableTownDefinition TaglessDefinition = Definition;
+    FFableTownAnchorDefinition* TaglessBoard = TaglessDefinition.Anchors.FindByPredicate(
+        [](const FFableTownAnchorDefinition& Anchor)
+        {
+            return Anchor.AnchorId == FName(TEXT("Service.Board"));
+        });
+    TestNotNull(TEXT("Guide fixture has a board for the missing-support negative control"), TaglessBoard);
+    if (TaglessBoard)
+    {
+        TaglessBoard->ExpectedSupportTag = NAME_None;
+        FFableTownNavigationGuide TaglessGuide = Guide;
+        TestTrue(TEXT("Missing support metadata rejects the guide and clears its previous destination"),
+                 FableTownNavigation::ResolveDefinitionServiceGuide(TaglessDefinition, Start,
+                                                                    EFableTownServiceId::QuestGuide, TaglessGuide) ==
+                         EFableTownRouteStatus::TargetUnavailable &&
+                     EmptyNavigationGuide(TaglessGuide));
+    }
+
+    // 역방향 경로 음성 대조는 유효한 상인 앵커를 대상으로 한다. / 逆経路の陰性対照は有効な商人アンカーを対象にする。
+    FFableTownServiceRef MerchantReference;
+    MerchantReference.TownId = Definition.TownId;
+    MerchantReference.ServiceId = EFableTownServiceId::Merchant;
+    MerchantReference.CatalogVersion = Definition.CatalogVersion;
+    FFableTownServiceDescriptor CanonicalMerchant;
+    TestTrue(TEXT("Merchant fixture satisfies canonical support metadata before the one-way rejection"),
+             UFableTownCatalog::ResolveDefinitionService(Definition, MerchantReference, CanonicalMerchant, true) &&
+                 CanonicalMerchant.FloorId == FName(TEXT("F0")));
+
     Definition.bGeometryReady = false;
     TestTrue(TEXT("Unready geometry has a reason but no old service or guide data"),
              FableTownNavigation::ResolveDefinitionServiceGuide(Definition, Start, EFableTownServiceId::QuestGuide,
