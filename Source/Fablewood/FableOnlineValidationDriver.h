@@ -107,6 +107,25 @@ private:
     bool bServiceSent = false, bServiceForestReleased = false, bServiceForestCaptureFailed = false;
     FFableItem ServiceWeaponBefore;
 
+    /** 通常の歩行入力だけで実階段を往復し、再接続は既存Entry復元を観測する。 */
+    bool TickFloorWalk(AFablePlayerController* PC, AFablePlayerState* Profile, AFableCharacter* Hero, double Now);
+
+    /** 계단 중앙에서는 감속한 일반 입력으로 관성을 줄이며 위치를 직접 변경하지 않는다. */
+    bool ApplyFloorWalkInput(AFablePlayerController* PC, AFableCharacter* Hero, const FVector& Destination);
+
+    /** 권한 서버의 현재 pawn·지지면·소유 연결만 읽으며 위치나 저장을 바꾸지 않는다. */
+    void ObserveFloorWalkServer(UWorld* World);
+
+    /** 다른 플레이어의 owner-only 연결 정보는 읽거나 출력하지 않는다. */
+    TSharedRef<FJsonObject> FloorWalkPawnSnapshot(const AFableCharacter* Hero, const AFablePlayerController* PC,
+                                                  bool bIncludeOwnerState) const;
+
+    TSharedPtr<FJsonObject> FloorWalkReport, FloorWalkServerReport;
+    TArray<TSharedPtr<FJsonValue>> FloorWalkSamples, FloorWalkServerSamples, FloorWalkMilestones;
+    int32 FloorWalkStep = 0, FloorWalkApproachStep = 0, FloorWalkSequence = 0, FloorWalkServerSequence = 0;
+    double FloorWalkStarted = 0, FloorWalkStableAt = 0, FloorWalkSampleAt = -1, FloorWalkServerSampleAt = -1;
+    double FloorWalkEntryX = 0;
+
     /** 프레임 경과 시간을 반영해 상태와 화면 표현을 갱신한다. */
     bool Tick(float Delta);
 

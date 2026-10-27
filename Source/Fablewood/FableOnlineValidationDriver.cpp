@@ -125,7 +125,7 @@ void UFableOnlineValidationDriver::Initialize(FSubsystemCollectionBase& Collecti
         if (Scenario != TEXT("connectivity") && Scenario != TEXT("dungeon") && Scenario != TEXT("growth") &&
             Scenario != TEXT("reconnect") && Scenario != TEXT("party") && Scenario != TEXT("party-entry") &&
             Scenario != TEXT("party-isolation") && Scenario != TEXT("party-results") &&
-            Scenario != TEXT("unit4-legacy-services"))
+            Scenario != TEXT("unit4-legacy-services") && Scenario != TEXT("floor-walk"))
         {
             Finish(false, TEXT("Unknown gameplay validation scenario."));
             return;
@@ -335,6 +335,26 @@ FString UFableOnlineValidationDriver::SerializeReport(const FString& Status, con
         if (ServiceServerReport)
         {
             J->SetObjectField(TEXT("serverTownServices"), ServiceServerReport);
+        }
+    }
+    if (Scenario == TEXT("floor-walk"))
+    {
+        auto Walk = MakeShared<FJsonObject>();
+        if (FloorWalkReport)
+        {
+            Walk->Values = FloorWalkReport->Values;
+        }
+        Walk->SetNumberField(TEXT("step"), FloorWalkStep);
+        Walk->SetNumberField(TEXT("approachStep"), FloorWalkApproachStep);
+        Walk->SetArrayField(TEXT("samples"), FloorWalkSamples);
+        Walk->SetArrayField(TEXT("milestones"), FloorWalkMilestones);
+        J->SetObjectField(TEXT("floorWalk"), Walk);
+        if (FloorWalkServerReport)
+        {
+            auto Authority = MakeShared<FJsonObject>();
+            Authority->Values = FloorWalkServerReport->Values;
+            Authority->SetArrayField(TEXT("samples"), FloorWalkServerSamples);
+            J->SetObjectField(TEXT("serverFloorWalk"), Authority);
         }
     }
     J->SetStringField(TEXT("townTravelScenario"), TownTravelScenario);
@@ -684,6 +704,11 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
     // 생존 상태와 부활 진행 처리
     if (Role == TEXT("server"))
     {
+        // 서버 표본은 상태를 갱신할 수 있는 tick에서만 수집하고 읽기 전용 snapshot은 유지한다.
+        if (Scenario == TEXT("floor-walk"))
+        {
+            ObserveFloorWalkServer(World);
+        }
         if (Scenario == TEXT("unit4-legacy-services"))
         {
             ObserveUnit4ServicesServer(World);
@@ -1000,6 +1025,10 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         Checks.Add(TEXT("normal_movement"), true);
         if (Mode == TEXT("login"))
         {
+            if (Scenario == TEXT("floor-walk") && !TickFloorWalk(PC, P, Hero, Now))
+            {
+                return true;
+            }
             if ((Scenario == TEXT("reconnect") || Scenario == TEXT("party") || Scenario == TEXT("party-results")) &&
                 bResumeExpedition)
             {
@@ -1053,13 +1082,15 @@ bool UFableOnlineValidationDriver::Tick(float Delta)
         {
             return true;
         }
-        if (Scenario == TEXT("unit4-legacy-services") ? TickUnit4LegacyServices(PC, P, Hero, Now)
-            : Scenario == TEXT("party")               ? TickParty(PC, P, Now)
-                                                      : TickDungeon(PC, P, Hero, Now))
+        if (Scenario == TEXT("floor-walk")              ? TickFloorWalk(PC, P, Hero, Now)
+            : Scenario == TEXT("unit4-legacy-services") ? TickUnit4LegacyServices(PC, P, Hero, Now)
+            : Scenario == TEXT("party")                 ? TickParty(PC, P, Now)
+                                                        : TickDungeon(PC, P, Hero, Now))
         {
             Checkpoint = Profile(P);
             TownDurabilityCheckpoint = ObserveTownPersistence(P);
-            Capture(Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
+            Capture(Scenario == TEXT("floor-walk") ? TEXT("floor-walk-finished")
+                    : Scenario == TEXT("party") ? (bResumeExpedition ? TEXT("party-restored") : TEXT("party-finished"))
                     : Scenario == TEXT("party-entry")     ? TEXT("party-entry-finished")
                     : Scenario == TEXT("party-isolation") ? TEXT("party-isolation-finished")
                     : Scenario == TEXT("party-results")   ? TEXT("party-results-finished")

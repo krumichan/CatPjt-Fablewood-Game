@@ -1,11 +1,11 @@
-#requires -Version 7.4
+#requires -Version 7.5
 [CmdletBinding()]
 param(
     [string]$EngineRoot,
     [string]$BackendRoot,
     [string]$BackendUrl='http://127.0.0.1:5292',
     [string]$PackagedClientExecutable,
-    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results','unit4-legacy-services')][string]$Scenario='connectivity',
+    [ValidateSet('connectivity','dungeon','growth','reconnect','party','party-entry','party-isolation','party-results','unit4-legacy-services','floor-walk')][string]$Scenario='connectivity',
     [ValidateSet('none','unit2-legacy-anchors')][string]$TownTravelScenario='none',
     [switch]$PartyReadyCancellation,
     [ValidateRange(1024,65535)][int]$Port=7821,
@@ -14,7 +14,7 @@ param(
 # Run only through the approved desktop adapter. No build or initial backend startup occurs here.
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Backend-Link.ps1')
-if(-not $IsWindows){throw 'Windows and PowerShell 7.4+ are required.'}
+if(-not $IsWindows){throw 'Windows and PowerShell 7.5+ are required.'}
 $backendLink=Get-FableBackendLink -BackendRoot $BackendRoot
 function Assert-Online($Condition,[string]$Code){if(-not $Condition){throw [InvalidOperationException]::new('OnlineValidation:'+$Code)}}
 Assert-Online ($TownTravelScenario -ceq 'none' -or $Scenario -ceq 'party-results') 'town_subscenario_requires_results'
@@ -101,7 +101,7 @@ function Read-OnlineText([string]$Path){
     $s=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
     try{$r=[IO.StreamReader]::new($s,[Text.Encoding]::UTF8,$true);try{return $r.ReadToEnd()}finally{$r.Dispose()}}finally{$s.Dispose()}
 }
-function Read-OnlineJson([string]$Path){return (Read-OnlineText $Path|ConvertFrom-Json -Depth 80)}
+function Read-OnlineJson([string]$Path){return (Read-OnlineText $Path|ConvertFrom-Json -Depth 80 -DateKind String)}
 function Write-OnlineJson([string]$Path,$Value){
     $temp=$Path+'.writing-'+[Guid]::NewGuid().ToString('N')
     [IO.File]::WriteAllText($temp,($Value|ConvertTo-Json -Depth 80),[Text.UTF8Encoding]::new($false));[IO.File]::Move($temp,$Path,$true)
@@ -228,7 +228,7 @@ function Stop-OnlineOwned($Record,[bool]$Scenario=$false){
     if($process){Stop-Process -InputObject $process -Force -ErrorAction Stop;Assert-Online ($handle.WaitForExit(10000)) 'owned_process_stop_timeout'}
     else{Assert-Online ($handle.WaitForExit(10000)) 'owned_process_exit_unobserved'}
     $Record.exitCode=$handle.ExitCode;Assert-Online ($null -ne $Record.exitCode) 'owned_process_exit_code_missing'
-    if($script:Scenario -ceq 'unit4-legacy-services'){$Record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
+    if($script:Scenario -in @('unit4-legacy-services','floor-walk')){$Record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
     if($Scenario){$Record.forcedForScenario=$true}else{$Record.cleanupForced=$true}
 }
 function Read-OnlineReport($Record,[switch]$AllowMissing){
@@ -271,7 +271,7 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$fa
     Assert-Online ($Checkpoint.ready -eq $true -and $Checkpoint.savePending -eq $false -and $Checkpoint.revision -ge 1 -and $Checkpoint.revision -eq $Checkpoint.acknowledgedRevision) 'checkpoint_not_acknowledged'
     Assert-Online ([string]$Checkpoint.playerId -cmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$' -and [string]$Checkpoint.profileHash -cmatch '^[a-f0-9]{64}$') 'checkpoint_identity_format'
     Assert-Online ($Checkpoint.heroClass -eq $accounts[$Role].initialClass -and $Checkpoint.classTier -eq 1) 'unexpected_character_class'
-    if($Scenario -in @('connectivity','party')){
+    if($Scenario -in @('connectivity','party','floor-walk')){
         Assert-Online ($Checkpoint.level -eq 1 -and $Checkpoint.experience -eq 0) 'unexpected_character_progression'
     }else{
         Require-OnlineFields $Checkpoint @('forestQuest','dungeonQuest','dungeonCompletions') 'dungeon_checkpoint_incomplete'
@@ -295,7 +295,7 @@ function Assert-OnlineCheckpoint($Checkpoint,[string]$Role,[bool]$BeforeSolo=$fa
     }
     Require-OnlineFields $Checkpoint.wallet @('gold','ore','essence','rootCores','moonCrystals','healthPotions','manaPotions') 'checkpoint_wallet_incomplete'
     Assert-Online (@($Checkpoint.wallet.PSObject.Properties).Count -eq 7) 'checkpoint_wallet_shape'
-    if($Scenario -in @('connectivity','party')){
+    if($Scenario -in @('connectivity','party','floor-walk')){
         Assert-Online ($Checkpoint.wallet.healthPotions -eq 3 -and $Checkpoint.wallet.manaPotions -eq 1) 'normal_potion_durable_quantity_mismatch'
         foreach($currency in @('gold','ore','essence','rootCores','moonCrystals')){Assert-Online ($Checkpoint.wallet.$currency -eq 0) 'unexpected_checkpoint_currency'}
     }else{
@@ -946,6 +946,279 @@ function Assert-OnlineTownServicesServer($ServerReport,$ClientReports){
     $summary['unit4LegacyServices']=[ordered]@{status='running';exactClientCheckpointLabels=$true;serverAuthorityAndExactAckValidated=$true;peerInvarianceValidated=$true;actualAirborneNegativeClaimed=$false;serverEventCount=26;reports=@('register/client1.json','register/client2.json','register/server.json');nativeOnlyProofUsed=$false;servicePlacementValidationClaimed=$false;newTownAdoptionClaimed=$false}
 }
 
+# 원래 회귀와 분리된 실제 계단 보행의 유한 수·위치를 검사한다.
+function Assert-OnlineFloorWalkVector($Value, [string]$Code)
+{
+    Assert-Online (@($Value).Count -eq 3) $Code
+    foreach ($coordinate in @($Value))
+    {
+        Assert-Online (($coordinate -is [double] -or $coordinate -is [long] -or $coordinate -is [int]) -and
+            [double]::IsFinite([double]$coordinate)) $Code
+    }
+}
+
+# 공개 표본은 본인·권한·상대 복제를 구분하며 owner-only nonce 값을 요구하지 않는다.
+function Assert-OnlineFloorWalkSnapshot($Snapshot, [string]$PlayerId, [bool]$Authority, [bool]$Owner)
+{
+    Require-OnlineFields $Snapshot @('playerId','publicPlayerKey','ownerProfileIncluded','pawnName','processId','authority','localController',
+        'controllerOwnsPawn','profileOwnerMatchesController','alive','profileLoaded','backendReady','savePending',
+        'revision','acknowledgedRevision','position','velocity','grounded','movementFloorWalkable','maxWalkSpeed',
+        'capsuleHalfHeight','capsuleRadius','catalogResolved','physical','support','presence') 'floor_snapshot_shape'
+    Assert-Online ($Snapshot.playerId -ceq $PlayerId -and $Snapshot.authority -is [bool] -and
+        $Snapshot.authority -eq $Authority -and $Snapshot.profileLoaded -eq $true) 'floor_snapshot_identity'
+    foreach ($field in @('ownerProfileIncluded','localController','controllerOwnsPawn','profileOwnerMatchesController',
+        'alive','profileLoaded','backendReady','savePending','grounded','movementFloorWalkable','catalogResolved'))
+    {
+        Assert-Online ($Snapshot.$field -is [bool]) 'floor_snapshot_typed_boolean'
+    }
+    Require-OnlineFields $Snapshot.support @('hit','actor','component','impact','stairsTagged','landingTagged',
+        'guardTagged','meadowTagged','matchesMovementFloor','capsuleFloorClearance') 'floor_support_shape'
+    foreach ($field in @('hit','stairsTagged','landingTagged','guardTagged','meadowTagged','matchesMovementFloor'))
+    {
+        Assert-Online ($Snapshot.support.$field -is [bool]) 'floor_support_typed_boolean'
+    }
+    Require-OnlineFields $Snapshot.presence @('available','connectionNonceValid','currentConnectionVerified',
+        'ownerGeneration','revision','physical') 'floor_presence_shape'
+    foreach ($field in @('available','connectionNonceValid','currentConnectionVerified'))
+    {
+        Assert-Online ($Snapshot.presence.$field -is [bool]) 'floor_presence_typed_boolean'
+    }
+    Assert-OnlineFloorWalkVector $Snapshot.position 'floor_position_finite'
+    Assert-OnlineFloorWalkVector $Snapshot.velocity 'floor_velocity_finite'
+    Assert-OnlineFloorWalkVector $Snapshot.support.impact 'floor_support_finite'
+    Assert-Online ($Snapshot.capsuleHalfHeight -gt 0 -and $Snapshot.capsuleRadius -gt 0 -and
+        $Snapshot.physical.floorId -is [string] -and $Snapshot.physical.connectorId -is [string]) 'floor_snapshot_physical_shape'
+    foreach ($key in @('connectionNonce','worldEpoch','accessToken','password'))
+    {
+        Assert-Online ($null -eq $Snapshot.PSObject.Properties[$key] -and
+            $null -eq $Snapshot.presence.PSObject.Properties[$key]) 'floor_no_public_owner_secrets'
+    }
+    if ($Owner)
+    {
+        Require-OnlineFields $Snapshot @('guide') 'floor_owner_guide_missing'
+        Assert-Online ($Snapshot.ownerProfileIncluded -eq $true -and $Snapshot.controllerOwnsPawn -eq $true -and
+            $Snapshot.profileOwnerMatchesController -eq $true) 'floor_owner_pawn_mismatch'
+        Assert-OnlineFloorWalkVector $Snapshot.guide.waypoint 'floor_guide_waypoint_finite'
+        Assert-OnlineFloorWalkVector $Snapshot.guide.target 'floor_guide_target_finite'
+    }
+    else
+    {
+        Assert-Online ($Snapshot.playerId -ceq '' -and $Snapshot.ownerProfileIncluded -eq $false -and
+            $Snapshot.revision -eq -1 -and $Snapshot.acknowledgedRevision -eq -1 -and
+            $Snapshot.presence.available -eq $false -and
+            $Snapshot.presence.connectionNonceValid -eq $false -and
+            $Snapshot.presence.ownerGeneration -eq 0 -and
+            $null -eq $Snapshot.PSObject.Properties['guide']) 'floor_peer_owner_only_data_not_exposed'
+    }
+}
+
+# 같은 프로세스 순서와 서버 물리 표본으로 각 계단 도착을 결합한다.
+function Assert-OnlineFloorWalkPhase($ServerReport, $ClientReports)
+{
+    Require-OnlineFields $ServerReport @('serverFloorWalk') 'floor_server_report_missing'
+    $authority = $ServerReport.serverFloorWalk
+    $phase = [string]$ClientReports.client1.mode
+    Assert-Online ($phase -cin @('register','login') -and $ClientReports.client2.mode -ceq $phase -and
+        $authority.observationOnly -eq $true -and $authority.phase -ceq $phase -and
+        $authority.connectorId -ceq 'Legacy.Overlook.Stairs') 'floor_server_scope'
+    $serverRows = @($authority.samples)
+    Assert-Online ($serverRows.Count -ge 2 -and $serverRows.Count -le 2400) 'floor_server_sample_bound'
+    $lastServerSequence = 0
+    $lastServerSeconds = -1.0
+    $ids = @($ClientReports.client1.checkpoint.playerId, $ClientReports.client2.checkpoint.playerId)
+    foreach ($sample in $serverRows)
+    {
+        Assert-Online ($sample.playerId -cin $ids -and $sample.processId -eq $ServerReport.processId -and
+            $sample.sequence -gt $lastServerSequence -and $sample.processSeconds -ge $lastServerSeconds -and
+            [double]::IsFinite([double]$sample.processSeconds)) 'floor_authority_sample_order'
+        Assert-OnlineFloorWalkSnapshot $sample ([string]$sample.playerId) $true $true
+        $lastServerSequence = [long]$sample.sequence
+        $lastServerSeconds = [double]$sample.processSeconds
+    }
+
+    $phaseEvidence = [ordered]@{}
+    foreach ($role in @('client1','client2'))
+    {
+        $client = $ClientReports.$role
+        Require-OnlineFields $client @('floorWalk') 'floor_client_report_missing'
+        $walk = $client.floorWalk
+        $playerId = [string]$client.checkpoint.playerId
+        $peer = if ($role -ceq 'client1') { 'client2' } else { 'client1' }
+        $peerId = [string]$ClientReports.$peer.checkpoint.playerId
+        $peerPublicKey = [string]$ClientReports.$peer.floorWalk.publicPlayerKey
+        Assert-Online ($walk.mode -ceq $phase -and $walk.playerId -ceq $playerId -and
+            -not [string]::IsNullOrWhiteSpace([string]$walk.publicPlayerKey) -and
+            $walk.completed -is [bool] -and $walk.completed -and $walk.usesNormalMovementInput -eq $true -and
+            $walk.connectorId -ceq 'Legacy.Overlook.Stairs' -and $walk.newTownGeometryActivated -eq $false) 'floor_client_scope'
+        [string[]]$labels = if ($phase -ceq 'register')
+        {
+            @('ground-start','ground-stairs-up','connector-up','upper','connector-down','ground-stairs-down',
+                'ground-return','upper-before-leave')
+        }
+        else
+        {
+            @('entry-restored')
+        }
+        Assert-Online (Equal-Online @($walk.milestones | ForEach-Object name) $labels) 'floor_exact_milestones'
+        Assert-Online (@($walk.samples).Count -ge 1 -and @($walk.samples).Count -le 1200) 'floor_client_sample_bound'
+        $previousClientSequence = 0
+        $previousClientSeconds = -1.0
+        $peerUpperObserved = $false
+        foreach ($sample in @($walk.samples))
+        {
+            Assert-Online ($sample.sequence -gt $previousClientSequence -and
+                $sample.processSeconds -ge $previousClientSeconds -and
+                [double]::IsFinite([double]$sample.processSeconds)) 'floor_client_sample_order'
+            Assert-OnlineFloorWalkSnapshot $sample.own $playerId $false $true
+            foreach ($replica in @($sample.peers))
+            {
+                Assert-OnlineFloorWalkSnapshot $replica '' $false $false
+                Assert-Online ($replica.publicPlayerKey -ceq $peerPublicKey -and
+                    -not [string]::IsNullOrWhiteSpace($peerPublicKey)) 'floor_peer_public_key_mismatch'
+                if ($replica.physical.floorId -ceq 'F1' -and $replica.support.landingTagged -eq $true)
+                {
+                    $peerUpperObserved = $true
+                }
+            }
+            $previousClientSequence = [long]$sample.sequence
+            $previousClientSeconds = [double]$sample.processSeconds
+        }
+
+        # 저장 정본은 보행 때문에 재화·장비·퀘스트나 안전 앵커가 바뀌면 안 된다.
+        $invariantFields = @('playerId','profileVersion','heroClass','level','experience','classTier','wallet','items',
+            'bagCount','stashCount','equippedWeaponInstanceId','equippedArmorInstanceId','forestQuest','dungeonQuest',
+            'dungeonCompletions','lastSafeTown','revision','acknowledgedRevision','profileHash')
+        Require-OnlineFields $walk.beforeProfile $invariantFields 'floor_before_profile_shape'
+        Require-OnlineFields $walk.afterProfile $invariantFields 'floor_after_profile_shape'
+        foreach ($field in $invariantFields)
+        {
+            Assert-Online (Equal-Online $walk.beforeProfile.$field $walk.afterProfile.$field) 'floor_walk_profile_unchanged'
+        }
+        Assert-Online ($walk.afterProfile.lastSafeTown.anchorId -ceq 'Entry' -and
+            $walk.afterProfile.lastSafeTown.townId -eq 1) 'floor_entry_anchor_policy_preserved'
+
+        $ownerRows = @($serverRows | Where-Object playerId -CEQ $playerId)
+        $previousAuthority = $null
+        foreach ($currentAuthority in $ownerRows)
+        {
+            if ($null -ne $previousAuthority -and $previousAuthority.position[0] -ge 2800 -and
+                $currentAuthority.position[0] -ge 2800)
+            {
+                $elapsed = [double]$currentAuthority.processSeconds - [double]$previousAuthority.processSeconds
+                $dx = [double]$currentAuthority.position[0] - [double]$previousAuthority.position[0]
+                $dy = [double]$currentAuthority.position[1] - [double]$previousAuthority.position[1]
+                $dz = [double]$currentAuthority.position[2] - [double]$previousAuthority.position[2]
+                $speed = [Math]::Max([double]$previousAuthority.maxWalkSpeed, [double]$currentAuthority.maxWalkSpeed)
+                $bound = $speed * $elapsed + 2 * [double]$currentAuthority.capsuleRadius + 48
+                Assert-Online ($elapsed -gt 0 -and $elapsed -le 1.5 -and $speed -gt 0 -and
+                    ($dx * $dx + $dy * $dy + $dz * $dz) -le $bound * $bound) 'floor_authority_continuous_stair_path'
+            }
+            $previousAuthority = $currentAuthority
+        }
+        $lastMatchedServer = 0
+        $lastMilestoneSeconds = -1.0
+        $lastMilestoneSequence = 0
+        $matched = @()
+        foreach ($milestone in @($walk.milestones))
+        {
+            $own = $milestone.own
+            Assert-OnlineFloorWalkSnapshot $own $playerId $false $true
+            Assert-Online ($milestone.playerId -ceq $playerId -and $milestone.sequence -gt $lastMilestoneSequence -and
+                $milestone.publicPlayerKey -ceq $walk.publicPlayerKey -and
+                $own.publicPlayerKey -ceq $walk.publicPlayerKey -and
+                $milestone.processSeconds -gt $lastMilestoneSeconds -and
+                $own.grounded -eq $true -and $own.movementFloorWalkable -eq $true -and
+                $own.support.hit -eq $true -and $own.support.matchesMovementFloor -eq $true -and
+                $own.support.guardTagged -eq $false -and $own.support.capsuleFloorClearance -ge -.5 -and
+                $own.support.capsuleFloorClearance -le 8 -and $own.catalogResolved -eq $true -and
+                $own.presence.available -eq $true -and $own.presence.connectionNonceValid -eq $true -and
+                $own.presence.ownerGeneration -gt 0 -and $own.presence.revision -gt 0 -and
+                $own.physical.floorId -ceq $own.presence.physical.floorId -and
+                $own.physical.connectorId -ceq $own.presence.physical.connectorId) 'floor_milestone_grounded_owner'
+            $localSample = @($walk.samples | Where-Object sequence -EQ $milestone.sequence)
+            Assert-Online ($localSample.Count -eq 1 -and $localSample[0].processSeconds -le $milestone.processSeconds -and
+                $milestone.processSeconds - $localSample[0].processSeconds -le 1 -and
+                $localSample[0].own.playerId -ceq $playerId -and
+                $localSample[0].own.physical.floorId -ceq $own.physical.floorId -and
+                $localSample[0].own.physical.connectorId -ceq $own.physical.connectorId) 'floor_milestone_bound_to_own_sample'
+            $name = [string]$milestone.name
+            $connector = $name -cin @('connector-up','connector-down')
+            $upper = $name -cin @('upper','upper-before-leave')
+            $expectedFloor = if ($connector) { 'None' } elseif ($upper) { 'F1' } else { 'Ground' }
+            $expectedConnector = if ($connector) { 'Legacy.Overlook.Stairs' } else { 'None' }
+            Assert-Online ($own.physical.floorId -ceq $expectedFloor -and
+                $own.physical.connectorId -ceq $expectedConnector) 'floor_milestone_context'
+            if ($connector)
+            {
+                Assert-Online ($own.position[0] -gt 4499 -and $own.position[0] -lt 5000 -and
+                    $own.support.stairsTagged -eq $true -and $own.guide.valid -eq $false -and
+                    $own.guide.targetFound -eq $false -and $own.guide.serviceQueryStatus -eq 5 -and
+                    (Equal-Online @($own.guide.waypoint) @(0,0,0)) -and
+                    (Equal-Online @($own.guide.target) @(0,0,0))) 'floor_connector_actual_support_and_unavailable_guide'
+            }
+            elseif ($upper)
+            {
+                Assert-Online ($own.position[0] -ge 5000 -and $own.support.landingTagged -eq $true -and
+                    $own.guide.valid -eq $true -and $own.guide.status -eq 0 -and
+                    $own.guide.viaConnector -eq $true -and $own.guide.connectorId -ceq 'Legacy.Overlook.Stairs' -and
+                    $own.guide.sourceFloorId -ceq 'F1' -and $own.guide.nextFloorId -ceq 'Ground' -and
+                    $own.guide.targetFloorId -ceq 'Ground' -and $own.guide.remainingSteps -eq 1) 'floor_upper_actual_support_and_down_route'
+            }
+            else
+            {
+                Assert-Online ($own.position[0] -le 4499 -and $own.guide.valid -eq $true -and
+                    $own.guide.status -eq 0 -and $own.guide.viaConnector -eq $false -and
+                    $own.guide.remainingSteps -eq 0) 'floor_ground_direct_guide_restored'
+                if ($name -cin @('ground-stairs-up','ground-stairs-down'))
+                {
+                    Assert-Online ($own.support.stairsTagged -eq $true) 'floor_lower_steps_keep_ground_context'
+                }
+            }
+
+            $matches = @($ownerRows | Where-Object {
+                $dx = [double]$_.position[0] - [double]$own.position[0]
+                $dy = [double]$_.position[1] - [double]$own.position[1]
+                $dz = [double]$_.position[2] - [double]$own.position[2]
+                $_.sequence -gt $lastMatchedServer -and $_.grounded -eq $true -and
+                $_.publicPlayerKey -ceq $walk.publicPlayerKey -and
+                $_.support.hit -eq $true -and $_.presence.currentConnectionVerified -eq $true -and
+                $_.physical.floorId -ceq $expectedFloor -and $_.physical.connectorId -ceq $expectedConnector -and
+                $_.presence.physical.floorId -ceq $expectedFloor -and
+                $_.presence.physical.connectorId -ceq $expectedConnector -and
+                ($dx * $dx + $dy * $dy + $dz * $dz) -le 10000
+            })
+            Assert-Online ($matches.Count -ge 1) 'floor_exact_owner_server_milestone_missing'
+            $lastMatchedServer = [long]$matches[0].sequence
+            $lastMilestoneSeconds = [double]$milestone.processSeconds
+            $lastMilestoneSequence = [long]$milestone.sequence
+            $matched += [ordered]@{ name = $name; serverSequence = $lastMatchedServer }
+        }
+        if ($phase -ceq 'register')
+        {
+            $heights = @($ownerRows | Where-Object { $_.support.stairsTagged -eq $true } |
+                ForEach-Object { [Math]::Round([double]$_.support.impact[2], 1) } | Sort-Object -Unique)
+            Assert-Online ($heights.Count -ge 12 -and $peerUpperObserved -and
+                $walk.leaveFromUpperWithEntryAnchor -eq $true -and
+                (Test-OnlineCheck $client 'floor_walk_actual_round_trip')) 'floor_real_stair_steps_and_peer_required'
+        }
+        else
+        {
+            Assert-Online ($walk.entryPolicyRestored -eq $true -and
+                (Test-OnlineCheck $client 'floor_walk_entry_policy_restored') -and
+                [Math]::Abs([double]$walk.milestones[0].own.position[0]) -lt 600 -and
+                [Math]::Abs([double]$walk.milestones[0].own.position[1] + 1080) -lt 600) 'floor_relogin_entry_position'
+        }
+        $phaseEvidence[$role] = [ordered]@{ playerId = $playerId; matchedAuthorityMilestones = $matched;
+            normalMovementAndAuthority = $true; peerOwnerStateNotExposed = $true; profileUnchanged = $true }
+    }
+    if (-not $summary.Contains('floorWalk'))
+    {
+        $summary['floorWalk'] = [ordered]@{ status = 'running'; phases = [ordered]@{};
+            newTownGeometryActivated = $false; physicalLegacyStairWalk = $true }
+    }
+    $summary.floorWalk.phases[$phase] = $phaseEvidence
+}
+
 function Assert-OnlineClientReport($Report,[string]$Role,[string]$Phase,[bool]$Crash){
     Require-OnlineFields $Report @('movementCm','checkpoint','joinAttempts','hasSession','flowState') 'client_report_incomplete'
     Assert-Online ($Report.movementCm -ge 65) 'normal_movement_missing'
@@ -1053,6 +1326,9 @@ function Assert-OnlineServerObservation($ServerReport,$ClientReports){
     $observed=@($ServerReport.serverObservedPlayerIds|Sort-Object -CaseSensitive)
     $expected=@(@($ClientReports.client1.checkpoint.playerId,$ClientReports.client2.checkpoint.playerId)|Sort-Object -CaseSensitive)
     Assert-Online ($observed.Count -eq 2 -and @($observed|Select-Object -Unique).Count -eq 2 -and (Equal-Online $observed $expected)) 'server_simultaneous_player_ids_mismatch'
+    if($Scenario -ceq 'floor-walk'){
+        Assert-OnlineFloorWalkPhase $ServerReport $ClientReports
+    }
     if($Scenario -ceq 'unit4-legacy-services' -and $ClientReports.client1.mode -ceq 'register'){
         Assert-OnlineTownServicesServer $ServerReport $ClientReports
     }
@@ -1195,7 +1471,7 @@ function Wait-OnlineDrain([string]$Phase,$Server,$Clients,$Reports){
             # Wait within the existing drain deadline; only a signaled handle proves an exit code.
             if($null -ne $running -or -not $handle.WaitForExit(0)){$closed=$false;continue}
             $record.exitCode=$handle.ExitCode;Assert-Online ($null -ne $record.exitCode) 'client_exit_code_missing'
-            if($Scenario -ceq 'unit4-legacy-services'){$record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
+            if($Scenario -in @('unit4-legacy-services','floor-walk')){$record|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
             if(-not $record.forcedForScenario){Assert-Online ($record.exitCode -eq 0) 'client_terminal_exit_failed'}
         }
         $zero=$null -ne $report -and $report.networkMode -ceq 'dedicated' -and $report.localControllerCount -eq 0 -and @($report.profiles).Count -eq 0
@@ -1219,7 +1495,7 @@ function Quit-OnlineServer([string]$Phase,$Server){
     Assert-Online ($handle.WaitForExit(30000)) 'server_graceful_quit_timeout';$Server.exitCode=$handle.ExitCode
     Assert-Online ($null -ne $Server.exitCode) 'server_exit_code_missing'
     Assert-Online ($Server.exitCode -eq 0) 'server_graceful_exit_failed'
-    if($Scenario -ceq 'unit4-legacy-services'){$Server|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
+    if($Scenario -in @('unit4-legacy-services','floor-walk')){$Server|Add-Member -NotePropertyName exitedUtc -NotePropertyValue $handle.ExitTime.ToUniversalTime().ToString('o') -Force}
 }
 function Get-OnlineProtectedFiles{
     $items=@();$saved=Join-Path $script:FableProjectRoot 'Saved';$builds=Join-Path $script:FableProjectRoot 'Builds'
@@ -1291,7 +1567,7 @@ try{
         $summary.packagedClient=[ordered]@{executable=$clientExecutable;sha256=(Hash-Online $clientExecutable);isolatedUserDirectories=$true;usesEditorClient=$false}
     }
     foreach($path in @($serverExecutable,$clientExecutable)){Assert-Online (Test-Path -LiteralPath $path -PathType Leaf) 'editor_executable_missing'}
-    if($Scenario -ceq 'unit4-legacy-services'){Assert-Online (-not [string]::IsNullOrWhiteSpace($PackagedClientExecutable)) 'services_requires_packaged_clients'}
+    if($Scenario -in @('unit4-legacy-services','floor-walk')){Assert-Online (-not [string]::IsNullOrWhiteSpace($PackagedClientExecutable)) 'services_requires_packaged_clients'}
     $backendBefore=Read-OnlineBackendIdentity
     $summary.backendIdentity=[ordered]@{root=$backendLink.root;serverId=$backendBefore.serverId;databasePort=$backendBefore.databasePort;schema=$backendBefore.schema;containerName=$backendBefore.containerName;volume=$backendBefore.volume;composeProject=$backendBefore.composeProject;initialPid=$backendBefore.backendPid}
     $originalFiles=@(Get-OnlineProtectedFiles|ForEach-Object {[pscustomobject]@{path=$_.FullName;sha256=Hash-Online $_.FullName}})
@@ -1314,7 +1590,7 @@ try{
         $accounts[$role]=[ordered]@{name=('o'+[Guid]::NewGuid().ToString('N').Substring(0,24));password=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(30));initialClass=$(if($role -ceq 'client1'){1}else{2})}
     }
     $contextPath=Join-Path $privateFolder 'register-context.private.json'
-    $crashSecond=$Scenario -cnotin @('party-entry','party-isolation','unit4-legacy-services')
+    $crashSecond=$Scenario -cnotin @('party-entry','party-isolation','unit4-legacy-services','floor-walk')
     Write-OnlineJson $contextPath @{mode='register';scenario=$Scenario;offlineFailure=$true;crashRole=$(if($crashSecond){'client2'}else{''});accounts=$accounts}
     $stage='register-offline-failure';$clients=@{}
     foreach($role in @('client1','client2')){$clients[$role]=Start-OnlineValidationProcess $role 'register' $contextPath}
@@ -1382,6 +1658,54 @@ try{
     $shots=@();foreach($role in @('client1','client2')){$shots+=@(Assert-OnlineShots $reports[$role] 'login' 5)}
     $summary.phases.login=[ordered]@{status='passed';serverNetworkMode=$serverInitial.networkMode;serverLocalControllers=$serverInitial.localControllerCount;serverObservedPlayerIds=$drained.serverObservedPlayerIds;serverObservedIdsMatchCheckpoints=$true;serverDrained=$true;comparisons=$drained.comparisons;screenshots=$shots;resumeWalletItemsSummaryExact=$true;reports=@((Join-Path $runFolder 'login\client1.json'),(Join-Path $runFolder 'login\client2.json'));canonical=(Join-Path $runFolder 'login\canonical.json')}
     Quit-OnlineServer 'login' $server
+    if ($Scenario -ceq 'floor-walk')
+    {
+        # 레거시9회 실행과 별개인 새4회 실행을 원본 handle의 host UTC로 검증한다.
+        $walkClients = @($ownedProcesses | Where-Object role -IN @('client1','client2'))
+        $walkServers = @($ownedProcesses | Where-Object role -CEQ 'server')
+        Assert-Online ($ownedProcesses.Count -eq 6 -and $walkClients.Count -eq 4 -and $walkServers.Count -eq 2 -and
+            @($ownedProcesses | Where-Object { $_.forcedForScenario -or $_.cleanupForced -or
+                $null -eq $_.exitCode -or $_.exitCode -ne 0 }).Count -eq 0) 'floor_exact_four_clean_client_starts'
+        $walkTimeline = @()
+        foreach ($process in $ownedProcesses)
+        {
+            Require-OnlineFields $process @('startedUtc','exitedUtc') 'floor_exact_process_times_required'
+            $start = Online-UtcTicks $process.startedUtc
+            $finish = Online-UtcTicks $process.exitedUtc
+            Assert-Online ($finish -ge $start) 'floor_host_process_lifetime'
+            if ($process.role -cne 'server')
+            {
+                Assert-Online ($process.executable -ieq $clientExecutable) 'floor_actual_current_packaged_client'
+                $walkTimeline += @([pscustomobject]@{ ticks = $start; delta = 1 },
+                    [pscustomobject]@{ ticks = $finish; delta = -1 })
+            }
+        }
+        $walkActive = 0
+        $walkPeak = 0
+        foreach ($point in @($walkTimeline | Sort-Object ticks,delta))
+        {
+            $walkActive += $point.delta
+            $walkPeak = [Math]::Max($walkPeak, $walkActive)
+        }
+        Assert-Online ($walkActive -eq 0 -and $walkPeak -eq 2 -and $walkTimeline.Count -eq 8) 'floor_actual_two_client_peak'
+        foreach ($phase in @('register','login'))
+        {
+            Assert-Online (Equal-Online @($ownedProcesses | Where-Object phase -CEQ $phase |
+                ForEach-Object role | Sort-Object -CaseSensitive) @('client1','client2','server')) 'floor_phase_process_roles'
+        }
+        $walkFirst = @($walkServers | Where-Object phase -CEQ 'register')[0]
+        $walkSecond = @($walkServers | Where-Object phase -CEQ 'login')[0]
+        Assert-Online ((Online-UtcTicks $walkFirst.exitedUtc) -le (Online-UtcTicks $walkSecond.startedUtc)) 'floor_sequential_servers'
+        Assert-Online ($summary.floorWalk.status -ceq 'running' -and
+            $summary.floorWalk.phases.Contains('register') -and $summary.floorWalk.phases.Contains('login') -and
+            $summary.phases.login.resumeWalletItemsSummaryExact -eq $true -and
+            $summary.backendRestart.sameDatabaseIdentity -eq $true -and $summary.backendRestart.healthy -eq $true) 'floor_durable_restart_relogin'
+        $summary.floorWalk.actualPackagedClientStarts = 4
+        $summary.floorWalk.actualPackagedClientPeak = 2
+        $summary.floorWalk.actualSequentialEditorServers = 2
+        $summary.floorWalk.safeLeaveAndApiRestartFullProfileExact = $true
+        $summary.floorWalk.status = 'passed'
+    }
     if($Scenario -ceq 'unit4-legacy-services'){
         # 기존 register→안전 이탈→같은 DB API 재시작→두 계정 login을 그대로 사용한다.
         $clients=@($ownedProcesses|Where-Object role -IN @('client1','client2'))
