@@ -441,7 +441,7 @@ $summary = [ordered]@{
     executable = $executable
     executableSha256 = $executableHash
     outputScope = $outputScope
-    sourceNativeExpected = 91
+    sourceNativeExpected = 95
     nativeAutomationExecutedByThisRunner = $false
     fixtureExecutionPassed = $false
     actualVisualReviewPassed = $false
@@ -576,7 +576,7 @@ try
             if ((Read-RouteUiProperty $fixture 'runId') -cne $runId -or
                 (Read-RouteUiProperty $fixture 'processId') -ne $identity.pid -or
                 (Read-RouteUiProperty $fixture 'networkMode') -cne 'standalone' -or
-                (Read-RouteUiProperty $fixture 'sourceNativeExpected') -ne 91 -or
+                (Read-RouteUiProperty $fixture 'sourceNativeExpected') -ne 95 -or
                 (Read-RouteUiProperty $fixture 'visualReviewPassed') -isnot [bool] -or
                 (Read-RouteUiProperty $fixture 'visualReviewPassed') -ne $false -or
                 (Read-RouteUiProperty $reportedResolution 'width') -ne $resolution.width -or

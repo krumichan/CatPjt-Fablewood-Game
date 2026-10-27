@@ -1,4 +1,5 @@
 #include "FableTownCatalog.h"
+#include "FableTownOverlook.h"
 #include "FableRPGTypes.h"
 #include "Engine/World.h"
 
@@ -114,6 +115,9 @@ UFableTownCatalog::UFableTownCatalog()
     AddAnchor(Legacy, TEXT("Service.Forge"), TEXT("Ground"), {FableRPG::ForgeLocation()});
     AddAnchor(Legacy, TEXT("Service.Merchant"), TEXT("Ground"), {FableRPG::MerchantLocation()});
     AddAnchor(Legacy, TEXT("Portal.Expedition"), TEXT("Ground"), {FableRPG::PortalLocation()});
+    // 元のGround・Entry・サービスを保ち、東側の実階段だけを定義と接続する。
+    // 기존 Ground·Entry·서비스를 보존하고 동쪽 실제 계단만 정본에 연결한다.
+    ensureMsgf(FableTownOverlook::ExtendLegacyDefinition(Legacy), TEXT("Legacy overlook definition is invalid."));
     Definitions.Add(MoveTemp(Legacy));
 
     // #128 소스 후보 외곽만 반영하며 미승인/비활성 상태를 유지한다. / #128候補外形のみ反映し未承認・無効を維持する。

@@ -11,6 +11,7 @@
 #include "FablePlayerState.h"
 #include "FableTownManager.h"
 #include "FableTownCatalog.h"
+#include "FableTownOverlook.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Engine/Engine.h"
@@ -238,6 +239,27 @@ struct FFableExpeditionCombatTestAccess
 
 namespace
 {
+    /** 소유한 층 불일치 fixture에서만 새 전망대 부가 정의를 분리한다. / 所有する階不一致fixtureだけから新展望台を除く。 */
+    void RestoreGroundOnlyFixture(FFableTownDefinition& Definition)
+    {
+        Definition.Floors.RemoveAll(
+            [](const FFableTownFloorDefinition& Floor)
+            {
+                return Floor.FloorId == FableTownOverlook::FloorId();
+            });
+        Definition.Connectors.RemoveAll(
+            [](const FFableTownConnectorDefinition& Connector)
+            {
+                return Connector.ConnectorId == FableTownOverlook::ConnectorId();
+            });
+        Definition.Anchors.RemoveAll(
+            [](const FFableTownAnchorDefinition& Anchor)
+            {
+                return Anchor.AnchorId == FName(TEXT("Waypoint.Overlook"));
+            });
+        Definition.LocalBounds = Definition.Floors[0].LocalBounds;
+    }
+
     /** 검증 전용 연결과 프로필을 함께 보관한다. */
     struct FPartyTestPlayer
     {
@@ -2393,6 +2415,7 @@ bool FFableDepartureLiveFloorTest::RunTest(const FString& Parameters)
     {
         return false;
     }
+    RestoreGroundOnlyFixture(*Legacy);
     Legacy->Floors[0].LocalBounds.Max.Z = 499;
     FFableTownFloorDefinition Upper;
     Upper.FloorId = TEXT("TestUpper");
@@ -2491,6 +2514,7 @@ bool FFableDepartureLiveFloorTest::RunTest(const FString& Parameters)
     {
         return false;
     }
+    RestoreGroundOnlyFixture(*RetryLegacy);
     RetryLegacy->Floors[0].LocalBounds.Max.Z = 499;
     RetryLegacy->Floors.Add(Upper);
     FVector ReturnedUpper = ReturnedBefore;

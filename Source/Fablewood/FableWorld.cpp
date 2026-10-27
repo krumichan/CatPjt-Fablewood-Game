@@ -1,5 +1,6 @@
 #include "FableWorld.h"
 #include "FableRPGTypes.h"
+#include "FableTownOverlook.h"
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -550,13 +551,34 @@ void AFableWorld::BuildEnvironment()
         }
     }
 
-    // An invisible boundary keeps play inside the 60 m prototype.
+    // 기존 경계는 동쪽 계단 입구 폭만 열고 나머지 세 면과 동쪽 벽 구간은 보존한다.
+    // 従来境界は東階段の入口幅だけを開き、他の三面と東壁区間を保持する。
 
     // 위치·방향·거리 계산에 필요한 값 준비
     auto* Boundary = MakeBatch(TEXT("PrototypeBoundary"), CubeMesh, FLinearColor::Black, true);
     HideCollision(Boundary);
     Place(Boundary, FVector(-3010, 0, 1000), FVector(0.2f, 62, 22));
-    Place(Boundary, FVector(3010, 0, 1000), FVector(0.2f, 62, 22));
+    for (const FTransform& Section : FableTownOverlook::EastBoundarySections())
+    {
+        Place(Boundary, Section.GetTranslation(), Section.GetScale3D(), Section.Rotator());
+    }
     Place(Boundary, FVector(0, -3010, 1000), FVector(62, 0.2f, 22));
     Place(Boundary, FVector(0, 3010, 1000), FVector(62, 0.2f, 22));
+
+    // 표시와 충돌이 같은 단·발판·안전벽 배치를 사용하고 모든 peer의 component 경로를 고정한다.
+    // 表示と衝突に同じ段・上床・安全壁を使い、全peerのcomponent pathを固定する。
+    auto* OverlookStairs =
+        MakeBatch(FableTownOverlook::StairSupportTag(), CubeMesh, FLinearColor(0.45f, 0.39f, 0.29f), true);
+    auto* OverlookLanding =
+        MakeBatch(FableTownOverlook::LandingSupportTag(), CubeMesh, FLinearColor(0.51f, 0.46f, 0.34f), true);
+    auto* OverlookGuards =
+        MakeBatch(FableTownOverlook::GuardSupportTag(), CubeMesh, FLinearColor(0.35f, 0.31f, 0.25f), true);
+    for (const FFableTownOverlookBox& Box : FableTownOverlook::LayoutBoxes())
+    {
+        UInstancedStaticMeshComponent* Batch = Box.SupportTag == FableTownOverlook::StairSupportTag() ? OverlookStairs
+                                               : Box.SupportTag == FableTownOverlook::LandingSupportTag()
+                                                   ? OverlookLanding
+                                                   : OverlookGuards;
+        Place(Batch, Box.CubeTransform.GetTranslation(), Box.CubeTransform.GetScale3D(), Box.CubeTransform.Rotator());
+    }
 }

@@ -1,5 +1,6 @@
 #include "FableTownNavigation.h"
 #include "FableTownCatalog.h"
+#include "FableTownOverlook.h"
 #include "FableRPGTypes.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -8,10 +9,27 @@
 
 namespace
 {
-    /** 현재 채택된 마을을 값 복사한 합성 정의이며 실제 새 맵 로드가 아니다. */
+    /** 종전 Ground-only 범위를 복사한 합성 정의다. 제품 전망대는 별도 물리 검증에서 다룬다. */
     FFableTownDefinition NavigationFixture()
     {
-        return *GetDefault<UFableTownCatalog>()->FindTown(EFableTownId::LegacyVillage);
+        FFableTownDefinition Definition = *GetDefault<UFableTownCatalog>()->FindTown(EFableTownId::LegacyVillage);
+        Definition.Floors.RemoveAll(
+            [](const FFableTownFloorDefinition& Floor)
+            {
+                return Floor.FloorId == FableTownOverlook::FloorId();
+            });
+        Definition.Connectors.RemoveAll(
+            [](const FFableTownConnectorDefinition& Connector)
+            {
+                return Connector.ConnectorId == FableTownOverlook::ConnectorId();
+            });
+        Definition.Anchors.RemoveAll(
+            [](const FFableTownAnchorDefinition& Anchor)
+            {
+                return Anchor.AnchorId == FName(TEXT("Waypoint.Overlook"));
+            });
+        Definition.LocalBounds = Definition.Floors[0].LocalBounds;
+        return Definition;
     }
 }
 

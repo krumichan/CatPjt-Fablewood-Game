@@ -1,5 +1,6 @@
 #include "FableTownNavigation.h"
 #include "FableTownCatalog.h"
+#include "FableTownOverlook.h"
 #include "FableTownManager.h"
 #include "FablePlayerController.h"
 #include "FablePlayerState.h"
@@ -111,11 +112,26 @@ namespace
         bool AddUpperGuide(bool bRotate)
         {
             FFableTownDefinition* Definition = OwnLegacy();
-            if (!Definition)
+            const FFableTownDefinition* CanonicalLegacy =
+                GetDefault<UFableTownCatalog>()->FindTown(EFableTownId::LegacyVillage);
+            if (!Definition || !CanonicalLegacy || CanonicalLegacy->Floors.IsEmpty())
             {
                 return false;
             }
 
+            // 제품 전망대 대신 원래의 두 층 합성 범위만 검사한다. / 製品展望台ではなく元の二階fixtureだけを検証する。
+            // 반복 복원에서도 이미 축소한 합성 Ground 대신 불변 정본의 원래 범위를 사용한다.
+            Definition->LocalBounds = CanonicalLegacy->Floors[0].LocalBounds;
+            Definition->Anchors.RemoveAll(
+                [](const FFableTownAnchorDefinition& Anchor)
+                {
+                    return Anchor.AnchorId == FName(TEXT("Waypoint.Overlook"));
+                });
+            Definition->Connectors.RemoveAll(
+                [](const FFableTownConnectorDefinition& Connector)
+                {
+                    return Connector.ConnectorId == FableTownOverlook::ConnectorId();
+                });
             Definition->Floors.Empty();
             FFableTownFloorDefinition Ground;
             Ground.FloorId = TEXT("Ground");

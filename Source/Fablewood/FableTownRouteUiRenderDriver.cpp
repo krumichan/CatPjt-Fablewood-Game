@@ -8,6 +8,7 @@
 #include "FablePlayerState.h"
 #include "FableTownManager.h"
 #include "FableTownNavigation.h"
+#include "FableTownOverlook.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Dom/JsonObject.h"
@@ -329,6 +330,20 @@ bool UFableTownRouteUiRenderDriver::PrepareScene(FString& OutReason)
         return false;
     }
     bCatalogChanged = true;
+
+    // 원본과 서명을 보존한 뒤 소유 fixture에서만 새 전망대 부가 정의를 분리한다.
+    // 原本と署名を保存してから所有fixtureだけで新展望台の付加定義を除く。
+    Legacy->LocalBounds = Legacy->Floors[0].LocalBounds;
+    Legacy->Anchors.RemoveAll(
+        [](const FFableTownAnchorDefinition& Anchor)
+        {
+            return Anchor.AnchorId == FName(TEXT("Waypoint.Overlook"));
+        });
+    Legacy->Connectors.RemoveAll(
+        [](const FFableTownConnectorDefinition& Connector)
+        {
+            return Connector.ConnectorId == FableTownOverlook::ConnectorId();
+        });
 
     // 실제 상층 지형은 만들지 않으며 조회용 두 층과 연결만 정의한다. / 実上階を作らず照会用の階・接続だけを定義する。
     FFableTownFloorDefinition Ground;
@@ -843,7 +858,7 @@ void UFableTownRouteUiRenderDriver::Finish(bool bSuccess, const FString& Reason)
     Report->SetBoolField(TEXT("physicalFloorTraversalVerified"), false);
     Report->SetBoolField(TEXT("databaseVerificationClaimed"), false);
     Report->SetBoolField(TEXT("nativeTestsExecutedInThisProcess"), false);
-    Report->SetNumberField(TEXT("sourceNativeExpected"), 91);
+    Report->SetNumberField(TEXT("sourceNativeExpected"), 95);
     TSharedRef<FJsonObject> Resolution = MakeShared<FJsonObject>();
     Resolution->SetNumberField(TEXT("width"), Width);
     Resolution->SetNumberField(TEXT("height"), Height);
